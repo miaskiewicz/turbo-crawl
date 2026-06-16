@@ -19,6 +19,8 @@ const INPUT_SCHEMAS = {
   interactive_elements: { type: "object", properties: {} },
   accessibility_tree: { type: "object", properties: {} },
   markdown: { type: "object", properties: {} },
+  html: { type: "object", properties: {} },
+  text: { type: "object", properties: {} },
   links: { type: "object", properties: {} },
   click: { type: "object", properties: { i: { type: "number" } }, required: ["i"] },
   fill: {

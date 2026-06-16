@@ -33,6 +33,17 @@ export function buildTools(page) {
       handler: () => page.markdown(),
     },
     {
+      name: "html",
+      description:
+        "Return the page's serialized HTML (the rendered DOM behind the Playwright adapter).",
+      handler: () => page.html(),
+    },
+    {
+      name: "text",
+      description: "Return the page's plain text (no markup) with line breaks at block boundaries.",
+      handler: () => page.text(),
+    },
+    {
       name: "links",
       description: "Return all absolute http(s) link targets on the page.",
       handler: () => page.links(),

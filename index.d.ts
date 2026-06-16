@@ -63,6 +63,7 @@ export declare function interactiveElements(
 export declare function links(document: object, baseUrl?: string): string[];
 export declare function isVisible(el: object, window: object): boolean;
 export declare function markdown(document: object, baseUrl?: string): string;
+export declare function text(root: object): string;
 export interface AxNode {
   role: string;
   name?: string;
@@ -121,6 +122,8 @@ export declare class Page {
   interactiveElements(): InteractiveElement[];
   links(): string[];
   markdown(): string;
+  html(): string;
+  text(): string;
   accessibilityTree(): AxNode;
   extract(schema: Schema): object;
   click(i: number, opts?: FetchOptions): Promise<NavResult>;

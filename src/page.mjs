@@ -11,6 +11,7 @@ import { interactiveElements, links } from "./extract.mjs";
 import { markdown } from "./markdown.mjs";
 import { fetchHtml } from "./net.mjs";
 import { extractSchema } from "./schema.mjs";
+import { text } from "./text.mjs";
 import { isHttpUrl, resolve } from "./url.mjs";
 
 export class Page {
@@ -106,6 +107,25 @@ export class Page {
 
   links() {
     return links(this.document, this.#url);
+  }
+
+  /**
+   * Serialized HTML of the current DOM. In Lane A this is the fetched/parsed
+   * markup; behind the Playwright adapter (Lane B) it is the *rendered* DOM after
+   * the page's init JS has run — so an SPA shell comes back fully populated.
+   */
+  html() {
+    const root = this.document.documentElement;
+    const markup = root ? root.outerHTML : "";
+    return root && root.tagName === "HTML" ? `<!DOCTYPE html>\n${markup}` : markup;
+  }
+
+  /**
+   * Plain text of the page — no markup — with line breaks inserted at block-level
+   * DOM boundaries so structure survives as paragraphs (SPEC §7.2 sibling view).
+   */
+  text() {
+    return text(this.document);
   }
 
   markdown() {

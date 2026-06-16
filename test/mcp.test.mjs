@@ -27,6 +27,8 @@ describe("MCP handlers (Page API 1:1)", () => {
       "interactive_elements",
       "accessibility_tree",
       "markdown",
+      "html",
+      "text",
       "links",
       "click",
       "fill",

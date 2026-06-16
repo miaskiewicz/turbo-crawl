@@ -11,6 +11,7 @@ export { RobotsCache, parseRobots } from "./robots.mjs";
 export { interactiveElements, links } from "./extract.mjs";
 export { isVisible } from "./visible.mjs";
 export { markdown } from "./markdown.mjs";
+export { text } from "./text.mjs";
 export { accessibilityTree } from "./ax.mjs";
 export { buildSubmission, serializeForm, fillValue } from "./actions.mjs";
 export { resolve, isHttpUrl, canonicalize } from "./url.mjs";
