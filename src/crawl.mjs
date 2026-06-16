@@ -165,6 +165,7 @@ async function processItem(st, page, item) {
   st.active++;
   try {
     if (!(await allowedByRobots(st, item.url))) return false;
+    await resolvePoliteness(st, item.url, state);
     const res = await st.crawler._fetchOne(page, item, st, state, fallbackFor(st, page));
     if (!res) return false;
     if (st.produced >= st.o.maxPages) return true;
@@ -176,6 +177,23 @@ async function processItem(st, page, item) {
     state.inFlight--;
     st.active--;
   }
+}
+
+// Resolve a host's effective politeness delay once: max of the configured
+// politenessMs and any robots.txt Crawl-delay (seconds → ms). Cached on the
+// host state so robots is consulted at most once per host.
+async function resolvePoliteness(st, url, state) {
+  if (state.politenessMs !== undefined) return;
+  let ms = st.o.politenessMs;
+  if (st.o.robots?.crawlDelay) {
+    const cd = await st.o.robots.crawlDelay(new URL(url).origin, st.o.userAgent);
+    if (cd) ms = Math.max(ms, cd * 1000);
+  }
+  state.politenessMs = ms;
+}
+
+function politenessFor(st, state) {
+  return state.politenessMs ?? st.o.politenessMs;
 }
 
 function isDrained(st) {
@@ -207,14 +225,14 @@ async function gotoWithRetry(st, page, item, state) {
   while (true) {
     try {
       const nav = await page.goto(item.url);
-      state.nextAt = st.now() + st.o.politenessMs;
+      state.nextAt = st.now() + politenessFor(st, state);
       if (shouldRetryStatus(st, nav.status, attempt)) {
         attempt = await backoff(st, attempt);
         continue;
       }
       return { nav };
     } catch (err) {
-      state.nextAt = st.now() + st.o.politenessMs;
+      state.nextAt = st.now() + politenessFor(st, state);
       if (attempt < st.o.retryBudget) {
         attempt = await backoff(st, attempt);
         continue;

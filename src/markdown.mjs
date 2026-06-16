@@ -93,7 +93,36 @@ const BLOCK_TAGS = {
   HR(_node, _baseUrl, out) {
     out.push("---");
   },
+  TABLE(node, baseUrl, out) {
+    emitTable(node, baseUrl, out);
+  },
 };
+
+// One table row's cells as trimmed, pipe-escaped inline text.
+function rowCells(tr, baseUrl) {
+  const cells = tr.querySelectorAll("th,td");
+  const out = [];
+  for (let i = 0; i < cells.length; i++) {
+    out.push(childrenInline(cells[i], baseUrl).trim().replace(/\|/g, "\\|"));
+  }
+  return out;
+}
+
+// Append a row as a Markdown table line; after the first row, add the header rule.
+function appendRow(tr, baseUrl, lines) {
+  const cells = rowCells(tr, baseUrl);
+  if (!cells.length) return;
+  lines.push(`| ${cells.join(" | ")} |`);
+  if (lines.length === 1) lines.push(`| ${cells.map(() => "---").join(" | ")} |`);
+}
+
+// GitHub-flavored Markdown table (first <tr> treated as the header row).
+function emitTable(node, baseUrl, out) {
+  const rows = node.querySelectorAll("tr");
+  const lines = [];
+  for (let i = 0; i < rows.length; i++) appendRow(rows[i], baseUrl, lines);
+  if (lines.length) out.push(lines.join("\n"));
+}
 
 function blockContainer(node, baseUrl, out) {
   const kids = node.childNodes;

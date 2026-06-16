@@ -35,6 +35,16 @@ describe("markdown()", () => {
     assert.ok(!md.includes("should be dropped"));
     assert.ok(!md.includes("footer boilerplate"));
   });
+
+  it("renders tables as GitHub-flavored markdown", () => {
+    const t = createEnvironment(
+      `<body><table><tr><th>Name</th><th>Price</th></tr><tr><td>Widget</td><td>$9</td></tr></table></body>`,
+    );
+    const out = markdown(t.document, BASE).split("\n");
+    assert.equal(out[0], "| Name | Price |");
+    assert.equal(out[1], "| --- | --- |");
+    assert.equal(out[2], "| Widget | $9 |");
+  });
 });
 
 describe("accessibilityTree()", () => {

@@ -43,6 +43,24 @@ describe("CookieJar", () => {
     assert.equal(jar.cookieHeader("https://a.test/"), "");
   });
 
+  it("rejects SameSite=None without Secure (RFC 6265bis)", () => {
+    const jar = new CookieJar();
+    jar.setFromResponse("https://a.test/", ["x=1; SameSite=None"]);
+    assert.equal(jar.cookieHeader("https://a.test/"), "");
+    jar.setFromResponse("https://a.test/", ["y=2; SameSite=None; Secure"]);
+    assert.equal(jar.cookieHeader("https://a.test/"), "y=2");
+  });
+
+  it("cookieMap() returns name→value for the bridge", () => {
+    const jar = new CookieJar();
+    jar.setFromResponse("https://a.test/", ["a=1; Path=/", "b=2; Path=/sub"]);
+    assert.deepEqual([...jar.cookieMap("https://a.test/")], [["a", "1"]]);
+    assert.deepEqual([...jar.cookieMap("https://a.test/sub")].sort(), [
+      ["a", "1"],
+      ["b", "2"],
+    ]);
+  });
+
   it("drops cookies past Max-Age at send time", () => {
     const jar = new CookieJar();
     jar.setFromResponse("https://a.test/", ["k=v; Max-Age=10"], 1_000_000);

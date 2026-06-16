@@ -70,6 +70,28 @@ describe("Crawler", () => {
     assert.ok(urls.includes(`${H}/a`));
   });
 
+  it("applies robots Crawl-delay as per-host politeness", async () => {
+    let t = 0;
+    const robots = { allowed: async () => true, crawlDelay: async () => 5 }; // 5s
+    const slept = [];
+    const { c } = crawler({
+      concurrency: 1,
+      robots,
+      now: () => t,
+      sleep: async (ms) => {
+        slept.push(ms);
+        t += ms;
+      },
+    });
+    const recs = await collect(c);
+    assert.equal(recs.length, 5);
+    // between same-host fetches the worker must wait ~5000ms (crawl-delay), not 0
+    assert.ok(
+      slept.some((ms) => ms >= 5000),
+      `expected a 5000ms wait, got ${slept}`,
+    );
+  });
+
   it("includes the agent view and extracted schema", async () => {
     const { c } = crawler({
       maxPages: 1,

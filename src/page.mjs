@@ -87,6 +87,9 @@ export class Page {
   #load({ html, finalUrl, status }) {
     if (this.#env) this.#env.reset(html);
     else this.#env = createEnvironment(html);
+    // Bridge the session jar into the DOM so page-side document.cookie reads are
+    // consistent (turbo-dom nulls __cookieJar on reset, so re-attach each hop).
+    this.#env.document.__cookieJar = this.#jar.cookieMap(finalUrl);
     this.#url = finalUrl;
     this.#status = status;
     this.#snapshot = null;

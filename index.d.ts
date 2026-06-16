@@ -9,6 +9,7 @@ export interface FetchResult {
   finalUrl: string;
   status: number;
   headers: Headers;
+  redirected: boolean;
 }
 export interface FetchOptions {
   headers?: Record<string, string>;

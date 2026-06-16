@@ -35,6 +35,20 @@ describe("Page", () => {
     assert.ok(page.interactiveElements().some((e) => e.name === "Blue Widget"));
   });
 
+  it("bridges the session jar into document.cookie", async () => {
+    const { CookieJar } = await import("../src/cookies.mjs");
+    const jar = new CookieJar();
+    const page = new Page({
+      jar,
+      fetchHtml: async (url) => {
+        jar.setFromResponse(url, ["sess=1; Path=/"]);
+        return { html: "<body>x</body>", finalUrl: url, status: 200, headers: new Headers() };
+      },
+    });
+    await page.goto("https://a.test/");
+    assert.equal(page.document.cookie, "sess=1");
+  });
+
   it("reuses one env across hops (reset), reflecting the new page", async () => {
     const page = makePage();
     await page.goto(PAGE_ONE);

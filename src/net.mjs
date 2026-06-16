@@ -147,5 +147,8 @@ export async function fetchHtml(url, opts = {}) {
   gateHtmlType(opts, res);
 
   const html = await decodeBody(res, maxBytes);
-  return { html, finalUrl, status: res.status, headers: res.headers };
+  // `redirected` reflects whether undici followed any 3xx (capped at its default
+  // of 20 hops). A configurable cap + full hop list needs manual following — see
+  // SPEC §8; tracked for a follow-up.
+  return { html, finalUrl, status: res.status, headers: res.headers, redirected: !!res.redirected };
 }
