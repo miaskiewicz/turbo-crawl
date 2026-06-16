@@ -5,17 +5,20 @@
 > with no headless browser; 100×+ faster on server-rendered pages.
 
 turbo-crawl turns turbo-dom into a headless, agent-grade fetch/extract engine:
-indexed interactive elements, a link/form graph, an accessibility tree, a
-markdown view, and schema-driven structured extraction — plus an MCP interface
-agents drive directly. It is **a crawler, not a browser**: no pixels, no page
-JS, no layout. A Chromium fallback (Lane B) handles JS-gated pages behind the
-same API.
+indexed interactive elements, a link/form graph, an accessibility tree, markdown
+and plain-text views, rendered-HTML capture, CSS/XPath node queries, and
+schema-driven structured extraction — plus an MCP interface agents drive
+directly. It is **a crawler, not a browser**: no pixels, no page JS, no layout.
+A Chromium fallback (Lane B) handles JS-gated pages behind the same API.
 
 See [SPEC.md](./SPEC.md) for the full design and phase plan.
 
 Status: **alpha (v0)**. Phases 0–5 implemented: Page + interaction, networking
-(cookies/robots/charset/limits), crawl orchestration, structured extraction, the
-MCP server, and the optional Playwright (Lane B) adapter.
+(cookies incl. `document.cookie` bridge / robots + crawl-delay / charset /
+size + redirect caps), crawl orchestration, structured extraction, CSS+XPath
+query, the MCP server, and the optional Playwright (Lane B) adapter.
+**100% line coverage** (`npm run test:cov`); a Playwright differential test
+(SPEC §14) bounds representation drift when Chromium is installed.
 
 ## Install
 
@@ -33,9 +36,11 @@ import { Page } from "@miaskiewicz/turbo-crawl";
 const page = new Page();
 await page.goto("https://example.com");
 
-page.interactiveElements(); // [{ i, tag, role, name, href, visible, jsHandler, ... }]
+page.interactiveElements(); // [{ i, tag, role, name, href, visible, jsHandler, ref:WeakRef }]
 page.links();               // absolute http(s) targets
 page.markdown();            // readable Markdown of the main content
+page.text();                // plain text, line-broken at block boundaries
+page.html();                // serialized DOM (rendered DOM behind the Lane-B adapter)
 page.accessibilityTree();   // { role, name, value?, children }
 
 // no-JS form flow: fill → submit → follow a result
@@ -73,7 +78,8 @@ and depth/page caps are all built in.
 ## MCP server (agents)
 
 ```sh
-npx turbo-crawl-mcp          # stdio MCP server: goto, interactive_elements, click, extract, …
+npx turbo-crawl-mcp          # stdio MCP server: goto, interactive_elements, click, fill,
+                             # submit, extract, query, markdown, text, html, links, …
 ```
 
 Or embed: `import { createServer } from "@miaskiewicz/turbo-crawl/mcp"`.
@@ -93,12 +99,23 @@ A `Crawler` can auto-escalate shell-only pages via `{ fallback: playwrightFetche
 ## Development
 
 ```sh
-npm install        # also wires the pre-commit hook (oxlint + biome)
+npm install        # also wires the pre-commit hook (oxlint → biome → cc-check → tsgo)
 npm test           # node --test
+npm run test:cov   # coverage (src is 100% line-covered)
 npm run lint       # oxlint
 npm run format     # biome format --write
-npm run check      # lint + format:check + test (the CI gate)
+npm run cc         # cyclomatic-complexity gate (cc < 6)
+npm run typecheck  # tsgo typecheck of the public types
+npm run check      # lint + format:check + cc + typecheck + test (the CI gate)
+npm run bench      # extract + crawl throughput
 ```
+
+The differential test (`test/differential.test.mjs`, SPEC §14) compares output
+against a Chromium oracle; it auto-skips unless `playwright` and its browser are
+installed (`npm i -D playwright && npx playwright install chromium`).
+
+Benchmarks (Node 24, in-memory): full agent view ~2.5k pages/s, links ~18k/s,
+crawl ~14k pages/s with a flat heap.
 
 ## License
 

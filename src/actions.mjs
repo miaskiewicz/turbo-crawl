@@ -92,23 +92,52 @@ export function serializeForm(form, submitter) {
  * Build the navigation a form submit produces.
  * @returns {{ method:"GET"|"POST", url:string, body?:string, contentType?:string }}
  */
-function buildGet(actionUrl, params) {
+function buildGet(actionUrl, pairs) {
   const u = new URL(actionUrl);
-  u.search = params.toString();
+  u.search = new URLSearchParams(pairs).toString();
   return { method: "GET", url: u.href };
 }
 
-function buildPost(actionUrl, params) {
+function buildPost(actionUrl, pairs) {
   return {
     method: "POST",
     url: actionUrl,
-    body: params.toString(),
+    body: new URLSearchParams(pairs).toString(),
     contentType: "application/x-www-form-urlencoded",
+  };
+}
+
+let boundarySeq = 0;
+function makeBoundary() {
+  boundarySeq += 1;
+  return `----turboCrawlFormBoundary${boundarySeq}`;
+}
+
+function multipartPart(boundary, name, value) {
+  return `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`;
+}
+
+// multipart/form-data body for forms declaring enctype=multipart (SPEC §6).
+// Text controls only — file inputs can't be read without JS in Lane A.
+function buildMultipart(actionUrl, pairs) {
+  const boundary = makeBoundary();
+  let body = "";
+  for (const [name, value] of pairs) body += multipartPart(boundary, name, value);
+  body += `--${boundary}--\r\n`;
+  return {
+    method: "POST",
+    url: actionUrl,
+    body,
+    contentType: `multipart/form-data; boundary=${boundary}`,
   };
 }
 
 function formMethod(form) {
   return (form.getAttribute("method") || "GET").toUpperCase() === "POST" ? "POST" : "GET";
+}
+
+function isMultipart(form) {
+  return (form.getAttribute("enctype") || "").toLowerCase().includes("multipart");
 }
 
 function formActionUrl(form, baseUrl) {
@@ -117,7 +146,7 @@ function formActionUrl(form, baseUrl) {
 
 export function buildSubmission(form, baseUrl, submitter) {
   const actionUrl = formActionUrl(form, baseUrl);
-  const params = new URLSearchParams(serializeForm(form, submitter));
-
-  return formMethod(form) === "POST" ? buildPost(actionUrl, params) : buildGet(actionUrl, params);
+  const pairs = serializeForm(form, submitter);
+  if (formMethod(form) === "GET") return buildGet(actionUrl, pairs);
+  return isMultipart(form) ? buildMultipart(actionUrl, pairs) : buildPost(actionUrl, pairs);
 }

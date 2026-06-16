@@ -130,10 +130,62 @@ async function decodeBody(res, maxBytes) {
   return decode(bytes, detectCharset(res.headers, bytes.subarray(0, 1024)));
 }
 
-export async function fetchHtml(url, opts = {}) {
-  const doFetch = opts.fetch ?? fetch;
-  const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES;
+const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
 
+function redirectLocation(res) {
+  return REDIRECT_STATUS.has(res.status) ? res.headers.get("location") : null;
+}
+
+// Method after a redirect: 303 (and 301/302 on POST) become GET; 307/308 keep it.
+function nextMethod(status, method) {
+  if (status === 303) return "GET";
+  if ((status === 301 || status === 302) && method === "POST") return "GET";
+  return method;
+}
+
+// Compute the next hop's state after a redirect (URL + rewritten method/body).
+function advanceHop(state, res, loc) {
+  const method = nextMethod(res.status, state.method);
+  return {
+    current: new URL(loc, state.current).href,
+    method,
+    body: method === state.method ? state.body : undefined,
+  };
+}
+
+// One request in the manual-follow loop: returns { done } at a terminal response
+// (or the cap) else { next } with the following hop's state.
+async function redirectHop(doFetch, state, opts, redirects, maxRedirects) {
+  const headers = buildHeaders(state.current, { ...opts, method: state.method });
+  const res = await doFetch(state.current, {
+    method: state.method,
+    body: state.body,
+    redirect: "manual",
+    signal: opts.signal,
+    headers,
+  });
+  ingestSetCookie(opts, res, res.url || state.current);
+  const loc = redirectLocation(res);
+  if (!loc || redirects >= maxRedirects) {
+    return { done: { res, finalUrl: res.url || state.current, redirected: redirects > 0 } };
+  }
+  return { next: advanceHop(state, res, loc) };
+}
+
+// Manual redirect following with a hard hop cap (opts.maxRedirects). Re-derives
+// the Cookie header + Set-Cookie ingest per hop and rewrites method/body per the
+// fetch spec. Used only when the caller sets maxRedirects.
+async function followManually(doFetch, url, opts, maxRedirects) {
+  let state = { current: url, method: opts.method ?? "GET", body: opts.body };
+  for (let redirects = 0; ; redirects++) {
+    const step = await redirectHop(doFetch, state, opts, redirects, maxRedirects);
+    if (step.done) return step.done;
+    state = step.next;
+  }
+}
+
+// Single fetch delegating redirects to undici (default: cap 20).
+async function followAuto(doFetch, url, opts) {
   const res = await doFetch(url, {
     method: opts.method ?? "GET",
     body: opts.body,
@@ -142,13 +194,20 @@ export async function fetchHtml(url, opts = {}) {
     headers: buildHeaders(url, opts),
   });
   const finalUrl = res.url || url;
-
   ingestSetCookie(opts, res, finalUrl);
-  gateHtmlType(opts, res);
+  return { res, finalUrl, redirected: !!res.redirected };
+}
 
+export async function fetchHtml(url, opts = {}) {
+  const doFetch = opts.fetch ?? fetch;
+  const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES;
+
+  const { res, finalUrl, redirected } =
+    opts.maxRedirects != null
+      ? await followManually(doFetch, url, opts, opts.maxRedirects)
+      : await followAuto(doFetch, url, opts);
+
+  gateHtmlType(opts, res);
   const html = await decodeBody(res, maxBytes);
-  // `redirected` reflects whether undici followed any 3xx (capped at its default
-  // of 20 hops). A configurable cap + full hop list needs manual following — see
-  // SPEC §8; tracked for a follow-up.
-  return { html, finalUrl, status: res.status, headers: res.headers, redirected: !!res.redirected };
+  return { html, finalUrl, status: res.status, headers: res.headers, redirected };
 }

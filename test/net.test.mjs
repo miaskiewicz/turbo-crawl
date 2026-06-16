@@ -71,6 +71,35 @@ describe("fetchHtml hardening", () => {
     assert.match(html, /café/);
   });
 
+  it("follows redirects manually up to maxRedirects, then stops", async () => {
+    const chain = {
+      "https://s/a": { status: 302, loc: "https://s/b" },
+      "https://s/b": { status: 302, loc: "https://s/c" },
+      "https://s/c": { status: 200 },
+    };
+    const fetcher = async (url) => {
+      const s = chain[url];
+      const headers = new Headers({ "content-type": "text/html" });
+      if (s.loc) headers.set("location", s.loc);
+      return {
+        url,
+        status: s.status,
+        headers,
+        body: (async function* () {
+          yield new TextEncoder().encode(`<html>${url}</html>`);
+        })(),
+      };
+    };
+    const ok = await fetchHtml("https://s/a", { maxRedirects: 5, fetch: fetcher });
+    assert.equal(ok.finalUrl, "https://s/c");
+    assert.equal(ok.status, 200);
+    assert.equal(ok.redirected, true);
+
+    const capped = await fetchHtml("https://s/a", { maxRedirects: 1, fetch: fetcher });
+    assert.equal(capped.status, 302); // stopped at the cap, returns the 3xx
+    assert.equal(capped.finalUrl, "https://s/b");
+  });
+
   it("round-trips cookies through a jar", async () => {
     const jar = new CookieJar();
     await fetchHtml("https://a.test/", {

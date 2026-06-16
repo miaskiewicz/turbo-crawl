@@ -66,6 +66,22 @@ describe("buildSubmission", () => {
     assert.equal(sub.contentType, "application/x-www-form-urlencoded");
   });
 
+  it("builds multipart/form-data when enctype is multipart", () => {
+    const f = form(
+      `<form action="/up" method="post" enctype="multipart/form-data"><input name="t" value="hi"><input name="n" value="x"></form>`,
+    );
+    const sub = buildSubmission(f, BASE);
+    assert.equal(sub.method, "POST");
+    const boundary = /boundary=(.+)$/.exec(sub.contentType)[1];
+    assert.ok(boundary.length > 0);
+    assert.match(
+      sub.body,
+      new RegExp(`--${boundary}\\r\\nContent-Disposition: form-data; name="t"\\r\\n\\r\\nhi\\r\\n`),
+    );
+    assert.match(sub.body, /name="n"\r\n\r\nx\r\n/);
+    assert.ok(sub.body.endsWith(`--${boundary}--\r\n`));
+  });
+
   it("includes the activated submitter's name/value", () => {
     const f = form(
       `<form action="/s"><input name="q" value="x"><button name="act" value="save">Save</button></form>`,

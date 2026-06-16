@@ -18,6 +18,7 @@ export interface FetchOptions {
   signal?: AbortSignal;
   jar?: CookieJar;
   maxBytes?: number;
+  maxRedirects?: number;
   allowNonHtml?: boolean;
   fetch?: typeof fetch;
 }
