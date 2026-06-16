@@ -19,24 +19,31 @@
  * @param {object} window  turbo-dom window (for getComputedStyle)
  * @returns {boolean}
  */
+// display:none does not inherit — walk the ancestor chain. Each gcs() is memoized
+// per node on Document.__version, so shared ancestors resolve their cascade once.
+function hasDisplayNoneAncestor(el, gcs) {
+  let node = el;
+  while (node && node.nodeType === 1) {
+    if (gcs(node).getPropertyValue("display") === "none") return true;
+    node = node.parentNode;
+  }
+  return false;
+}
+
+// <input type="hidden"> is never visible.
+function isHiddenInput(el) {
+  return el.tagName === "INPUT" && el.getAttribute("type")?.toLowerCase() === "hidden";
+}
+
 export function isVisible(el, window) {
   if (el.getAttribute("hidden") !== null) return false;
   if (el.getAttribute("aria-hidden") === "true") return false;
-  if (el.tagName === "INPUT" && el.getAttribute("type")?.toLowerCase() === "hidden") {
-    return false;
-  }
+  if (isHiddenInput(el)) return false;
 
   const gcs = window.getComputedStyle;
 
   // visibility inherits, so one read on the element reflects ancestor hidden too.
   if (gcs(el).getPropertyValue("visibility") === "hidden") return false;
 
-  // display:none does not inherit — walk the ancestor chain. Each gcs() is memoized
-  // per node on Document.__version, so shared ancestors resolve their cascade once.
-  let node = el;
-  while (node && node.nodeType === 1) {
-    if (gcs(node).getPropertyValue("display") === "none") return false;
-    node = node.parentNode;
-  }
-  return true;
+  return !hasDisplayNoneAncestor(el, gcs);
 }

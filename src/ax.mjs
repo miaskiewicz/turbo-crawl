@@ -34,12 +34,19 @@ const IMPLICIT = {
   ARTICLE: "article",
 };
 
+// Implicit ARIA role for <input> keyed by `type`. `hidden` is an explicit null
+// (skipped from the tree); any other/unknown type falls back to "textbox".
+const INPUT_ROLE = {
+  checkbox: "checkbox",
+  radio: "radio",
+  button: "button",
+  submit: "button",
+  reset: "button",
+  hidden: null,
+};
+
 function inputRole(type) {
-  if (type === "checkbox") return "checkbox";
-  if (type === "radio") return "radio";
-  if (type === "button" || type === "submit" || type === "reset") return "button";
-  if (type === "hidden") return null;
-  return "textbox";
+  return type in INPUT_ROLE ? INPUT_ROLE[type] : "textbox";
 }
 
 function roleOf(el) {
@@ -59,40 +66,58 @@ function nameOf(el) {
   return text.replace(/\s+/g, " ").trim();
 }
 
-function valueOf(el) {
-  const tag = el.tagName;
-  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
-    const v = el.value;
-    return v == null || v === "" ? undefined : String(v);
-  }
-  return undefined;
+// Tags whose `.value` we surface in the tree.
+const VALUE_TAGS = new Set(["INPUT", "TEXTAREA", "SELECT"]);
+
+function isEmpty(v) {
+  return v == null || v === "";
 }
 
-function build(el) {
-  if (el.nodeType !== ELEMENT_NODE || SKIP.has(el.tagName)) return null;
-  if (el.getAttribute("aria-hidden") === "true") return null;
+function valueOf(el) {
+  if (!VALUE_TAGS.has(el.tagName)) return undefined;
+  const v = el.value;
+  return isEmpty(v) ? undefined : String(v);
+}
 
-  const role = roleOf(el);
+function isSkipped(el) {
+  if (el.nodeType !== ELEMENT_NODE) return true;
+  if (SKIP.has(el.tagName)) return true;
+  return el.getAttribute("aria-hidden") === "true";
+}
+
+// Recurse over element children, keeping only the non-null built subtrees.
+function buildChildren(el) {
   const children = [];
   const kids = el.children ?? [];
   for (let i = 0; i < kids.length; i++) {
     const node = build(kids[i]);
     if (node) children.push(node);
   }
+  return children;
+}
 
-  // Prune structurally-uninteresting wrappers: no role and no own contribution,
-  // collapse to their children so the tree stays compact.
-  if (!role) {
-    if (children.length === 1) return children[0];
-    if (children.length === 0) return null;
-    return { role: "generic", children };
-  }
+// Prune structurally-uninteresting wrappers: no role and no own contribution,
+// collapse to their children so the tree stays compact.
+function pruneRoleless(children) {
+  if (children.length === 1) return children[0];
+  if (children.length === 0) return null;
+  return { role: "generic", children };
+}
 
+function nodeFor(el, role, children) {
   const node = { role, name: nameOf(el) };
   const value = valueOf(el);
   if (value !== undefined) node.value = value;
   if (children.length) node.children = children;
   return node;
+}
+
+function build(el) {
+  if (isSkipped(el)) return null;
+  const role = roleOf(el);
+  const children = buildChildren(el);
+  if (!role) return pruneRoleless(children);
+  return nodeFor(el, role, children);
 }
 
 /**

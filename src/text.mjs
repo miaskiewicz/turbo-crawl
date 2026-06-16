@@ -66,6 +66,8 @@ function collapse(s) {
  * @param {object} root  turbo-dom Element or Document
  * @returns {string}
  */
+const CELL = new Set(["TD", "TH"]);
+
 export function text(root) {
   const node = root.querySelector ? (root.querySelector("body") ?? root) : root;
   const lines = [];
@@ -77,6 +79,29 @@ export function text(root) {
     cur = "";
   };
 
+  // Tags whose presence ends the current line outright (no child recursion).
+  const LEAF = {
+    BR: () => flush(),
+    HR: () => flush(),
+    PRE: (el) => {
+      flush();
+      const code = (el.textContent ?? "").replace(/\s+$/, "");
+      if (code) lines.push(code);
+    },
+  };
+
+  const walkElement = (el, tag) => {
+    const block = BLOCK.has(tag);
+    if (block) flush();
+
+    const kids = el.childNodes;
+    for (let i = 0; i < kids.length; i++) walk(kids[i]);
+
+    // Cells stay on their row's line, separated by a tab.
+    if (CELL.has(tag)) cur += "\t";
+    if (block) flush();
+  };
+
   const walk = (el) => {
     if (el.nodeType === TEXT_NODE) {
       cur += collapse(el.textContent);
@@ -86,30 +111,9 @@ export function text(root) {
     const tag = el.tagName;
     if (SKIP.has(tag)) return;
 
-    if (tag === "BR") {
-      flush();
-      return;
-    }
-    if (tag === "PRE") {
-      flush();
-      const code = (el.textContent ?? "").replace(/\s+$/, "");
-      if (code) lines.push(code);
-      return;
-    }
-    if (tag === "HR") {
-      flush();
-      return;
-    }
-
-    const block = BLOCK.has(tag);
-    if (block) flush();
-
-    const kids = el.childNodes;
-    for (let i = 0; i < kids.length; i++) walk(kids[i]);
-
-    // Cells stay on their row's line, separated by a tab.
-    if (tag === "TD" || tag === "TH") cur += "\t";
-    if (block) flush();
+    const leaf = LEAF[tag];
+    if (leaf) return leaf(el);
+    walkElement(el, tag);
   };
 
   walk(node);

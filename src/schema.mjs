@@ -25,43 +25,63 @@ function coerce(value, type) {
   return value;
 }
 
+// Per-`attr` raw-value readers. `text`/`html` are direct; anything else reads an
+// attribute (url-bearing attrs are absolutized in readNode).
+const ATTR_READERS = {
+  text: (el) => (el.textContent ?? "").replace(/\s+/g, " ").trim(),
+  html: (el) => el.innerHTML ?? "",
+};
+
+function readAttr(el, attr, baseUrl) {
+  const raw = el.getAttribute(attr);
+  if (raw != null && URL_ATTRS.has(attr)) return resolve(baseUrl, raw) ?? raw;
+  return raw;
+}
+
 function readNode(el, spec, baseUrl) {
   const attr = spec.attr ?? "text";
-  let raw;
-  if (attr === "text") raw = (el.textContent ?? "").replace(/\s+/g, " ").trim();
-  else if (attr === "html") raw = el.innerHTML ?? "";
-  else {
-    raw = el.getAttribute(attr);
-    if (raw != null && URL_ATTRS.has(attr)) raw = resolve(baseUrl, raw) ?? raw;
-  }
+  const reader = ATTR_READERS[attr];
+  const raw = reader ? reader(el) : readAttr(el, attr, baseUrl);
   return coerce(raw, spec.type);
 }
 
-function extractField(root, spec, baseUrl) {
-  // Nested object list: each selector match → an object of sub-fields.
-  if (spec.fields && spec.list) {
-    const items = spec.selector ? root.querySelectorAll(spec.selector) : [root];
-    const out = [];
-    for (let i = 0; i < items.length; i++) {
-      out.push(extractObject(items[i], spec.fields, baseUrl));
-    }
-    return apply(spec, out);
+// Nested object list: each selector match → an object of sub-fields.
+function extractObjectList(root, spec, baseUrl) {
+  const items = spec.selector ? root.querySelectorAll(spec.selector) : [root];
+  const out = [];
+  for (let i = 0; i < items.length; i++) {
+    out.push(extractObject(items[i], spec.fields, baseUrl));
   }
-  // Nested single object (relative selectors against the matched container).
-  if (spec.fields) {
-    const container = spec.selector ? root.querySelector(spec.selector) : root;
-    return apply(spec, container ? extractObject(container, spec.fields, baseUrl) : null);
-  }
-  // Scalar list.
-  if (spec.list) {
-    const nodes = root.querySelectorAll(spec.selector);
-    const out = [];
-    for (let i = 0; i < nodes.length; i++) out.push(readNode(nodes[i], spec, baseUrl));
-    return apply(spec, out);
-  }
-  // Single scalar.
+  return apply(spec, out);
+}
+
+// Nested single object (relative selectors against the matched container).
+function extractNestedObject(root, spec, baseUrl) {
+  const container = spec.selector ? root.querySelector(spec.selector) : root;
+  return apply(spec, container ? extractObject(container, spec.fields, baseUrl) : null);
+}
+
+// Scalar list.
+function extractScalarList(root, spec, baseUrl) {
+  const nodes = root.querySelectorAll(spec.selector);
+  const out = [];
+  for (let i = 0; i < nodes.length; i++) out.push(readNode(nodes[i], spec, baseUrl));
+  return apply(spec, out);
+}
+
+// Single scalar.
+function extractScalar(root, spec, baseUrl) {
   const el = spec.selector ? root.querySelector(spec.selector) : root;
   return apply(spec, el ? readNode(el, spec, baseUrl) : null);
+}
+
+function extractField(root, spec, baseUrl) {
+  if (spec.fields) {
+    return spec.list
+      ? extractObjectList(root, spec, baseUrl)
+      : extractNestedObject(root, spec, baseUrl);
+  }
+  return spec.list ? extractScalarList(root, spec, baseUrl) : extractScalar(root, spec, baseUrl);
 }
 
 function apply(spec, value) {

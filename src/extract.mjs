@@ -33,31 +33,39 @@ const IMPLICIT_ROLE = {
   textarea: "textbox",
 };
 
+// Implicit role for <input> keyed by its `type` (default → textbox).
+const INPUT_ROLE = {
+  checkbox: "checkbox",
+  radio: "radio",
+  button: "button",
+  submit: "button",
+  reset: "button",
+};
+
 function implicitRole(tag, type) {
-  if (tag === "input") {
-    if (type === "checkbox") return "checkbox";
-    if (type === "radio") return "radio";
-    if (type === "button" || type === "submit" || type === "reset") return "button";
-    return "textbox";
-  }
+  if (tag === "input") return INPUT_ROLE[type] ?? "textbox";
   return IMPLICIT_ROLE[tag] ?? "generic";
+}
+
+// First trimmed, non-empty string produced by one of the candidate getters.
+function firstNonEmpty(getters) {
+  for (const get of getters) {
+    const v = get();
+    const t = v == null ? "" : v.trim();
+    if (t) return t;
+  }
+  return "";
 }
 
 // Accessible name, cheap heuristic: aria-label > text > placeholder > value > title.
 function accessibleName(el) {
-  const aria = el.getAttribute("aria-label");
-  if (aria) return aria.trim();
-  const text = el.textContent;
-  if (text) {
-    const t = text.trim();
-    if (t) return t;
-  }
-  return (
-    el.getAttribute("placeholder")?.trim() ||
-    el.getAttribute("value")?.trim() ||
-    el.getAttribute("title")?.trim() ||
-    ""
-  );
+  return firstNonEmpty([
+    () => el.getAttribute("aria-label"),
+    () => el.textContent,
+    () => el.getAttribute("placeholder"),
+    () => el.getAttribute("value"),
+    () => el.getAttribute("title"),
+  ]);
 }
 
 /**
@@ -72,35 +80,50 @@ function accessibleName(el) {
  * @returns {Array<{i:number,tag:string,role:string,name:string,value?:string,
  *   href?:string,type?:string,visible:boolean,jsHandler:boolean,ref:object}>}
  */
+// Absolute href for an <a>; undefined for non-anchors or unresolvable targets.
+function hrefFor(el, tag, baseUrl) {
+  const rawHref = tag === "a" ? el.getAttribute("href") : null;
+  if (!rawHref) return undefined;
+  return resolve(baseUrl, rawHref) ?? undefined;
+}
+
+// Native navigation = <a href> or a submit control; anything else carrying an
+// onclick has a JS handler we cannot fire in Lane A → flag it, do not drop it.
+function jsHandlerFor(el, href, type) {
+  const nativeNav = href !== undefined || type === "submit";
+  return !nativeNav && el.getAttribute("onclick") !== null;
+}
+
+function nullToUndefined(v) {
+  return v ?? undefined;
+}
+
+// Build the `[i]`-addressable record for a single interactive element.
+function toRecord(el, i, baseUrl, window, checkVisible) {
+  const tag = el.tagName.toLowerCase();
+  const type = nullToUndefined(el.getAttribute("type")?.toLowerCase());
+  const href = hrefFor(el, tag, baseUrl);
+
+  return {
+    i,
+    tag,
+    role: el.getAttribute("role") ?? implicitRole(tag, type),
+    name: accessibleName(el),
+    value: nullToUndefined(el.getAttribute("value")),
+    href,
+    type,
+    visible: checkVisible ? isVisible(el, window) : true,
+    jsHandler: jsHandlerFor(el, href, type),
+    ref: el,
+  };
+}
+
 export function interactiveElements(document, baseUrl, window, options) {
   const checkVisible = window != null && options?.visibility !== false;
   const nodes = document.querySelectorAll(INTERACTIVE_SELECTOR);
   const out = [];
   for (let i = 0; i < nodes.length; i++) {
-    const el = nodes[i];
-    const tag = el.tagName.toLowerCase();
-    const type = el.getAttribute("type")?.toLowerCase() ?? undefined;
-
-    const rawHref = tag === "a" ? el.getAttribute("href") : null;
-    const href = rawHref ? (resolve(baseUrl, rawHref) ?? undefined) : undefined;
-
-    // Native navigation = <a href> or a submit control; anything else carrying an
-    // onclick has a JS handler we cannot fire in Lane A → flag it, do not drop it.
-    const nativeNav = href !== undefined || type === "submit";
-    const jsHandler = !nativeNav && el.getAttribute("onclick") !== null;
-
-    out.push({
-      i: out.length,
-      tag,
-      role: el.getAttribute("role") ?? implicitRole(tag, type),
-      name: accessibleName(el),
-      value: el.getAttribute("value") ?? undefined,
-      href,
-      type,
-      visible: checkVisible ? isVisible(el, window) : true,
-      jsHandler,
-      ref: el,
-    });
+    out.push(toRecord(nodes[i], out.length, baseUrl, window, checkVisible));
   }
   return out;
 }

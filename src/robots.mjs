@@ -5,6 +5,10 @@
 
 const DEFAULT_TTL_MS = 60 * 60 * 1000; // 1h
 
+function isOk(status) {
+  return status >= 200 && status < 300;
+}
+
 // Convert a robots path pattern to a matcher. `*` = any run, `$` = end anchor.
 function compile(pattern) {
   let re = "";
@@ -17,55 +21,88 @@ function compile(pattern) {
   return new RegExp(`^${re}`);
 }
 
+function parseLine(raw) {
+  const line = raw.replace(/#.*/, "").trim();
+  const i = line ? line.indexOf(":") : -1;
+  if (i < 0) return null;
+  return {
+    field: line.slice(0, i).trim().toLowerCase(),
+    value: line.slice(i + 1).trim(),
+  };
+}
+
+function handleUserAgent(state, value) {
+  if (!state.current || state.sawRuleSinceAgent) {
+    state.current = { agents: new Set(), rules: [], crawlDelay: undefined };
+    state.groups.push(state.current);
+    state.sawRuleSinceAgent = false;
+  }
+  state.current.agents.add(value.toLowerCase());
+}
+
+function handleRule(state, field, value) {
+  state.sawRuleSinceAgent = true;
+  if (field === "disallow" && value === "") return; // empty Disallow = allow all
+  state.current.rules.push({
+    allow: field === "allow",
+    pattern: value,
+    len: value.length,
+    re: compile(value),
+  });
+}
+
+function handleCrawlDelay(state, value) {
+  state.sawRuleSinceAgent = true;
+  const n = Number(value);
+  if (!Number.isNaN(n)) state.current.crawlDelay = n;
+}
+
+// Field handlers that require an open group (ignored before the first
+// User-agent line). Keyed by lowercased field name.
+const GROUP_FIELDS = {
+  allow: (state, value) => handleRule(state, "allow", value),
+  disallow: (state, value) => handleRule(state, "disallow", value),
+  "crawl-delay": handleCrawlDelay,
+};
+
+function applyField(state, field, value) {
+  if (field === "user-agent") return handleUserAgent(state, value);
+  const handler = GROUP_FIELDS[field];
+  if (handler && state.current) handler(state, value);
+}
+
 /** Parse robots.txt text into per-agent rule groups. */
 export function parseRobots(text) {
-  const groups = []; // { agents:Set, rules:[{allow, pattern, len, re}], crawlDelay }
-  let current = null;
-  let sawRuleSinceAgent = false;
-
+  // groups: { agents:Set, rules:[{allow, pattern, len, re}], crawlDelay }
+  const state = { groups: [], current: null, sawRuleSinceAgent: false };
   for (const raw of text.split(/\r?\n/)) {
-    const line = raw.replace(/#.*/, "").trim();
-    if (!line) continue;
-    const i = line.indexOf(":");
-    if (i < 0) continue;
-    const field = line.slice(0, i).trim().toLowerCase();
-    const value = line.slice(i + 1).trim();
-
-    if (field === "user-agent") {
-      if (!current || sawRuleSinceAgent) {
-        current = { agents: new Set(), rules: [], crawlDelay: undefined };
-        groups.push(current);
-        sawRuleSinceAgent = false;
-      }
-      current.agents.add(value.toLowerCase());
-    } else if (current && (field === "allow" || field === "disallow")) {
-      sawRuleSinceAgent = true;
-      if (field === "disallow" && value === "") continue; // empty Disallow = allow all
-      current.rules.push({
-        allow: field === "allow",
-        pattern: value,
-        len: value.length,
-        re: compile(value),
-      });
-    } else if (current && field === "crawl-delay") {
-      sawRuleSinceAgent = true;
-      const n = Number(value);
-      if (!Number.isNaN(n)) current.crawlDelay = n;
-    }
+    const parsed = parseLine(raw);
+    if (parsed) applyField(state, parsed.field, parsed.value);
   }
-  return groups;
+  return state.groups;
+}
+
+// Does this group's agent list contain a non-`*` token present in `want`?
+function groupMatchesUa(group, want) {
+  for (const a of group.agents) {
+    if (a !== "*" && want.includes(a)) return true; // token match (e.g. "turbo-crawl")
+  }
+  return false;
 }
 
 function pickGroup(groups, ua) {
   const want = ua.toLowerCase();
   let star = null;
   for (const g of groups) {
-    for (const a of g.agents) {
-      if (a === "*") star = star ?? g;
-      else if (want.includes(a)) return g; // token match (e.g. "turbo-crawl")
-    }
+    if (groupMatchesUa(g, want)) return g;
+    if (!star && g.agents.has("*")) star = g;
   }
   return star;
+}
+
+// Keep the longer (more specific) matching rule; ties keep the earlier one.
+function moreSpecific(best, r) {
+  return !best || r.len > best.len ? r : best;
 }
 
 /** Decide allow/deny for a path against a parsed group (longest match wins). */
@@ -73,7 +110,7 @@ function groupAllows(group, path) {
   if (!group) return true;
   let best = null;
   for (const r of group.rules) {
-    if (r.re.test(path) && (!best || r.len > best.len)) best = r;
+    if (r.re.test(path)) best = moreSpecific(best, r);
   }
   return best ? best.allow : true;
 }
@@ -93,17 +130,24 @@ export class RobotsCache {
     this.#ttl = opts.ttlMs ?? DEFAULT_TTL_MS;
   }
 
-  async #groupsFor(origin, now) {
-    const hit = this.#cache.get(origin);
-    if (hit && now - hit.fetchedAt < this.#ttl) return hit.groups;
-    let groups = [];
+  #isFresh(hit, now) {
+    return hit && now - hit.fetchedAt < this.#ttl;
+  }
+
+  async #fetchGroups(origin) {
     try {
       const { status, text } = await this.#fetchText(`${origin}/robots.txt`);
       // 4xx → allow all; 5xx/unreachable → conservative allow all (avoid stalling).
-      groups = status >= 200 && status < 300 ? parseRobots(text) : [];
+      return isOk(status) ? parseRobots(text) : [];
     } catch {
-      groups = [];
+      return [];
     }
+  }
+
+  async #groupsFor(origin, now) {
+    const hit = this.#cache.get(origin);
+    if (this.#isFresh(hit, now)) return hit.groups;
+    const groups = await this.#fetchGroups(origin);
     this.#cache.set(origin, { groups, fetchedAt: now });
     return groups;
   }

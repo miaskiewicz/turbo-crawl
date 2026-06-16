@@ -15,32 +15,42 @@ function collapse(s) {
   return s.replace(/\s+/g, " ");
 }
 
+function wrap(marker) {
+  return (inner) => (inner.trim() ? `${marker}${inner}${marker}` : "");
+}
+
+// Per-tag inline serializers. Each is its own small function (own cc budget).
+const INLINE_TAGS = {
+  A(node, baseUrl, inner) {
+    const href = resolve(baseUrl, node.getAttribute("href"));
+    return href ? `[${inner}](${href})` : inner;
+  },
+  STRONG: (_node, _baseUrl, inner) => wrap("**")(inner),
+  B: (_node, _baseUrl, inner) => wrap("**")(inner),
+  EM: (_node, _baseUrl, inner) => wrap("*")(inner),
+  I: (_node, _baseUrl, inner) => wrap("*")(inner),
+  CODE: (_node, _baseUrl, inner) => wrap("`")(inner),
+  BR: () => "\n",
+};
+
+function inlineText(node) {
+  return collapse(node.textContent ?? "");
+}
+
 // Inline serialization: text + emphasis + links + code, no block breaks.
 function inline(node, baseUrl) {
-  if (node.nodeType === TEXT_NODE) return collapse(node.textContent ?? "");
+  if (node.nodeType === TEXT_NODE) return inlineText(node);
   if (node.nodeType !== ELEMENT_NODE) return "";
   const tag = node.tagName;
   if (SKIP.has(tag)) return "";
 
   const inner = childrenInline(node, baseUrl);
-  switch (tag) {
-    case "A": {
-      const href = resolve(baseUrl, node.getAttribute("href"));
-      return href ? `[${inner}](${href})` : inner;
-    }
-    case "STRONG":
-    case "B":
-      return inner.trim() ? `**${inner}**` : "";
-    case "EM":
-    case "I":
-      return inner.trim() ? `*${inner}*` : "";
-    case "CODE":
-      return inner.trim() ? `\`${inner}\`` : "";
-    case "BR":
-      return "\n";
-    default:
-      return inner;
-  }
+  const handler = INLINE_TAGS[tag] || passthrough;
+  return handler(node, baseUrl, inner);
+}
+
+function passthrough(_node, _baseUrl, inner) {
+  return inner;
 }
 
 function childrenInline(node, baseUrl) {
@@ -50,60 +60,74 @@ function childrenInline(node, baseUrl) {
   return out;
 }
 
+function blockText(node, baseUrl, out) {
+  const t = collapse(node.textContent ?? "").trim();
+  if (t) out.push(t);
+}
+
+function blockHeading(node, baseUrl, out, tag) {
+  const text = childrenInline(node, baseUrl).trim();
+  if (text) out.push(`${HEADINGS[tag]} ${text}`);
+}
+
+// Per-tag block serializers. Each is its own small function (own cc budget).
+const BLOCK_TAGS = {
+  P(node, baseUrl, out) {
+    const text = childrenInline(node, baseUrl).trim();
+    if (text) out.push(text);
+  },
+  BLOCKQUOTE(node, baseUrl, out) {
+    const text = childrenInline(node, baseUrl).trim();
+    if (text) out.push(`> ${text}`);
+  },
+  PRE(node, _baseUrl, out) {
+    const code = (node.textContent ?? "").replace(/\n+$/, "");
+    if (code.trim()) out.push("```\n" + code + "\n```");
+  },
+  UL(node, baseUrl, out) {
+    emitList(node, baseUrl, out, false);
+  },
+  OL(node, baseUrl, out) {
+    emitList(node, baseUrl, out, true);
+  },
+  HR(_node, _baseUrl, out) {
+    out.push("---");
+  },
+};
+
+function blockContainer(node, baseUrl, out) {
+  const kids = node.childNodes;
+  for (let i = 0; i < kids.length; i++) block(kids[i], baseUrl, out);
+}
+
+// Resolve the serializer for an element tag (heading > tag table > container).
+function blockHandlerFor(tag) {
+  return HEADINGS[tag] ? blockHeading : BLOCK_TAGS[tag] || blockContainer;
+}
+
 // Block serialization: emit paragraph/heading/list/quote/code/table blocks.
 function block(node, baseUrl, out) {
-  if (node.nodeType === TEXT_NODE) {
-    const t = collapse(node.textContent ?? "").trim();
-    if (t) out.push(t);
-    return;
-  }
+  if (node.nodeType === TEXT_NODE) return blockText(node, baseUrl, out);
   if (node.nodeType !== ELEMENT_NODE) return;
   const tag = node.tagName;
   if (SKIP.has(tag)) return;
-
-  if (HEADINGS[tag]) {
-    const text = childrenInline(node, baseUrl).trim();
-    if (text) out.push(`${HEADINGS[tag]} ${text}`);
-    return;
-  }
-  switch (tag) {
-    case "P":
-    case "BLOCKQUOTE": {
-      const text = childrenInline(node, baseUrl).trim();
-      if (text) out.push(tag === "BLOCKQUOTE" ? `> ${text}` : text);
-      return;
-    }
-    case "PRE": {
-      const code = (node.textContent ?? "").replace(/\n+$/, "");
-      if (code.trim()) out.push("```\n" + code + "\n```");
-      return;
-    }
-    case "UL":
-    case "OL": {
-      emitList(node, baseUrl, out, tag === "OL");
-      return;
-    }
-    case "HR":
-      out.push("---");
-      return;
-    default: {
-      // Container: recurse into children for nested block content.
-      const kids = node.childNodes;
-      for (let i = 0; i < kids.length; i++) block(kids[i], baseUrl, out);
-    }
-  }
+  blockHandlerFor(tag)(node, baseUrl, out, tag);
 }
 
 function emitList(listNode, baseUrl, out, ordered) {
   const items = listNode.querySelectorAll("li");
   const lines = [];
   for (let i = 0; i < items.length; i++) {
-    // Only direct-child <li> of this list.
-    if (items[i].parentNode !== listNode) continue;
-    const text = childrenInline(items[i], baseUrl).trim();
-    if (text) lines.push(`${ordered ? `${lines.length + 1}.` : "-"} ${text}`);
+    appendListItem(items[i], listNode, baseUrl, lines, ordered);
   }
   if (lines.length) out.push(lines.join("\n"));
+}
+
+function appendListItem(item, listNode, baseUrl, lines, ordered) {
+  // Only direct-child <li> of this list.
+  if (item.parentNode !== listNode) return;
+  const text = childrenInline(item, baseUrl).trim();
+  if (text) lines.push(`${ordered ? `${lines.length + 1}.` : "-"} ${text}`);
 }
 
 /**

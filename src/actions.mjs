@@ -29,6 +29,51 @@ function controlValue(el) {
   return el.getAttribute("value") ?? "";
 }
 
+// Selected <option> [name,value] pairs for a <select> control.
+function selectPairs(el, name) {
+  const out = [];
+  const opts = el.querySelectorAll("option");
+  for (let j = 0; j < opts.length; j++) {
+    if (opts[j].selected) {
+      out.push([name, opts[j].getAttribute("value") ?? opts[j].textContent.trim()]);
+    }
+  }
+  return out;
+}
+
+function isSubmitControl(tag, type) {
+  return tag === "button" || (tag === "input" && SUBMIT_TYPES.has(type));
+}
+
+function isCheckable(tag, type) {
+  return tag === "input" && (type === "checkbox" || type === "radio");
+}
+
+// [name,value] pairs for a typed (non-submit/non-select) control.
+function typedPairs(el, name, tag, type) {
+  if (isCheckable(tag, type)) {
+    return el.checked ? [[name, el.getAttribute("value") ?? "on"]] : [];
+  }
+  if (tag === "select") return selectPairs(el, name);
+  return [[name, controlValue(el)]];
+}
+
+// Classify one control into its successful [name,value] pairs (possibly none).
+// Mirrors the HTML successful-controls rules; `submitter` is the activated button.
+function controlPairs(el, submitter) {
+  const name = el.getAttribute("name");
+  if (!name || el.getAttribute("disabled") !== null) return [];
+
+  const tag = el.tagName.toLowerCase();
+  const type = el.getAttribute("type")?.toLowerCase();
+
+  if (isSubmitControl(tag, type)) {
+    // Only the activated submitter is successful.
+    return el === submitter ? [[name, controlValue(el)]] : [];
+  }
+  return typedPairs(el, name, tag, type);
+}
+
 /**
  * Collect a form's *successful controls* (HTML form-submission subset) as
  * [name, value] pairs. `submitter` (the activated submit button), if given and
@@ -38,33 +83,7 @@ export function serializeForm(form, submitter) {
   const pairs = [];
   const controls = form.elements ?? form.querySelectorAll("input,select,textarea,button");
   for (let i = 0; i < controls.length; i++) {
-    const el = controls[i];
-    const name = el.getAttribute("name");
-    if (!name) continue;
-    if (el.getAttribute("disabled") !== null) continue;
-
-    const tag = el.tagName.toLowerCase();
-    const type = el.getAttribute("type")?.toLowerCase();
-
-    if (tag === "button" || (tag === "input" && SUBMIT_TYPES.has(type))) {
-      // Only the activated submitter is successful.
-      if (el === submitter) pairs.push([name, controlValue(el)]);
-      continue;
-    }
-    if (tag === "input" && (type === "checkbox" || type === "radio")) {
-      if (el.checked) pairs.push([name, el.getAttribute("value") ?? "on"]);
-      continue;
-    }
-    if (tag === "select") {
-      const opts = el.querySelectorAll("option");
-      for (let j = 0; j < opts.length; j++) {
-        if (opts[j].selected) {
-          pairs.push([name, opts[j].getAttribute("value") ?? opts[j].textContent.trim()]);
-        }
-      }
-      continue;
-    }
-    pairs.push([name, controlValue(el)]);
+    for (const pair of controlPairs(controls[i], submitter)) pairs.push(pair);
   }
   return pairs;
 }
@@ -73,21 +92,32 @@ export function serializeForm(form, submitter) {
  * Build the navigation a form submit produces.
  * @returns {{ method:"GET"|"POST", url:string, body?:string, contentType?:string }}
  */
-export function buildSubmission(form, baseUrl, submitter) {
-  const method = (form.getAttribute("method") || "GET").toUpperCase() === "POST" ? "POST" : "GET";
-  const action = form.getAttribute("action");
-  const actionUrl = resolve(baseUrl, action ?? "") ?? baseUrl;
-  const params = new URLSearchParams(serializeForm(form, submitter));
+function buildGet(actionUrl, params) {
+  const u = new URL(actionUrl);
+  u.search = params.toString();
+  return { method: "GET", url: u.href };
+}
 
-  if (method === "GET") {
-    const u = new URL(actionUrl);
-    u.search = params.toString();
-    return { method, url: u.href };
-  }
+function buildPost(actionUrl, params) {
   return {
-    method,
+    method: "POST",
     url: actionUrl,
     body: params.toString(),
     contentType: "application/x-www-form-urlencoded",
   };
+}
+
+function formMethod(form) {
+  return (form.getAttribute("method") || "GET").toUpperCase() === "POST" ? "POST" : "GET";
+}
+
+function formActionUrl(form, baseUrl) {
+  return resolve(baseUrl, form.getAttribute("action") ?? "") ?? baseUrl;
+}
+
+export function buildSubmission(form, baseUrl, submitter) {
+  const actionUrl = formActionUrl(form, baseUrl);
+  const params = new URLSearchParams(serializeForm(form, submitter));
+
+  return formMethod(form) === "POST" ? buildPost(actionUrl, params) : buildGet(actionUrl, params);
 }

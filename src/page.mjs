@@ -14,6 +14,14 @@ import { extractSchema } from "./schema.mjs";
 import { text } from "./text.mjs";
 import { isHttpUrl, resolve } from "./url.mjs";
 
+// A click activates a form submit when the element is a submit input or a
+// <button> that is not an explicit type="button".
+function isSubmitControl(el) {
+  const type = el.getAttribute("type")?.toLowerCase();
+  const tag = el.tagName.toLowerCase();
+  return type === "submit" || (tag === "button" && type !== "button");
+}
+
 export class Page {
   #env = null;
   #fetchHtml;
@@ -163,9 +171,7 @@ export class Page {
     if (rec.href) return this.goto(rec.href, opts);
 
     const el = rec.ref;
-    const type = el.getAttribute("type")?.toLowerCase();
-    const tag = el.tagName.toLowerCase();
-    if (type === "submit" || (tag === "button" && type !== "button")) {
+    if (isSubmitControl(el)) {
       const form = el.closest("form");
       if (form) return this.#submitForm(form, el, opts);
     }
