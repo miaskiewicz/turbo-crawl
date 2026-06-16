@@ -1,0 +1,45 @@
+# ---- Node / npm ----
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+
+# ---- Build / dist ----
+/dist
+/build
+*.tsbuildinfo
+
+# ---- Coverage / test output ----
+/coverage
+*.lcov
+lcov.info
+test-results/
+playwright-report/
+
+# ---- Benchmark output ----
+/bench/**/results/
+*.bench.json
+
+# ---- npm publish artifacts / personal cheat sheets ----
+*.tgz
+NPM-PUBLISH-*.md
+
+# ---- Env / secrets ----
+.env
+.env.*
+!.env.example
+*.pem
+
+# ---- Editors / OS ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*~
+
+# ---- Claude Code local state / agent worktrees ----
+.claude/

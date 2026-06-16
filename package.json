@@ -1,0 +1,90 @@
+{
+  "name": "@miaskiewicz/turbo-crawl",
+  "version": "0.0.0",
+  "description": "Native-speed, browserless web crawler for AI agents — fetch + parse + extract on turbo-dom, no headless browser. Indexed interactive elements, link graph, accessibility tree, markdown, structured extraction, and an MCP interface.",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/index.mjs",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./src/index.mjs"
+    },
+    "./mcp": {
+      "import": "./mcp/server.mjs"
+    },
+    "./adapters/playwright": {
+      "import": "./adapters/playwright.mjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "turbo-crawl-mcp": "mcp/server.mjs"
+  },
+  "files": [
+    "src/**/*.mjs",
+    "mcp/**/*.mjs",
+    "adapters/**/*.mjs",
+    "index.d.ts",
+    "LICENSE",
+    "README.md",
+    "SPEC.md"
+  ],
+  "scripts": {
+    "test": "node --test 'test/*.test.mjs'",
+    "test:cov": "node --test --experimental-test-coverage --test-coverage-include='src/**' 'test/*.test.mjs'",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "check": "npm run lint && npm run format:check && npm test",
+    "bench": "node bench/extract.mjs && node bench/crawl.mjs",
+    "bench:extract": "node bench/extract.mjs",
+    "bench:crawl": "node bench/crawl.mjs",
+    "prepare": "git config core.hooksPath .githooks || true"
+  },
+  "keywords": [
+    "crawler",
+    "scraper",
+    "web-crawler",
+    "agent",
+    "llm",
+    "mcp",
+    "turbo-dom",
+    "headless",
+    "browserless",
+    "extraction",
+    "fast"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/miaskiewicz/turbo-crawl.git"
+  },
+  "homepage": "https://github.com/miaskiewicz/turbo-crawl#readme",
+  "bugs": {
+    "url": "https://github.com/miaskiewicz/turbo-crawl/issues"
+  },
+  "author": "miaskiewicz",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@miaskiewicz/turbo-dom": "^0.2.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "undici": "^6.0.0",
+    "zod": "^4.4.3"
+  },
+  "peerDependencies": {
+    "playwright": ">=1.40"
+  },
+  "peerDependenciesMeta": {
+    "playwright": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.0",
+    "oxlint": "^0.11.0"
+  }
+}

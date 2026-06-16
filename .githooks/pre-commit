@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# turbo-crawl pre-commit gate (pure ESM JS).
+#   JS : oxlint (lint) -> biome (format, auto-fix + re-stage)
+# Enable once with:  git config core.hooksPath .githooks  (or: npm install / npm run prepare)
+set -uo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT" || exit 1
+
+status=0
+fail() { echo "  ✖ $1"; status=1; }
+
+# --- collect staged files (added/copied/modified) ---
+staged="$(git diff --cached --name-only --diff-filter=ACM)"
+js_files="$(echo "$staged"  | grep -E '\.(mjs|js|cjs)$'         || true)"
+fmt_files="$(echo "$staged" | grep -E '\.(mjs|js|cjs|json|jsonc)$' || true)"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+runjs() { if have npx; then npx --no-install "$@"; else return 127; fi; }
+
+if [ -n "$js_files" ] || [ -n "$fmt_files" ]; then
+  echo "• JS gates"
+
+  # 1. oxlint
+  if [ -n "$js_files" ]; then
+    runjs oxlint $js_files || fail "oxlint reported problems"
+  fi
+
+  # 2. biome format (auto-fix, then re-stage)
+  if [ -n "$fmt_files" ]; then
+    if runjs biome format --write $fmt_files; then
+      echo "$fmt_files" | xargs git add
+    else
+      fail "biome formatting failed"
+    fi
+  fi
+fi
+
+if [ "$status" -ne 0 ]; then
+  echo "✖ pre-commit gate failed. Fix the above and re-commit."
+fi
+exit "$status"
