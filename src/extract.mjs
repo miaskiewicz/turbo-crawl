@@ -78,7 +78,7 @@ function accessibleName(el) {
  *   cascade-based visibility pass (the hot-path cost is getComputedStyle); every
  *   record is then reported `visible:true`. Use when the caller doesn't read it.
  * @returns {Array<{i:number,tag:string,role:string,name:string,value?:string,
- *   href?:string,type?:string,visible:boolean,jsHandler:boolean,ref:object}>}
+ *   href?:string,type?:string,visible:boolean,jsHandler:boolean,ref:WeakRef}>}
  */
 // Absolute href for an <a>; undefined for non-anchors or unresolvable targets.
 function hrefFor(el, tag, baseUrl) {
@@ -114,7 +114,9 @@ function toRecord(el, i, baseUrl, window, checkVisible) {
     type,
     visible: checkVisible ? isVisible(el, window) : true,
     jsHandler: jsHandlerFor(el, href, type),
-    ref: el,
+    // WeakRef (SPEC §7.1): the snapshot doesn't pin DOM nodes; the action layer
+    // derefs and errors on a stale handle (e.g. used after a navigation).
+    ref: new WeakRef(el),
   };
 }
 

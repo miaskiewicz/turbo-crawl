@@ -54,7 +54,7 @@ export interface InteractiveElement {
   type?: string;
   visible: boolean;
   jsHandler: boolean;
-  ref: object;
+  ref: WeakRef<object>;
 }
 export declare function interactiveElements(
   document: object,

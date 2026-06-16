@@ -39,6 +39,12 @@ describe("interactiveElements()", () => {
     els.forEach((e, idx) => assert.equal(e.i, idx));
   });
 
+  it("exposes ref as a WeakRef to the live element (SPEC §7.1)", () => {
+    const blue = byName("Blue Widget");
+    assert.ok(blue.ref instanceof WeakRef);
+    assert.equal(blue.ref.deref().getAttribute("href"), "/products/1");
+  });
+
   it("resolves link hrefs to absolute URLs", () => {
     const blue = byName("Blue Widget");
     assert.equal(blue.tag, "a");

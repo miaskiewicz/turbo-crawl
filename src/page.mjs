@@ -176,6 +176,14 @@ export class Page {
     return rec;
   }
 
+  // Deref a record's WeakRef to the live node; throws if it was collected (stale
+  // snapshot, e.g. used after a navigation reset the env).
+  #node(rec) {
+    const el = rec.ref.deref();
+    if (!el) throw new Error("turbo-crawl: stale element handle (re-query after navigation)");
+    return el;
+  }
+
   /**
    * Activate element `i`. Links → navigate. Submit controls → submit the owning
    * form. Inert (jsHandler) elements throw — surface honestly (SPEC §6).
@@ -184,7 +192,7 @@ export class Page {
     const rec = this.#record(i);
     if (rec.href) return this.goto(rec.href, opts);
 
-    const el = rec.ref;
+    const el = this.#node(rec);
     if (isSubmitControl(el)) {
       const form = el.closest("form");
       if (form) return this.#submitForm(form, el, opts);
@@ -196,7 +204,7 @@ export class Page {
 
   /** Set the value of form control `i` in the COW overlay (no navigation). */
   fill(i, value) {
-    fillValue(this.#record(i).ref, value);
+    fillValue(this.#node(this.#record(i)), value);
     return { ok: true };
   }
 
@@ -210,7 +218,7 @@ export class Page {
     if (i === undefined) {
       form = this.document.querySelector("form");
     } else {
-      const el = this.#record(i).ref;
+      const el = this.#node(this.#record(i));
       form = el.closest("form");
       const type = el.getAttribute("type")?.toLowerCase();
       if (type === "submit" || el.tagName.toLowerCase() === "button") submitter = el;
