@@ -66,10 +66,14 @@ function accessibleName(el) {
  * @param {object} document  turbo-dom Document
  * @param {string} [baseUrl] absolute URL of the page, for resolving hrefs
  * @param {object} [window]  turbo-dom window; when given, `visible` is cascade-derived
+ * @param {{visibility?:boolean}} [options]  set `visibility:false` to skip the
+ *   cascade-based visibility pass (the hot-path cost is getComputedStyle); every
+ *   record is then reported `visible:true`. Use when the caller doesn't read it.
  * @returns {Array<{i:number,tag:string,role:string,name:string,value?:string,
  *   href?:string,type?:string,visible:boolean,jsHandler:boolean,ref:object}>}
  */
-export function interactiveElements(document, baseUrl, window) {
+export function interactiveElements(document, baseUrl, window, options) {
+  const checkVisible = window != null && options?.visibility !== false;
   const nodes = document.querySelectorAll(INTERACTIVE_SELECTOR);
   const out = [];
   for (let i = 0; i < nodes.length; i++) {
@@ -93,7 +97,7 @@ export function interactiveElements(document, baseUrl, window) {
       value: el.getAttribute("value") ?? undefined,
       href,
       type,
-      visible: window ? isVisible(el, window) : true,
+      visible: checkVisible ? isVisible(el, window) : true,
       jsHandler,
       ref: el,
     });

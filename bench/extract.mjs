@@ -59,6 +59,10 @@ bench("parse + interactiveElements", (html, i) => {
   const env = createEnvironment(html);
   interactiveElements(env.document, `https://shop.test/c/${i}`, env.window);
 });
+bench("parse + interactiveElements (no vis)", (html, i) => {
+  const env = createEnvironment(html);
+  interactiveElements(env.document, `https://shop.test/c/${i}`, env.window, { visibility: false });
+});
 bench("parse + links", (html, i) => {
   const env = createEnvironment(html);
   links(env.document, `https://shop.test/c/${i}`);
