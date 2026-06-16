@@ -62,6 +62,26 @@ export declare function interactiveElements(
   window?: object,
 ): InteractiveElement[];
 export declare function links(document: object, baseUrl?: string): string[];
+
+export interface QueryResult {
+  node: object | null;
+  html: string | null;
+  text: string;
+  value?: string;
+}
+export interface QueryOptions {
+  type?: "auto" | "css" | "xpath";
+  first?: boolean;
+}
+export declare function query(
+  root: object,
+  selector: string,
+  opts?: QueryOptions,
+): QueryResult[] | QueryResult | null;
+export declare function evaluateXPath(
+  root: object,
+  expr: string,
+): { nodes: object[] } | { values: string[] };
 export declare function isVisible(el: object, window: object): boolean;
 export declare function markdown(document: object, baseUrl?: string): string;
 export declare function text(root: object): string;
@@ -127,6 +147,7 @@ export declare class Page {
   text(): string;
   accessibilityTree(): AxNode;
   extract(schema: Schema): object;
+  query(selector: string, opts?: QueryOptions): QueryResult[] | QueryResult | null;
   click(i: number, opts?: FetchOptions): Promise<NavResult>;
   fill(i: number, value: unknown): { ok: true };
   submit(i?: number, opts?: FetchOptions): Promise<NavResult>;

@@ -44,6 +44,11 @@ page.fill(q.i, "widgets");
 await page.submit();
 await page.click(page.interactiveElements().find((e) => e.tag === "a").i);
 
+// query nodes by CSS or XPath → { node, html, text }
+page.query(".product .price");                 // CSS
+page.query("//a[@href]/@href");                // XPath (subset) → attribute values
+page.query("//li[contains(text(),'sale')]", { first: true });
+
 // structured extraction
 const data = page.extract({
   name: { selector: "h1" },

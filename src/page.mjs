@@ -10,6 +10,7 @@ import { CookieJar } from "./cookies.mjs";
 import { interactiveElements, links } from "./extract.mjs";
 import { markdown } from "./markdown.mjs";
 import { fetchHtml } from "./net.mjs";
+import { query } from "./query.mjs";
 import { extractSchema } from "./schema.mjs";
 import { text } from "./text.mjs";
 import { isHttpUrl, resolve } from "./url.mjs";
@@ -154,6 +155,16 @@ export class Page {
   /** Structured extraction against a selector-bound schema (SPEC §7.4). */
   extract(schema) {
     return extractSchema(this.document, schema, this.#url);
+  }
+
+  /**
+   * Query the page by CSS selector or XPath; returns the matched subtree(s) as
+   * `{ node, html, text }` (XPath `@attr` steps yield `{ value }`).
+   * @param {string} selector  CSS selector or XPath expression
+   * @param {{type?:"auto"|"css"|"xpath", first?:boolean}} [opts]
+   */
+  query(selector, opts) {
+    return query(this.document, selector, opts);
   }
 
   // --- interaction (SPEC §6) ------------------------------------------------

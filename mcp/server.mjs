@@ -30,6 +30,15 @@ const INPUT_SCHEMAS = {
   },
   submit: { type: "object", properties: { i: { type: "number" } } },
   extract: { type: "object", properties: { schema: { type: "object" } }, required: ["schema"] },
+  query: {
+    type: "object",
+    properties: {
+      selector: { type: "string" },
+      type: { type: "string", enum: ["auto", "css", "xpath"] },
+      first: { type: "boolean" },
+    },
+    required: ["selector"],
+  },
 };
 
 /**

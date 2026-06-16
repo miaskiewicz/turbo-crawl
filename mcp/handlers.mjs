@@ -4,6 +4,17 @@
 // Each handler returns a plain JSON-able result; the SDK layer wraps it as tool
 // output. A handler throwing surfaces as an MCP tool error.
 
+// Drop the live DOM `node` from query results — it isn't JSON-serializable.
+function stripNodes(result) {
+  if (Array.isArray(result)) return result.map(stripNodes);
+  if (result && typeof result === "object" && "node" in result) {
+    const rest = { ...result };
+    delete rest.node;
+    return rest;
+  }
+  return result;
+}
+
 /**
  * Build the tool table for a Page (or a managed pool exposing the Page API).
  * @param {import('../src/page.mjs').Page} page
@@ -70,6 +81,12 @@ export function buildTools(page) {
       description:
         "Extract structured JSON from the page against a selector-bound schema. Returns the object.",
       handler: ({ schema }) => page.extract(schema),
+    },
+    {
+      name: "query",
+      description:
+        "Query nodes by CSS selector or XPath; returns matched subtree(s) as { html, text } (node ref omitted over MCP). type: auto|css|xpath, first: boolean.",
+      handler: ({ selector, type, first }) => stripNodes(page.query(selector, { type, first })),
     },
   ];
 }

@@ -19,3 +19,5 @@ export { Crawler } from "./crawl.mjs";
 export { Frontier } from "./frontier.mjs";
 export { extractSchema } from "./schema.mjs";
 export { detectJsRequired } from "./detect.mjs";
+export { query } from "./query.mjs";
+export { evaluateXPath } from "./xpath.mjs";
