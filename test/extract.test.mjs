@@ -68,4 +68,13 @@ describe("interactiveElements()", () => {
     const hidden = els.find((e) => e.tag === "input" && e.type === "hidden");
     assert.equal(hidden.visible, false);
   });
+
+  it("visibility:false opt-out reports every element visible (no cascade pass)", () => {
+    const fast = interactiveElements(env.document, BASE, env.window, { visibility: false });
+    assert.equal(fast.length, els.length);
+    assert.ok(fast.every((e) => e.visible === true));
+    // a type=hidden input is not-visible with the cascade pass, but visible when opted out
+    const hidden = fast.find((e) => e.tag === "input" && e.type === "hidden");
+    assert.equal(hidden.visible, true);
+  });
 });

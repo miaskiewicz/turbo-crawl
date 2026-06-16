@@ -99,9 +99,13 @@ export class Page {
     return el ? el.textContent.trim() : "";
   }
 
-  /** Indexed interactive elements (SPEC §7.1); also refreshes the action snapshot. */
-  interactiveElements() {
-    this.#snapshot = interactiveElements(this.document, this.#url, this.window);
+  /**
+   * Indexed interactive elements (SPEC §7.1); also refreshes the action snapshot.
+   * @param {{visibility?:boolean}} [options] pass `visibility:false` to skip the
+   *   cascade-based visibility pass (faster when the caller ignores `visible`).
+   */
+  interactiveElements(options) {
+    this.#snapshot = interactiveElements(this.document, this.#url, this.window, options);
     return this.#snapshot;
   }
 
