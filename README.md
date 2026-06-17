@@ -57,7 +57,7 @@ happy-dom). turbo-crawl is unusual on four axes at once:
 See [SPEC.md](./SPEC.md) for the design and [STATUS.md](./STATUS.md) for current
 capabilities.
 
-Status: **v0.1.9 — working** ([npm](https://www.npmjs.com/package/@miaskiewicz/turbo-crawl)).
+Status: **v0.1.10 — working** ([npm](https://www.npmjs.com/package/@miaskiewicz/turbo-crawl)).
 Page + interaction, hardened networking (cookies / `document.cookie` bridge /
 robots + crawl-delay / charset / size + redirect caps, HTTP/2 + DNS-cache
 dispatcher, 304 conditional-request cache), crawl orchestration (`Crawler` +
@@ -243,6 +243,19 @@ export const authedTest = test.extend({
   account: async ({ request, baseURL }, use) => use(await seed(request, baseURL)),
 });
 ```
+
+**Zero-edit mode** — to flip an *existing* suite onto turbo without touching any
+`import` line (incl. a shared `harness.ts` that imports from `@playwright/test`),
+pass the loader flag when running:
+
+```sh
+node --import @miaskiewicz/turbo-crawl/playwright/register --test 'e2e/**/*.spec.mjs'
+```
+
+It installs a resolution hook that rewrites `@playwright/test` (and
+`playwright`/`playwright-core`) to the turbo façade — so every spec gets turbo's
+`test`/`expect`/`chromium` and **no Chromium launches**. Toggle off without
+dropping the flag: `TURBO_PLAYWRIGHT_SHIM=0 node --import … --test …`. ESM only.
 
 Run specs with **`node --test`** (ESM), not the `playwright` CLI — the CLI only
 discovers its own `test`. Built-in fixtures: `page`, `context`, `browser`,
