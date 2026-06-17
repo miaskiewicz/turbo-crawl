@@ -18,6 +18,12 @@
     "enabled": false
   },
   "files": {
-    "ignore": ["**/dist/**", "**/node_modules/**", "**/coverage/**", "test/fixtures/**"]
+    "ignore": [
+      "**/dist/**",
+      "**/node_modules/**",
+      "**/coverage/**",
+      "test/fixtures/**",
+      "**/storage/**"
+    ]
   }
 }
