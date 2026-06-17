@@ -8,7 +8,7 @@ import vm from "node:vm";
 import { installGlobals } from "@miaskiewicz/turbo-dom/install";
 
 import { makePageFetch, makeXHR } from "./page-fetch.mjs";
-import { drainRound, installVirtualClock } from "./virtual-clock.mjs";
+import { drainRound, installVirtualClock, resetClock } from "./virtual-clock.mjs";
 
 export function createFastBackend() {
   return {
@@ -24,16 +24,20 @@ export function createFastBackend() {
       installGlobals(sandbox, { html, url: opts.url });
       vm.createContext(sandbox);
       // Own time + scheduling BEFORE any page script runs (React/MUI read them).
-      const ctl = installVirtualClock(sandbox, vm);
+      const ctl = installVirtualClock(sandbox);
       const state = { pending: 0 };
       if (opts.hostFetch) {
         sandbox.fetch = makePageFetch(opts.hostFetch, opts.url, state);
         sandbox.XMLHttpRequest = makeXHR(opts.hostFetch, opts.url, state);
       }
       shimDocWrite(sandbox.document);
-      runScripts(sandbox, scripts, opts.timeoutMs ?? 2000);
-      fireReady(sandbox.document, sandbox.window); // readystatechange/DOMContentLoaded/load
-      await settle(ctl, state, opts);
+      try {
+        runScripts(sandbox, scripts, opts.timeoutMs ?? 2000);
+        fireReady(sandbox.document, sandbox.window); // readystatechange/DOMContentLoaded/load
+        await settle(ctl, state, opts);
+      } finally {
+        resetClock(); // restore turbo-dom's real clock for any other consumer
+      }
       const root = sandbox.document?.documentElement;
       return root ? `<!DOCTYPE html>\n${root.outerHTML}` : "";
     },

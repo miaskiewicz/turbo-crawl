@@ -1,88 +1,59 @@
-// Virtual clock + owned scheduler queue for the "fast" render backend.
+// Virtual clock + owned timer queue for the "fast" render backend.
 //
 // React 19 drives its work loop through MessageChannel; MUI transitions gate on
-// (now() - start) / duration via setTimeout/requestAnimationFrame. If page time
-// is frozen (or runs on the real event loop outside our control), finite
-// transitions never reach progress>=1 and reschedule forever, and React's
-// scheduler runs un-bounded. We fix that by routing ALL page scheduling — setTimeout,
-// requestAnimationFrame, MessageChannel — and the page clock (Date.now/performance.now)
-// through ONE queue we drain in bounded rounds, advancing a virtual clock each
-// round. Pull-based draining means an infinite-animation rAF storm can't starve
-// us: we decide when to stop (frame cap + the backend's wall-clock deadline).
+// (now() - start) / duration via setTimeout/requestAnimationFrame. turbo-dom
+// (>=0.2.4) routes BOTH its requestAnimationFrame and its MessageChannel delivery
+// through the live `globalThis.setTimeout`, and reads its page clock through
+// `setClock(fn)`. So to render React/MUI headless under a deterministic virtual
+// clock, we only need to (a) own the sandbox's setTimeout — every rAF frame and
+// scheduler hop then lands in our queue — and (b) point the clock at our virtual
+// time. We drain the queue in bounded rounds, advancing virtual time each round,
+// so finite transitions reach progress>=1 and stop, while a frame cap + the
+// backend's wall-clock deadline bound genuinely-infinite animations.
+
+import { setClock } from "@miaskiewicz/turbo-dom/runtime";
 
 const FRAME_MS = 16;
-const CLOCK_BASE = 1700000000000;
-
-// Deliver a posted message to the paired port (React scheduler + general use).
-function deliver(target, data) {
-  const ev = { data, type: "message", target };
-  if (typeof target.onmessage === "function") target.onmessage(ev);
-  if (typeof target._l === "function") target._l(ev);
-}
-
-function makePort(schedule, other) {
-  return {
-    onmessage: null,
-    _l: null,
-    start() {},
-    close() {},
-    addEventListener(type, fn) {
-      if (type === "message") this._l = fn;
-    },
-    removeEventListener() {},
-    postMessage(data) {
-      schedule(() => deliver(other(), data), 0, false);
-    },
-  };
-}
-
-// A MessageChannel whose delivery is scheduled into our queue (not the host's),
-// so it exists everywhere and is drivable by the virtual clock.
-function makeMessageChannel(schedule) {
-  return class MessageChannel {
-    constructor() {
-      this.port1 = makePort(schedule, () => this.port2);
-      this.port2 = makePort(schedule, () => this.port1);
-    }
-  };
-}
+// Virtual time advances a hair on every clock READ. React's time-sliced work loop
+// polls the clock and yields once its ~5ms budget elapses; without this, the clock
+// is constant within a callback, shouldYield() never trips, and React runs the
+// whole (possibly self-rescheduling) tree synchronously in one uninterruptible
+// callback — a spin our pump can't break. Bumping per read makes React yield back
+// to us between slices, so the frame cap + deadline bound it.
+const READ_EPSILON = 0.05;
 
 function cancel(timers, id) {
   const i = timers.findIndex((t) => t.id === id);
   if (i >= 0) timers.splice(i, 1);
 }
 
-// Point page-visible Date.now/performance.now at the virtual clock (bridged via a
-// host function so the values track our advancing `clock.now`).
-const CLOCK_PATCH = `(() => {
-  globalThis.Date.now = () => ${CLOCK_BASE} + globalThis.__vnow();
-  globalThis.performance = { now: () => globalThis.__vnow(), timeOrigin: 0,
-    mark(){}, measure(){}, getEntriesByName: () => [], getEntriesByType: () => [],
-    clearMarks(){}, clearMeasures(){} };
-})();`;
-
 /**
- * Install the virtual clock + owned scheduler onto a vm sandbox.
+ * Own the sandbox's timers + point turbo-dom's clock at a virtual clock.
  * @returns {{ timers: Array, clock: {now:number} }} the queue + clock to drain.
  */
-export function installVirtualClock(sandbox, vm) {
+export function installVirtualClock(sandbox) {
   const timers = [];
   const clock = { now: 0 };
   let seq = 0;
-  const schedule = (cb, delay, raf) => {
-    timers.push({ id: ++seq, cb, due: clock.now + delay, raf });
+  sandbox.setTimeout = (cb, d) => {
+    timers.push({ id: ++seq, cb, due: clock.now + (Number(d) || 0) });
     return seq;
   };
-  sandbox.setTimeout = (cb, d) => schedule(cb, Number(d) || 0, false);
   sandbox.clearTimeout = (id) => cancel(timers, id);
   sandbox.setInterval = () => 0; // intervals would never settle; no-op
   sandbox.clearInterval = () => {};
-  sandbox.requestAnimationFrame = (cb) => schedule(() => cb(clock.now), FRAME_MS, true);
-  sandbox.cancelAnimationFrame = (id) => cancel(timers, id);
-  sandbox.MessageChannel = makeMessageChannel(schedule);
-  sandbox.__vnow = () => clock.now;
-  vm.runInContext(CLOCK_PATCH, sandbox);
+  // turbo-dom's requestAnimationFrame + MessageChannel post through globalThis.
+  // setTimeout (= our queue above); its performance.now()/rAF timestamps read this.
+  setClock(() => {
+    clock.now += READ_EPSILON; // make React's time-sliced loop yield (see above)
+    return clock.now;
+  });
   return { timers, clock };
+}
+
+/** Restore turbo-dom's default (real) clock after a render. */
+export function resetClock() {
+  setClock(null);
 }
 
 function runCb(t) {
