@@ -19,7 +19,7 @@ capabilities.
 Status: **alpha (v0)**. Page + interaction, hardened networking (cookies /
 `document.cookie` bridge / robots + crawl-delay / charset / size + redirect
 caps), crawl orchestration, structured extraction, CSS+XPath query, Playwright
-locators + compat façade, a no-Chromium JS-execution render tier, and a 32-tool
+locators + compat façade, a no-Chromium JS-execution render tier, and a 33-tool
 MCP server. ~100% line coverage (`npm run test:cov`); a Playwright differential
 test (SPEC §14) bounds representation drift when Chromium is installed (dev-only).
 
@@ -80,7 +80,7 @@ const data = page.extract({
 import { Crawler } from "@miaskiewicz/turbo-crawl";
 
 for await (const rec of new Crawler({ start, maxPages: 500, concurrency: 8 })) {
-  // rec.url, rec.status, rec.lane, rec.view.interactiveElements, rec.extracted
+  // rec.url, rec.status, rec.view.interactiveElements, rec.extracted
 }
 ```
 
@@ -168,28 +168,35 @@ generic `{ fallback: fetchHtml }` to route them to whatever renderer you plug in
 
 ## Competitive benchmark
 
-`harness/competitive/` runs the **same Playwright script** on turbo-crawl and real
-browsers, scoring output **parity** against a Chromium oracle and timing each.
-`npm run harness`. Sample (median over runs, live network):
+`harness/competitive/` runs the **same Playwright script** on turbo-crawl and a
+fleet of real browsers, scoring output **parity** against a Chromium oracle and
+timing each. `npm run harness`. Median ms over 5 runs (live network), parity is
+each engine's observations vs the Chromium oracle:
 
-| routine | turbo no-JS | turbo js-fast | turbo js-secure | Chromium (oracle) | parity |
-|---|---|---|---|---|---|
-| wikipedia (3-page click-through + back) | **149 ms** | 327 ms | 297 ms | 889 ms | 4/4 ✓ |
-| form (fill + submit + read echo) | 326 ms | **235 ms** | 223 ms | 625 ms | 4/4 ✓ |
-| js-quotes (client-rendered, `document.write` + jQuery) | — (no-JS skips) | 239 ms | **236 ms** | 809 ms | 2/2 ✓ |
+| engine | wikipedia | form | js-quotes | parity |
+|---|---|---|---|---|
+| **turbo-crawl (no-JS)** | **153** | 236 | — *(needs JS)* | ✓ |
+| **turbo-crawl (js-fast)** | 355 | **241** | **241** | ✓ |
+| **turbo-crawl (js-secure)** | 318 | 235 | 237 | ✓ |
+| chromium *(oracle)* | 947 | 652 | 895 | — |
+| firefox | 802 | 880 | 895 | ✓ |
+| webkit | 1295 | 851 | 847 | ✓ |
+| stealth (playwright-extra) | 1020 | 528 | 903 | ✓ |
+| patchright | 1029 | 538 | 894 | ✓ |
 
-Every turbo-crawl mode produces the **same observations as Chromium** while
-running ~2.5–6× faster. The harness auto-detects installed engines (also
-`firefox`/`webkit`, and stealth browsers like `playwright-extra`/`patchright`/
-`rebrowser`) — see [harness/competitive/README.md](./harness/competitive/README.md).
-(Numbers are network-bound and machine/run dependent.)
+Every turbo-crawl mode produces the **same observations** as Chromium / Firefox /
+WebKit / the stealth browsers — while running 2–6× faster. The harness
+auto-detects installed engines (`firefox`/`webkit`, and anti-detect browsers like
+`playwright-extra`/`patchright`/`rebrowser-playwright`); see
+[harness/competitive/README.md](./harness/competitive/README.md). (Numbers are
+network-bound and machine/run dependent.)
 
 ## Development
 
 ```sh
 npm install        # also wires the pre-commit hook (oxlint → biome → cc-check → tsgo)
 npm test           # node --test
-npm run test:cov   # coverage (src is 100% line-covered)
+npm run test:cov   # coverage (src ~100% line-covered)
 npm run lint       # oxlint
 npm run format     # biome format --write
 npm run cc         # cyclomatic-complexity gate (cc < 6)

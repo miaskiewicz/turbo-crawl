@@ -1,6 +1,6 @@
 {
   "name": "@miaskiewicz/turbo-crawl",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Native-speed, browserless web crawler for AI agents — fetch + parse + extract on turbo-dom, no headless browser. Indexed interactive elements, link graph, accessibility tree, markdown, structured extraction, and an MCP interface.",
   "license": "MIT",
   "type": "module",
@@ -85,11 +85,15 @@
     "@biomejs/biome": "^1.9.0",
     "@typescript/native-preview": "^7.0.0-dev.20260616.1",
     "oxlint": "^0.11.0",
+    "patchright": "^1.60.2",
     "playwright": "^1.61.0",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "rebrowser-playwright": "^1.52.0",
     "typescript": "^5.9.3"
   },
   "optionalDependencies": {
-    "isolated-vm": "^6.0.0",
-    "esbuild": "^0.25.0 || ^0.28.0"
+    "esbuild": "^0.25.0 || ^0.28.0",
+    "isolated-vm": "^6.0.0"
   }
 }

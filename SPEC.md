@@ -5,7 +5,19 @@
 > Indexed interactive elements, link graph, accessibility tree, structured
 > extraction, and an MCP interface agents drive directly.
 
-Status: **draft v0** · Depends on: `@miaskiewicz/turbo-dom@^0.2`
+Status: **v0.1.0 (implemented)** · Depends on: `@miaskiewicz/turbo-dom@^0.2.1`
+
+> **Amendment (current implementation).** Two parts of this original spec have
+> been superseded; see [STATUS.md](./STATUS.md) and
+> [docs/js-execution-tier.md](./docs/js-execution-tier.md) for what shipped:
+> - §2's "No JavaScript execution" is now an **opt-in** capability, not a hard
+>   non-goal. The default fast path is still no-JS, but a **no-Chromium
+>   JS-execution tier** (`jsRenderer`, §11) runs the page's own scripts on
+>   turbo-dom in a `node:vm` or an `isolated-vm` isolate.
+> - §11 "Lane B" is **no longer Chromium**. The Playwright adapter was removed;
+>   Playwright/Chromium are dev-only (oracle + harness). turbo-crawl also ships a
+>   Playwright-compatibility façade so existing Playwright scripts run on this
+>   engine with no browser loaded.
 
 ---
 
@@ -28,7 +40,7 @@ speed via turbo-dom, and exposes the page to an agent as:
 
 Positioning: *the browserless browser for AI agents* — the fast path for the
 ~50–70% of the useful web that is server-rendered and needs no browser. A
-Chromium fallback tier (Lane B, §11) handles JS-gated pages behind the same API.
+no-Chromium JS-execution tier (§11) renders JS-gated pages behind the same API.
 
 ### 1.1 Why it can be fast
 
@@ -42,8 +54,11 @@ not "boot a Chromium tab."
 
 ## 2. Non-goals (v0 → v1)
 
-- **No JavaScript execution.** Page scripts never run. SPAs that render an empty
-  shell return an empty body — detected and (optionally) routed to Lane B.
+- **No JavaScript execution _by default_.** The fast path never runs page scripts.
+  SPAs that render an empty shell return an empty body on the fast path — detected
+  (§7.3 / `detectJsRequired`) and either recovered via embedded hydration state
+  (`hydrationState()`) or **opt-in** rendered by the no-Chromium JS-execution tier
+  (§11). _(Amended from the original hard non-goal.)_
 - **No layout / geometry.** No pixel coordinates, bounding boxes, or
   screenshots. Visibility is *approximated* from the CSS cascade (§7.3), never
   from a render.
@@ -107,30 +122,28 @@ nothing. No browser context, no tab, no teardown.
 
 ```
 turbo-crawl/
-  package.json            # "dependencies": { "@miaskiewicz/turbo-dom": "^0.2" }
-  SPEC.md                 # this file
-  README.md
+  package.json            # deps: @miaskiewicz/turbo-dom, @modelcontextprotocol/sdk, undici
+                          # optionalDeps: isolated-vm, esbuild (secure JS render)
+  SPEC.md  README.md  STATUS.md  CLAUDE.md  index.d.ts
   src/
-    index.mjs             # public API barrel: { Page, Crawler, version }
-    net.mjs               # fetchHtml(url, jar) → { html, finalUrl, status, headers }
-    cookies.mjs           # CookieJar (RFC 6265 subset)
-    robots.mjs            # robots.txt fetch + cache + allow(url, ua)
-    crawl.mjs             # Crawler — frontier, scheduling, concurrency, dedupe
-    frontier.mjs          # URL queue + canonicalization + visited set
-    page.mjs              # Page — wraps one turbo-dom env, navigation loop
-    extract.mjs           # interactiveElements(), accessibilityTree(), markdown()
-    visible.mjs           # isVisible(el) via getComputedStyle (cascade)
-    actions.mjs           # click(i), fill(i, v), submit(), follow(href)
-    schema.mjs            # extract(document, jsonSchema) → object
-    url.mjs               # canonicalize, resolve(base, href), sameSite helpers
+    index.mjs             # public API barrel
+    net.mjs cookies.mjs robots.mjs url.mjs        # networking
+    crawl.mjs frontier.mjs page.mjs detect.mjs    # orchestration
+    extract.mjs visible.mjs actions.mjs aria.mjs dom-ops.mjs locator.mjs  # interaction
+    markdown.mjs ax.mjs text.mjs schema.mjs query.mjs xpath.mjs hydration.mjs  # views
+    render/             # JS-execution tier (no Chromium)
+      index.mjs scripts.mjs bundle-modules.mjs page-fetch.mjs
+      backend-fast.mjs                    # in-process node:vm
+      backend-secure.mjs isolate-entry.mjs isolate-polyfills.mjs  # isolated-vm + WASM
   mcp/
-    server.mjs            # MCP server: goto, interactive_elements, click, ...
-  adapters/
-    playwright.mjs        # Lane B: same Page interface, Chromium backend (optional dep)
-  test/
-    *.test.mjs            # node --test
-  bench/
-    *.mjs
+    server.mjs handlers.mjs   # MCP server (33 tools)
+  playwright/
+    index.mjs expect.mjs      # Playwright-compat façade (no browser loaded)
+  test/ *.test.mjs            # node --test, offline
+  bench/ *.mjs                # extract + crawl throughput
+  harness/competitive/        # same-script parity + timing vs real browsers
+  docs/ modules/*.md          # per-module reference + js-execution-tier.md
+  scripts/cc-check.cjs        # cyclomatic-complexity gate
 ```
 
 Pure ESM, Node ≥ 20 (Node 24 to match turbo-dom dev). Zero native deps of our
@@ -167,8 +180,8 @@ Instead we resolve the page's *intent graph*:
   URL. Buttons of `type=submit` map to `submit()` of their owning form.
 - **Everything else** (`<button onclick>`, `[role=button]` with JS handlers):
   flagged in the AgentView as `interactive: true, jsHandler: true` but **inert**
-  in Lane A (no JS to fire). Surfaced honestly so the agent/router can decide to
-  escalate to Lane B rather than silently no-op.
+  without JS (no script to fire). Surfaced honestly so the agent/router can decide to
+  escalate to the JS tier rather than silently no-op.
 
 This is the correct, fast crawler model: the link/form graph is exactly what's
 traversable without a JS runtime, and it parallelizes trivially.
@@ -194,7 +207,7 @@ an LLM to *act on*, in the shape browser-use popularized but without Chromium.
   href?: string,        // resolved absolute URL for links
   type?: string,        // input type
   visible: boolean,     // cascade-derived (§7.3)
-  jsHandler: boolean,   // has onclick/handler but no native nav → inert in Lane A
+  jsHandler: boolean,   // has onclick/handler but no native nav → inert without JS
   ref: WeakRef<Element> // internal: index → node map for actions
 }
 ```
@@ -299,22 +312,42 @@ sits underneath the MCP layer for embedders.
 
 ---
 
-## 11. Lane B — Chromium fallback (later)
+## 11. JS-execution tier — no Chromium (shipped)
 
-For JS-gated pages, an **optional** adapter (`adapters/playwright.mjs`, peer dep
-on `playwright`) implements the *same* `Page` interface against real Chromium.
+> Supersedes the original "Lane B — Chromium fallback". There is **no Chromium**.
+> The Playwright adapter was removed; full design in
+> [docs/js-execution-tier.md](./docs/js-execution-tier.md).
 
-- **Detection heuristic**: near-empty `<body>` text + large external script
-  bundle, or a content hash that signals "shell only" → mark page as
-  JS-required.
-- **Routing**: `Crawler`/`Page` can be configured `{ fallback: 'playwright' }`;
-  JS-required URLs are escalated to the adapter, everything else stays on the
-  fast turbo-dom path. The agent/MCP surface is identical either way.
-- Base library has **zero** Chromium weight; the adapter is opt-in.
+For pages that genuinely need JavaScript, turbo-crawl runs the page's **own
+scripts on turbo-dom** — no browser — and extracts from the rendered DOM.
+`jsRenderer({ mode }).fetchHtml` is drop-in for `new Page({ fetchHtml })` and for
+a `Crawler` `{ fallback }`. Two backends, one interface:
 
-This is what efficient production crawlers do: JS-on-everything is the slow
-naive default; turbo-crawl makes the fast path the default and escalates only
-when forced.
+- **`secure` (default)** — a true V8 isolate via `isolated-vm`, with turbo-dom
+  running on its **WASM** parser *inside* the isolate. Hostile-code safe: the
+  guest cannot reach the host heap; only an HTML string crosses back. For
+  open-web crawling.
+- **`fast`** — in-process `node:vm` + the native turbo-dom parser. Fastest, **no**
+  isolation; local/trusted targets only.
+
+What the tier handles: inline + external classic scripts, ESM modules
+(bundled via `esbuild`, honoring `<script type="importmap">`), `document.write`,
+the `DOMContentLoaded`/`load` lifecycle, and page-initiated `fetch`/`XMLHttpRequest`
+bridged to the host net layer (cookies/UA). URLs the page fetches are recorded
+(`page.requests()`, `Crawler { followRequests }`).
+
+- **Detection** (`detectJsRequired`): near-empty `<body>` + external scripts, or
+  an empty SPA mount → JS-required.
+- **Routing**: `Crawler { fallback: jsRenderer(...).fetchHtml }` escalates only the
+  shell-only pages; everything else stays on the fast no-JS path. The agent/MCP
+  surface is identical either way.
+- `isolated-vm` + `esbuild` are **optional dependencies** (only the `secure`
+  backend / ESM execution need them); the base library carries zero browser and
+  zero native artifacts of its own.
+
+Before resorting to execution, `hydrationState()` recovers most framework SPA data
+(`__NEXT_DATA__`/JSON-LD/`__APOLLO_STATE__`/…) with **zero** JS. This keeps the
+fast path the default and pays for JS only when forced.
 
 ---
 
@@ -364,12 +397,15 @@ Each phase is independently shippable and ends with a green test gate.
 - **Acceptance:** an agent (Claude) completes a "find X on this site and return
   its price" task end-to-end via MCP, no human glue.
 
-### Phase 5 — Lane B fallback (optional)
-- JS-required detection heuristic.
-- `adapters/playwright.mjs` implementing `Page` against Chromium.
-- `Crawler` routing config.
-- **Acceptance:** a known SPA that returns an empty body in Lane A returns real
-  content via the adapter, through the identical API.
+### Phase 5 — JS-execution tier (shipped; replaced the Chromium "Lane B")
+- JS-required detection heuristic (`detectJsRequired`).
+- `src/render/` — `jsRenderer({ mode })`: `fast` (node:vm) + `secure` (isolated-vm
+  + turbo-dom WASM); runs classic/ESM scripts, `document.write`, the DOM lifecycle,
+  and bridges page `fetch`/XHR. **No Chromium.**
+- `Crawler { fallback, followRequests }` routing config.
+- **Acceptance:** a known SPA that returns an empty body on the fast path returns
+  real content through the JS-execution tier, behind the identical API. (Verified
+  in `test/js-render.test.mjs` and the competitive harness.)
 
 ---
 
@@ -412,8 +448,8 @@ own test — never a behavioral fork.
 3. **Index stability** — recompute every `interactive_elements()` call vs. a
    versioned snapshot keyed on `Document.__version`. Lean on the latter to match
    turbo-dom's caching model.
-4. **Lane B detection** — false-positive cost (needlessly booting Chromium) vs.
-   false-negative (returning an empty SPA). Tunable threshold + override.
-5. **Auth** — header/token injection and login-form flows are in scope for Lane
-   A (forms work); full OAuth redirects may need Lane B.
+4. **JS-required detection** — false-positive cost (needlessly running the JS
+   tier) vs. false-negative (returning an empty SPA). Tunable threshold + override.
+5. **Auth** — header/token injection and login-form flows work on the no-JS path
+   (forms work); full OAuth redirects may need the JS-execution tier.
 ```

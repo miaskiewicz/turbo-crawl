@@ -29,7 +29,7 @@ runtime; no Playwright at runtime. See [SPEC.md](./SPEC.md) for the design and
     scripts on turbo-dom and extracts from the rendered DOM. `secure` =
     isolated-vm + turbo-dom **WASM** (true V8 isolate; open-web/hostile-safe);
     `fast` = in-process `node:vm` + native parser (local/trusted).
-- **Agent surface**: MCP server, **32 tools** (navigation, views, locators by
+- **Agent surface**: MCP server, **33 tools** (navigation, views, locators by
   selector/role/text, actions, accessors, `evaluate`, history, UA).
 
 ## Playwright
