@@ -17,7 +17,10 @@
     "./playwright": {
       "import": "./playwright/index.mjs"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./render": {
+      "import": "./src/render/index.mjs"
+    }
   },
   "bin": {
     "turbo-crawl-mcp": "mcp/server.mjs"
@@ -38,7 +41,7 @@
     "lint:fix": "oxlint --fix",
     "format": "biome format --write .",
     "format:check": "biome format .",
-    "cc": "git ls-files 'src/*.mjs' 'mcp/*.mjs' 'playwright/*.mjs' | node scripts/cc-check.cjs --max 5",
+    "cc": "git ls-files src mcp playwright | grep -E '\\.mjs$' | node scripts/cc-check.cjs --max 5",
     "typecheck": "tsgo --noEmit -p tsconfig.json",
     "check": "npm run lint && npm run format:check && npm run cc && npm run typecheck && npm test",
     "bench": "node bench/extract.mjs && node bench/crawl.mjs",
@@ -72,7 +75,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@miaskiewicz/turbo-dom": "^0.2.0",
+    "@miaskiewicz/turbo-dom": "^0.2.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "undici": "^6.0.0"
   },
@@ -82,5 +85,9 @@
     "oxlint": "^0.11.0",
     "playwright": "^1.61.0",
     "typescript": "^5.9.3"
+  },
+  "optionalDependencies": {
+    "isolated-vm": "^6.0.0",
+    "esbuild": "^0.25.0 || ^0.28.0"
   }
 }

@@ -122,9 +122,28 @@ turbo-crawl ships **no browser**. For pages that need JavaScript:
 1. **Hydration state (now):** `page.hydrationState()` mines the data frameworks
    embed server-side (`__NEXT_DATA__`, JSON-LD, `__APOLLO_STATE__`, …) — zero JS,
    covers most "SPAs".
-2. **JS-execution tier (planned):** run page scripts on turbo-dom inside a
-   killable worker / isolate — Chromium-free. See
-   [docs/js-execution-tier.md](./docs/js-execution-tier.md).
+2. **JS-execution tier:** run the page's own scripts on turbo-dom — Chromium-free
+   — and extract from the *rendered* DOM. Two backends:
+
+```js
+import { jsRenderer, Page, Crawler } from "@miaskiewicz/turbo-crawl";
+
+// "secure" (default): true V8 isolate (isolated-vm) on turbo-dom's WASM parser.
+// Safe for open-web/hostile pages. "fast": in-process vm + native parser, for
+// local/trusted targets only.
+const { fetchHtml, close } = jsRenderer({ mode: "secure" });
+const page = new Page({ fetchHtml });
+await page.goto("https://some-spa.example");   // scripts run; DOM is populated
+page.links(); page.markdown(); page.query("h1");
+
+// or auto-escalate only shell-only pages during a crawl:
+new Crawler({ start, fallback: jsRenderer({ mode: "secure" }).fetchHtml });
+```
+
+`isolated-vm` + `esbuild` are **optional** deps — only needed for `mode:"secure"`
+(the `fast` backend uses Node's built-in `vm`). ESM-module page scripts and
+page-initiated `fetch` are not yet handled; embedded data is covered by
+`hydrationState()`. See [docs/js-execution-tier.md](./docs/js-execution-tier.md).
 
 `detectJsRequired(document)` flags shell-only pages, and `Crawler` accepts a
 generic `{ fallback: fetchHtml }` to route them to whatever renderer you plug in.

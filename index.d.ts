@@ -113,6 +113,20 @@ export interface HydrationState {
 }
 export declare function extractHydrationState(document: object): HydrationState;
 
+export interface JsRendererOptions {
+  /** "secure" (isolated-vm + WASM; open-web/hostile) | "fast" (in-proc vm; local/trusted). */
+  mode?: "secure" | "fast";
+  fetchHtml?: typeof fetchHtml;
+  timeoutMs?: number;
+  settleMs?: number;
+  settleRounds?: number;
+  memoryLimit?: number;
+}
+export declare function jsRenderer(opts?: JsRendererOptions): {
+  fetchHtml: typeof fetchHtml;
+  close(): Promise<void>;
+};
+
 // --- actions -----------------------------------------------------------------
 export declare function fillValue(el: object, value: unknown): void;
 export declare function serializeForm(form: object, submitter?: object): [string, string][];
