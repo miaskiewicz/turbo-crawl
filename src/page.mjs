@@ -26,7 +26,7 @@ function isSubmitControl(el) {
 // Collect navigator overrides from constructor opts (userAgent is a shorthand for
 // navigator.userAgent). Returns null when nothing is overridden.
 function normalizeNavigator(opts) {
-  const nav = { ...(opts.navigator ?? {}) };
+  const nav = { ...opts.navigator };
   if (opts.userAgent) nav.userAgent = opts.userAgent;
   return Object.keys(nav).length ? nav : null;
 }
@@ -68,7 +68,7 @@ export class Page {
    * among them). Persists across navigations; applied to the current page too.
    */
   setNavigator(props) {
-    this.#nav = { ...(this.#nav ?? {}), ...props };
+    this.#nav = { ...this.#nav, ...props };
     if (this.#env) Object.assign(this.#env.window.navigator, props);
     return this;
   }
