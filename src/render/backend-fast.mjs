@@ -143,23 +143,37 @@ function realTick() {
   return new Promise((r) => setTimeout(r, 0));
 }
 
-// Keep pumping while the page has queued work (timers/frames) or in-flight
-// fetches, bounded by a frame cap (cuts infinite animations — spinners/pulse) and
-// a wall-clock deadline (the ultimate backstop).
-function keepPumping(timers, state, frames, max, deadline) {
-  return (timers.length > 0 || state.pending > 0) && frames < max && Date.now() < deadline;
+// Real macrotasks to keep ticking after the queue looks empty: the bundler entry
+// + each React continuation resolve on microtasks/awaited host fetches, so the
+// queue is momentarily empty between bursts. Only stop once it's stayed quiet.
+const QUIET_TICKS = 10;
+
+// Stop when we hit the frame cap (cuts infinite animations), the wall-clock
+// deadline (ultimate backstop), or the page has been quiet for QUIET_TICKS.
+function pumpDone(frames, max, deadline, quiet) {
+  return frames >= max || Date.now() >= deadline || quiet >= QUIET_TICKS;
+}
+
+function stillActive(ctl, state) {
+  return ctl.timers.length > 0 || state.pending > 0;
 }
 
 // Drive the page's own scheduler (setTimeout/rAF/MessageChannel → our queue) in
-// virtual time until it quiesces, interleaving real ticks so host fetches settle.
-// Pull-based: an infinite-animation rAF storm can't starve us — we stop at the
-// frame cap. (A purely SYNCHRONOUS infinite loop inside one callback still can't
-// be cut from JS; turbo-dom geometry realism is what prevents those forming.)
+// virtual time until it quiesces, interleaving real ticks so the async bootstrap
+// + host fetches settle. Pull-based: an infinite-animation rAF storm can't starve
+// us — we stop at the frame cap. (A purely SYNCHRONOUS infinite loop inside one
+// callback still can't be cut from JS; turbo-dom geometry realism prevents those.)
+function settleBounds(opts) {
+  return { deadline: Date.now() + (opts.renderDeadlineMs ?? 5000), max: opts.maxFrames ?? 2000 };
+}
+
 async function settle(ctl, state, opts) {
-  const deadline = Date.now() + (opts.renderDeadlineMs ?? 5000);
-  const max = opts.maxFrames ?? 2000;
-  for (let frames = 0; keepPumping(ctl.timers, state, frames, max, deadline); frames++) {
-    drainRound(ctl.timers, ctl.clock);
+  const { deadline, max } = settleBounds(opts);
+  let frames = 0;
+  let quiet = 0;
+  while (!pumpDone(frames, max, deadline, quiet)) {
+    if (drainRound(ctl.timers, ctl.clock)) frames++;
+    quiet = stillActive(ctl, state) ? 0 : quiet + 1;
     await realTick();
   }
 }
