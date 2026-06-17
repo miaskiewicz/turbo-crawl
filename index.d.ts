@@ -279,7 +279,8 @@ export interface CrawlerOptions {
   robots?: RobotsCache;
   schema?: Schema;
   markdown?: boolean;
-  view?: boolean;
+  /** Opt-in agent view. true = interactiveElements (cascade visibility); "fast" = skip the getComputedStyle visibility pass. */
+  view?: boolean | "fast";
   allow?: (url: string) => boolean;
   fetchHtml?: typeof fetchHtml;
   fallback?: typeof fetchHtml;

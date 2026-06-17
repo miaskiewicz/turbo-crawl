@@ -276,12 +276,22 @@ function buildRecord(st, item, source, finalNav, lane) {
     title: finalNav.title,
     links: source.links(),
   };
-  if (st.o.view !== false) {
-    rec.view = { interactiveElements: source.interactiveElements() };
-    if (st.o.markdown) rec.view.markdown = source.markdown();
-  }
+  addView(st, rec, source);
   if (st.o.schema) rec.extracted = extractSchema(source.document, st.o.schema, finalNav.url);
   return { rec, source };
+}
+
+// Lazy agent view: `links` is always cheap, but the expensive passes are opt-in.
+// `view: true` → interactiveElements (cascade visibility); `view: "fast"` → skip
+// the getComputedStyle visibility pass; `markdown: true` → markdown. Default omits
+// `rec.view` entirely so a plain crawl pays nothing for it.
+function addView(st, rec, source) {
+  if (!st.o.view && !st.o.markdown) return;
+  rec.view = {};
+  if (st.o.view) {
+    rec.view.interactiveElements = source.interactiveElements({ visibility: st.o.view !== "fast" });
+  }
+  if (st.o.markdown) rec.view.markdown = source.markdown();
 }
 
 // Seed the frontier from the configured start URLs and record their hosts.

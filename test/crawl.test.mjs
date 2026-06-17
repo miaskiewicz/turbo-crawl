@@ -92,14 +92,30 @@ describe("Crawler", () => {
     );
   });
 
-  it("includes the agent view and extracted schema", async () => {
+  it("includes the agent view (opt-in) and extracted schema", async () => {
     const { c } = crawler({
       maxPages: 1,
+      view: true,
+      markdown: true,
       schema: { title: { selector: "title" } },
     });
     const [rec] = await collect(c);
     assert.ok(Array.isArray(rec.view.interactiveElements));
+    assert.equal(typeof rec.view.markdown, "string");
     assert.equal(rec.extracted.title, "Home");
+  });
+
+  it("omits the agent view by default (lazy) — links still present", async () => {
+    const { c } = crawler({ maxPages: 1 });
+    const [rec] = await collect(c);
+    assert.equal(rec.view, undefined);
+    assert.ok(Array.isArray(rec.links));
+  });
+
+  it('view:"fast" skips the visibility (getComputedStyle) pass', async () => {
+    const { c } = crawler({ maxPages: 1, view: "fast" });
+    const [rec] = await collect(c);
+    assert.ok(rec.view.interactiveElements.every((e) => e.visible === true));
   });
 
   it("enforces per-host politeness ordering via the clock", async () => {

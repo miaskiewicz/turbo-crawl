@@ -10,33 +10,21 @@
 // Crawler `{ fallback }`. It renders, then returns the rendered HTML so all the
 // existing extraction runs over a populated DOM.
 
-import { createEnvironment } from "@miaskiewicz/turbo-dom/runtime";
-
 import { fetchHtml as defaultFetchHtml } from "../net.mjs";
 import { bundleModule } from "./bundle-modules.mjs";
-import { extractScripts } from "./scripts.mjs";
+import { extractScriptsFromHtml, readImportMapFromHtml } from "./scripts.mjs";
 
 async function makeBackend(mode) {
   if (mode === "fast") return (await import("./backend-fast.mjs")).createFastBackend();
   return (await import("./backend-secure.mjs")).createSecureBackend();
 }
 
-// Read a <script type="importmap"> JSON blob from the document, or {} if absent.
-function readImportMap(document) {
-  const el = document.querySelector('script[type="importmap"]');
-  if (!el) return {};
-  try {
-    return JSON.parse(el.textContent ?? "{}");
-  } catch {
-    return {};
-  }
-}
-
 // Resolve each script to runnable classic code: external src is fetched, and
 // module scripts are bundled (import graph → classic IIFE) via the host fetcher.
-async function loadScripts(fetchHtml, document, baseUrl) {
-  const items = extractScripts(document, baseUrl);
-  const importMap = readImportMap(document);
+// Scripts are listed by a string scan (no DOM parse) — the backend parses for real.
+async function loadScripts(fetchHtml, html, baseUrl) {
+  const items = extractScriptsFromHtml(html, baseUrl);
+  const importMap = readImportMapFromHtml(html);
   const out = [];
   for (const it of items) {
     const resolved = await resolveScript(fetchHtml, it, baseUrl, importMap);
@@ -92,8 +80,7 @@ export function jsRenderer(opts = {}) {
       discovered.push(u);
       return fetchHtml(u, o);
     };
-    const env = createEnvironment(res.html);
-    const scripts = await loadScripts(recording, env.document, res.finalUrl);
+    const scripts = await loadScripts(recording, res.html, res.finalUrl);
     const backend = await backendPromise;
     const html = await backend.render(res.html, scripts, {
       ...opts,
