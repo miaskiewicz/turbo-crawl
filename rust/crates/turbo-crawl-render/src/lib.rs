@@ -2,7 +2,9 @@
 //! evaluate trivial JS. Validates the V8 build before the DOM op layer lands.
 
 pub mod dom;
+pub mod tree_backend;
 pub use dom::{run_with_dom, DomBackend};
+pub use tree_backend::TreeDom;
 
 use deno_core::{v8, JsRuntime, RuntimeOptions};
 

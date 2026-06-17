@@ -5,14 +5,21 @@ so the browserless crawler can be Rust too. The only piece that *must* stay JS i
 the `@playwright/test` drop-in façade (agents `import` it inside their own Node
 process) — everything else ports.
 
+turbo-dom is consumed as the **`turbo-dom-parser` crate** with
+`default-features = false, features = ["rust-runtime"]` — its pure-Rust
+`rtdom::Tree` (no napi/wasm boundary). The crate is currently wired via a path
+dep (`/Users/.../turbo-dom`); swap to a git/version dep once published.
+
 ## Tiers
 
 | Tier | Scope | Status |
 |------|-------|--------|
-| **1** | net / cookies / robots / url / frontier / crawl-scheduling — pure logic + HTTP | ✅ this branch |
-| 2 | `Page` (fetch+parse over the turbo-dom crate) + views (extract/visible/aria/locator/markdown) | pending turbo-dom crate |
-| **3** | JS-execution tier — `deno_core` isolate + ops binding the native DOM | 🟡 scaffold done; real DOM ops pending turbo-dom crate |
+| **1** | net / cookies / robots / url / frontier / crawl-scheduling — pure logic + HTTP | ✅ |
+| **2** | `Page`/`Navigator` over turbo-dom (fetch+parse, link/title extraction) | ✅ navigator; views (extract/visible/aria/locator/markdown) pending |
+| **3** | JS-execution tier — `deno_core` isolate + ops binding the native DOM | ✅ real `DomBackend` over `rtdom::Tree`; global bootstrap pending |
 | glue | napi-rs `.node` addon + thin JS `@playwright/test` shim | later |
+
+43 offline tests across the workspace (`cargo test`).
 
 ## Tier 1 — `turbo-crawl-core`
 
@@ -38,29 +45,40 @@ Direct ports of the JS modules, same behavior, same edge cases:
   seam is the `Navigator` trait — the tier-2 `Page` implements it. robots
   integration lands with that wiring.
 
-### Build / test
+## Tier 2 — `turbo-crawl-page`
 
+The real fetch+parse seam, over turbo-dom's pure-Rust `rtdom::Tree`:
+
+- `TurboNavigator` implements `crawl::Navigator` — fetches via
+  `turbo_crawl_core::net::fetch_html`, parses with `Tree::parse`, projects a
+  `Nav`. The tier-1 `crawl::crawl(opts, nav)` driver runs unchanged over it.
+- `parse_nav(html, final_url, status)` is **pure** (no network): extracts the
+  `<title>` and every `<a href>` resolved to an absolute URL against the final
+  URL. Unit-tested offline, plus an end-to-end test that drives the crawl
+  scheduler over a fixture navigator (real parse, no sockets).
+
+```rust
+#[async_trait]
+pub trait Navigator: Send + Sync {
+    async fn goto(&self, url: &str) -> Result<Nav, String>;
+}
 ```
-cd rust
-cargo test          # 33 unit tests, fully offline
-cargo clippy --all-targets
-cargo fmt
-```
 
-## Tier 3 scaffold — `turbo-crawl-render`
+Still pending (task #4): the view/extraction modules (extract / visible / aria /
+locator / markdown / …) over the same `Tree` API.
 
-Proves the JS-execution path end to end without turbo-dom yet:
+## Tier 3 — `turbo-crawl-render`
+
+The JS-execution path, end to end over the real DOM:
 
 - Boots a **`deno_core` V8 isolate** (true isolate by default — host heap
   unreachable from guest, the security property the old `node:vm` backend lacked).
 - `DomBackend` trait = the native DOM seam. Page JS calls `document.querySelector`
   → V8 → `#[op2]` → `DomBackend` → back. No JS-DOM-in-JS-VM indirection; the DOM
   lives in Rust beside the parser.
-- A stub backend (a fixed `<h1 id="title">Hello</h1>`) drives the tests offline,
-  proving the op roundtrip for `querySelector` / `textContent` / `getAttribute`.
-
-When the turbo-dom crate lands, implement `DomBackend` on it and the bootstrap
-grows the rest of the global surface (window/navigator/timers/fetch/cookie jar).
+- `TreeDom` implements `DomBackend` over `rtdom::Tree` — node ids ARE turbo-dom
+  handles (`u32`), so the bridge is zero-translation. Tested by parsing real HTML
+  and reading it back through page JS.
 
 ```rust
 pub trait DomBackend {
@@ -70,14 +88,14 @@ pub trait DomBackend {
 }
 ```
 
-### Seam for tier 2
+Still pending (task #7): grow the bootstrap into the full global surface
+(window / navigator / timers / fetch / cookie jar) so the page's own scripts run.
 
-```rust
-#[async_trait]
-pub trait Navigator: Send + Sync {
-    async fn goto(&self, url: &str) -> Result<Nav, String>;
-}
+## Build / test
+
 ```
-
-Implement `Navigator` on the turbo-dom-backed `Page` and the existing
-`crawl::crawl(opts, nav)` driver runs unchanged.
+cd rust
+cargo test               # 43 offline tests across the workspace
+cargo clippy --all-targets
+cargo fmt
+```

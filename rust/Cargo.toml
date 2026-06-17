@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/turbo-crawl-core", "crates/turbo-crawl-render"]
+members = [
+    "crates/turbo-crawl-core",
+    "crates/turbo-crawl-page",
+    "crates/turbo-crawl-render",
+]
 
 [workspace.package]
 edition = "2021"
