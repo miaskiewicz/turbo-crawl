@@ -43,3 +43,6 @@ Thumbs.db
 
 # ---- Claude Code local state / agent worktrees ----
 .claude/
+
+# harness subprocess crawler artifacts
+harness/crawlers/__pycache__/
