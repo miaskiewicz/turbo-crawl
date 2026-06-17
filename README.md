@@ -26,14 +26,19 @@ a **true V8 isolate** and re-rendering the DOM (see below).
 Most tools in this space pick one lane: a crawler **or** a browser-automation
 library, and they get their DOM from a real browser (Playwright/Puppeteer/
 Selenium) or an in-process fake DOM with no security isolation (jsdom,
-happy-dom). turbo-crawl is unusual on three axes at once:
+happy-dom). turbo-crawl is unusual on four axes at once:
 
-1. **Crawler _and_ Playwright-API script runner on one native DOM.** The same
+1. **AI-agent-ready out of the box.** It ships a full **MCP server** (33 tools:
+   navigate, click/fill/submit, query, extract, accessibility tree, markdown,
+   `evaluate`, …) so an agent drives real pages over stdio with **no browser and
+   no glue code** — `npx turbo-crawl-mcp`. Most crawlers are libraries you wrap
+   yourself; this one is an agent tool on day one.
+2. **Crawler _and_ Playwright-API script runner on one native DOM.** The same
    engine bulk-crawls a domain and runs Playwright-style scripts/tests — no
    browser anywhere in the stack.
-2. **Its own DOM, not a browser's.** turbo-dom is a native + WASM HTML parser
+3. **Its own DOM, not a browser's.** turbo-dom is a native + WASM HTML parser
    with a lazy copy-on-write DOM — native-speed parse, no pixels/layout/IPC.
-3. **A V8 isolate to run page JS + re-render.** The `secure` JS tier executes
+4. **A V8 isolate to run page JS + re-render.** The `secure` JS tier executes
    page (or your own) JavaScript inside a real V8 isolate (`isolated-vm`) —
    capped heap, no ambient host access — against a WASM DOM, then re-renders.
    Most JS-capable crawlers instead drive a full headless browser, or run page
@@ -46,12 +51,15 @@ happy-dom). turbo-crawl is unusual on three axes at once:
 See [SPEC.md](./SPEC.md) for the design and [STATUS.md](./STATUS.md) for current
 capabilities.
 
-Status: **alpha (v0)**. Page + interaction, hardened networking (cookies /
-`document.cookie` bridge / robots + crawl-delay / charset / size + redirect
-caps), crawl orchestration, structured extraction, CSS+XPath query, Playwright
-locators + compat façade, a no-Chromium JS-execution render tier, and a 33-tool
-MCP server. ~100% line coverage (`npm run test:cov`); a Playwright differential
-test (SPEC §14) bounds representation drift when Chromium is installed (dev-only).
+Status: **v0.1.1 — published and working** ([npm](https://www.npmjs.com/package/@miaskiewicz/turbo-crawl)).
+Page + interaction, hardened networking (cookies / `document.cookie` bridge /
+robots + crawl-delay / charset / size + redirect caps, HTTP/2 + DNS-cache
+dispatcher, 304 conditional-request cache), crawl orchestration, structured
+extraction, CSS+XPath query, Playwright locators + compat façade, a no-Chromium
+JS-execution render tier, and a 33-tool MCP server. ~100% line coverage
+(`npm run test:cov`); benchmarked against other crawlers (above); a Playwright
+differential test (SPEC §14) bounds representation drift when Chromium is
+installed (dev-only).
 
 ## Install
 

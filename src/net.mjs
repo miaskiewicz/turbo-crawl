@@ -7,7 +7,7 @@
 
 import { fetch as undiciFetch } from "undici";
 
-const DEFAULT_UA = "turbo-crawl/0.0 (+https://github.com/miaskiewicz/turbo-crawl)";
+const DEFAULT_UA = "turbo-crawl/0.1 (+https://github.com/miaskiewicz/turbo-crawl)";
 const DEFAULT_MAX_BYTES = 8 * 1024 * 1024; // 8 MiB
 const HTML_TYPES = ["text/html", "application/xhtml+xml", "application/xml", "text/xml"];
 
