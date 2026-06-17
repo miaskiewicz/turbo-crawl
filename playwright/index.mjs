@@ -3,7 +3,7 @@
 // chromium/firefox/webkit launchers all return the same turbo-crawl-backed
 // pseudo-browser (there is no real browser).
 //
-//   import { chromium, expect } from "@miaskiewicz/turbo-crawl/playwright";
+//   import { chromium, expect } from "turbo-crawl/playwright";
 //   const browser = await chromium.launch();
 //   const page = await browser.newPage();
 //   await page.goto(url); await page.getByRole("button", { name: "Go" }).click();

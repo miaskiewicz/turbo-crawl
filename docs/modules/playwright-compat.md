@@ -15,7 +15,7 @@ JS-only / pixel APIs throw a clear error pointing at the JS-execution tier.
 - `PWPage`, `Browser`, `BrowserContext` (classes, for advanced use).
 - Usage:
   ```js
-  import { chromium, expect } from "@miaskiewicz/turbo-crawl/playwright";
+  import { chromium, expect } from "turbo-crawl/playwright";
   const browser = await chromium.launch();
   const page = await browser.newPage();
   await page.goto(url);
@@ -72,7 +72,7 @@ JS-only / pixel APIs throw a clear error pointing at the JS-execution tier.
   `isVisible`/`isChecked`/`isEnabled`/`textContent`/`inputValue`/`count`/
   `getAttribute`).
 - Used by: existing Playwright scripts importing from
-  `@miaskiewicz/turbo-crawl/playwright`.
+  `turbo-crawl/playwright`.
 
 ## Invariants & gotchas
 - **No browser, no playwright dependency at runtime** — `chromium`, `firefox`,
@@ -90,7 +90,7 @@ JS-only / pixel APIs throw a clear error pointing at the JS-execution tier.
 
 ## Example
 ```js
-import { chromium, expect } from "@miaskiewicz/turbo-crawl/playwright";
+import { chromium, expect } from "turbo-crawl/playwright";
 
 const browser = await chromium.launch();          // turbo-crawl pseudo-browser
 const page = await browser.newPage();
