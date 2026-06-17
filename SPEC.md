@@ -5,7 +5,7 @@
 > Indexed interactive elements, link graph, accessibility tree, structured
 > extraction, and an MCP interface agents drive directly.
 
-Status: **v0.1.1 (implemented)** · Depends on: `@miaskiewicz/turbo-dom@^0.2.1`
+Status: **v0.1.2 (implemented)** · Depends on: `@miaskiewicz/turbo-dom@^0.2.1`
 
 > **Amendment (current implementation).** Two parts of this original spec have
 > been superseded; see [STATUS.md](./STATUS.md) and
