@@ -78,21 +78,48 @@ function byId(root, id) {
   return root.getElementById ? root.getElementById(id) : scanById(root, id);
 }
 
-function labelTarget(label, root) {
+function pushUnique(out, el) {
+  if (el && !out.includes(el)) out.push(el);
+}
+
+// Controls referencing `id` via aria-labelledby (a space-separated id list, so
+// `~=` matches one token). The value is quoted, so colon `useId()` ids are safe
+// here even though `#:r0:` is not a valid id selector.
+function byAriaLabelledBy(root, id) {
+  return [...root.querySelectorAll(`[aria-labelledby~="${id}"]`)];
+}
+
+// Every control a matching <label> labels: `for=`/id, aria-labelledby back-refs
+// (MUI/React), and a wrapped input. Playwright's getByLabel covers all of these.
+function collectLabelTargets(label, root, out) {
   const forId = label.getAttribute("for");
-  if (forId) return byId(root, forId);
-  return label.querySelector("input,select,textarea");
+  if (forId) pushUnique(out, byId(root, forId));
+  const id = label.getAttribute("id");
+  if (id) for (const el of byAriaLabelledBy(root, id)) pushUnique(out, el);
+  pushUnique(out, label.querySelector("input,select,textarea"));
+}
+
+function addLabelMatches(root, want, opts, out) {
+  const labels = root.querySelectorAll("label");
+  for (let i = 0; i < labels.length; i++) {
+    if (textMatch(labels[i].textContent, want, opts.exact))
+      collectLabelTargets(labels[i], root, out);
+  }
+}
+
+// A control's own aria-label is a label too (no <label> element involved).
+function addAriaLabelMatches(root, want, opts, out) {
+  const els = root.querySelectorAll("[aria-label]");
+  for (let i = 0; i < els.length; i++) {
+    if (textMatch(els[i].getAttribute("aria-label"), want, opts.exact)) pushUnique(out, els[i]);
+  }
 }
 
 export function byLabel(want, opts = {}) {
   return (root) => {
     const out = [];
-    const labels = root.querySelectorAll("label");
-    for (let i = 0; i < labels.length; i++) {
-      if (!textMatch(labels[i].textContent, want, opts.exact)) continue;
-      const target = labelTarget(labels[i], root);
-      if (target) out.push(target);
-    }
+    addLabelMatches(root, want, opts, out);
+    addAriaLabelMatches(root, want, opts, out);
     return out;
   };
 }
@@ -255,4 +282,21 @@ export class Locator {
     // Enter on a control → submit its owning form (the only no-JS key effect).
     return this.#page.submitFromElement(this.#firstEl());
   }
+
+  // The DOM is static per render: a state either already holds (resolve now) or
+  // never will without JS (throw — there's nothing to wait for). Mirrors the
+  // Playwright states; timeout/polling are no-ops here.
+  async waitFor(opts = {}) {
+    const state = opts.state ?? "visible";
+    const holds = WAIT_STATES[state] ?? WAIT_STATES.visible;
+    if (holds(this)) return;
+    throw new Error(`turbo-crawl: locator.waitFor(state=${state}) not satisfied (static DOM)`);
+  }
 }
+
+const WAIT_STATES = {
+  attached: (loc) => loc.count() > 0,
+  detached: (loc) => loc.count() === 0,
+  hidden: (loc) => !loc.isVisible(),
+  visible: (loc) => loc.isVisible(),
+};

@@ -252,6 +252,10 @@ export declare class Locator {
   uncheck(): this;
   selectOption(value: string): this;
   press(): Promise<NavResult>;
+  waitFor(opts?: {
+    state?: "attached" | "detached" | "visible" | "hidden";
+    timeout?: number;
+  }): Promise<void>;
 }
 export interface NavigatorOverrides {
   userAgent?: string;

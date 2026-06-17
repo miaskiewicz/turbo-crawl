@@ -57,7 +57,7 @@ happy-dom). turbo-crawl is unusual on four axes at once:
 See [SPEC.md](./SPEC.md) for the design and [STATUS.md](./STATUS.md) for current
 capabilities.
 
-Status: **v0.1.7 — working** ([npm](https://www.npmjs.com/package/@miaskiewicz/turbo-crawl)).
+Status: **v0.1.8 — working** ([npm](https://www.npmjs.com/package/@miaskiewicz/turbo-crawl)).
 Page + interaction, hardened networking (cookies / `document.cookie` bridge /
 robots + crawl-delay / charset / size + redirect caps, HTTP/2 + DNS-cache
 dispatcher, 304 conditional-request cache), crawl orchestration (`Crawler` +
@@ -223,6 +223,12 @@ brand-rejects a non-Playwright `Locator`). `expect(x)` dispatches on its argumen
 a **Locator**, a **Page**, an **APIResponse**, or any plain value. Every form
 supports `.not`; matchers run once (no auto-retry — nothing changes without JS).
 String/RegExp/array argument forms match Playwright.
+
+**CJS test runners** (`@playwright/test` resolves spec files with `require`) can't
+statically import the engine — turbo-dom's parser uses top-level `await`, so the
+`./playwright` graph is ESM-only. Load `chromium` with a dynamic `import()` (the
+page fixture already does), and `require` `expect` from the dedicated TLA-free
+subpath: `const { expect } = require("@miaskiewicz/turbo-crawl/playwright/expect")`.
 
 | Class | Supported matchers |
 | --- | --- |

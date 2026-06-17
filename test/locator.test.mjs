@@ -83,6 +83,42 @@ describe("locators — resolution", () => {
     // a `for=` pointing at a missing id resolves to nothing (scan returns null)
     assert.equal(byLabel("Ghost")(root).length, 0);
   });
+  it("getByLabel resolves via aria-labelledby (MUI: control references the label id)", async () => {
+    const p = new Page({
+      fetchHtml: stubFetch({
+        "https://a/":
+          '<body><label id=":r0:">Title</label>' +
+          '<div aria-labelledby=":r0:"><input name="t"></div>' +
+          '<label id=":r1:">Name (English)</label><textarea aria-labelledby=":r1:" name="n"></textarea></body>',
+      }),
+    });
+    await p.goto("https://a/");
+    assert.equal(p.getByLabel("Title").count(), 1);
+    assert.equal(p.getByLabel("Title").getAttribute("aria-labelledby"), ":r0:");
+    assert.equal(p.getByLabel("Name (English)").getAttribute("name"), "n");
+  });
+  it("getByLabel resolves a control's own aria-label", async () => {
+    const p = new Page({
+      fetchHtml: stubFetch({
+        "https://al/": '<body><input aria-label="Search field" name="s"></body>',
+      }),
+    });
+    await p.goto("https://al/");
+    assert.equal(p.getByLabel("Search field").count(), 1);
+    assert.equal(p.getByLabel("Search field").getAttribute("name"), "s");
+    assert.equal(p.getByLabel(/search/i).count(), 1);
+  });
+  it("getByLabel does not double-count a control reachable two ways", async () => {
+    const p = new Page({
+      fetchHtml: stubFetch({
+        // for=/id AND aria-label both point at the same input
+        "https://d/":
+          '<body><label for="x">Email</label><input id="x" aria-label="Email" name="e"></body>',
+      }),
+    });
+    await p.goto("https://d/");
+    assert.equal(p.getByLabel("Email").count(), 1);
+  });
   it("getByPlaceholder / getByTestId / getByAltText / getByTitle", async () => {
     const p = await page();
     assert.equal(p.getByPlaceholder("find products").count(), 1);
@@ -168,6 +204,26 @@ describe("locators — actions", () => {
     p.getByLabel("Search").fill("hi");
     const nav = await p.getByRole("button", { name: "Go" }).press();
     assert.equal(nav.title, "Results");
+  });
+});
+
+describe("locators — waitFor (static DOM)", () => {
+  it("resolves immediately when the state already holds", async () => {
+    const p = await page();
+    await p.getByRole("button", { name: "Go" }).waitFor(); // default: visible
+    await p.getByRole("button", { name: "Go" }).waitFor({ state: "visible" });
+    await p.getByRole("button", { name: "Go" }).waitFor({ state: "attached" });
+    await p.locator(".nope").waitFor({ state: "detached" });
+    await p.locator(".nope").waitFor({ state: "hidden" });
+  });
+  it("throws when the state cannot be satisfied (no JS to change the DOM)", async () => {
+    const p = await page();
+    await assert.rejects(() => p.locator(".nope").waitFor(), /waitFor/);
+    await assert.rejects(() => p.locator(".nope").waitFor({ state: "visible" }), /static DOM/);
+    await assert.rejects(
+      () => p.getByRole("button", { name: "Go" }).waitFor({ state: "detached" }),
+      /waitFor/,
+    );
   });
 });
 

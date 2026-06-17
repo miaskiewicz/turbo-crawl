@@ -68,12 +68,19 @@ no elements"` if empty, except `isVisible`):
 - `selectOption(value)` → `selectOption(first, value)`, return `this`.
 - `press()` — Enter on a control → `page.submitFromElement(first)` (the only no-JS
   key effect).
+- `waitFor({ state })` — static-DOM semantics: the state (`visible` default /
+  `attached` / `detached` / `hidden`) either already holds (resolves) or never will
+  without JS (throws — nothing to wait for). `timeout` is ignored (no polling).
 
 ## Key internals
 `textMatch` (RegExp `.test`, else exact vs substring), `collect` (filtered
-NodeList → array), `roleMatches`, `hasMatchingChild`, `labelTarget`, `byId` /
-`scanById` (colon-safe id resolution); `#firstEl` (throws on empty), `#derive`
-(wraps a transform of the resolved set into a new lazy `Locator`).
+NodeList → array), `roleMatches`, `hasMatchingChild`, `byId` / `scanById`
+(colon-safe id resolution); label resolution via `addLabelMatches` →
+`collectLabelTargets` (`for`/id, `aria-labelledby` back-refs through
+`byAriaLabelledBy`, wrapped input) plus `addAriaLabelMatches` (a control's own
+`aria-label`), de-duped by `pushUnique`; `WAIT_STATES` dispatch table backing
+`waitFor`; `#firstEl` (throws on empty), `#derive` (wraps a transform of the
+resolved set into a new lazy `Locator`).
 
 ## Depends on / used by
 - Depends on `actions.mjs` (`fillValue`), `aria.mjs` (`accessibleName`, `roleOf`),
