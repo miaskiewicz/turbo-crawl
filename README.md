@@ -1,17 +1,47 @@
 # turbo-crawl
 
-> Native-speed, **browserless** web crawler for AI agents — built on
+> Native-speed, **browserless** web crawler **and Playwright-compatible script
+> runner** for AI agents — built on
 > [turbo-dom](https://github.com/miaskiewicz/turbo-dom). Fetch + parse + extract
-> with no headless browser; 100×+ faster on server-rendered pages.
+> + drive pages with no headless browser; 100×+ faster on server-rendered pages.
 
-turbo-crawl turns turbo-dom into a headless, agent-grade fetch/extract engine:
-indexed interactive elements, a link/form graph, an accessibility tree, markdown
-and plain-text views, rendered-HTML capture, CSS/XPath node queries, Playwright
-locators, and schema-driven structured extraction — plus an MCP interface agents
-drive directly. It is **a crawler, not a browser**: no pixels, no layout. For
-pages that need JavaScript it runs their scripts on turbo-dom (no Chromium) —
-either by mining server-embedded hydration state or via a true-isolate
-JS-execution tier (see below).
+turbo-crawl is two things in one engine, on its own native DOM:
+
+- **A crawler** — point it at a domain and stream page records: indexed
+  interactive elements, a link/form graph, an accessibility tree, markdown and
+  plain-text views, rendered-HTML capture, CSS/XPath node queries, and
+  schema-driven structured extraction. Plus a 33-tool **MCP** interface agents
+  drive directly.
+- **A drop-in Playwright replacement** — the same `chromium.launch()` →
+  `page.goto()` → locators → actions → `expect` API, so existing Playwright
+  scripts and tests run **unchanged** — but against turbo-dom instead of a
+  browser. No Chromium, no pixels, no layout.
+
+For pages that need JavaScript it runs their scripts on turbo-dom (no browser),
+either by mining server-embedded hydration state or by executing page JS inside
+a **true V8 isolate** and re-rendering the DOM (see below).
+
+## What makes it different
+
+Most tools in this space pick one lane: a crawler **or** a browser-automation
+library, and they get their DOM from a real browser (Playwright/Puppeteer/
+Selenium) or an in-process fake DOM with no security isolation (jsdom,
+happy-dom). turbo-crawl is unusual on three axes at once:
+
+1. **Crawler _and_ Playwright-API script runner on one native DOM.** The same
+   engine bulk-crawls a domain and runs Playwright-style scripts/tests — no
+   browser anywhere in the stack.
+2. **Its own DOM, not a browser's.** turbo-dom is a native + WASM HTML parser
+   with a lazy copy-on-write DOM — native-speed parse, no pixels/layout/IPC.
+3. **A V8 isolate to run page JS + re-render.** The `secure` JS tier executes
+   page (or your own) JavaScript inside a real V8 isolate (`isolated-vm`) —
+   capped heap, no ambient host access — against a WASM DOM, then re-renders.
+   Most JS-capable crawlers instead drive a full headless browser, or run page
+   scripts in-process with a fake DOM that offers **no real security isolation**
+   (Node's `vm` is [explicitly not a security
+   boundary](https://nodejs.org/api/vm.html); cf. happy-dom
+   [CVE-2025-61927](https://github.com/capricorn86/happy-dom/wiki/JavaScript-Evaluation-Warning)).
+   Running hostile page JS in a true isolate against a lightweight DOM is rare.
 
 See [SPEC.md](./SPEC.md) for the design and [STATUS.md](./STATUS.md) for current
 capabilities.
@@ -192,6 +222,40 @@ auto-detects installed engines (`firefox`/`webkit`, and anti-detect browsers lik
 `playwright-extra`/`patchright`/`rebrowser-playwright`); see
 [harness/competitive/README.md](./harness/competitive/README.md). (Numbers are
 network-bound and machine/run dependent.)
+
+## Crawler-vs-crawler benchmark
+
+`harness/crawlers/` races turbo-crawl against other open-source crawlers on a
+real, paginated site — **same** 20-page same-host crawl of `books.toscrape.com`,
+**same** ~150 ms per-request politeness on every engine, items counted with the
+**same** CSS selector. Median of 3 timed runs, live network (`npm run
+crawl-bench`):
+
+| crawler | runtime model | items | median ms | pages/s |
+|---|---|---|---|---|
+| crawlee `CheerioCrawler` | Node | 339 | 2767 | 7.2 |
+| **turbo-crawl (no-js)** | **Node, browserless** | 316 | 3261 | **6.1** |
+| spider-rs | Rust + N-API | 194 | 3486 | 5.7 |
+| got + cheerio (hand-rolled) | Node | 339 | 5590 | 3.6 |
+| node-crawler (`crawler`) | Node | 339 | 49624 | 0.4 |
+| Scrapy | Python *(subprocess)* | 246 | 49270 | 0.4 |
+| Colly | Go *(subprocess)* | 320 | 45664 | 0.4 |
+
+At equal politeness the wall-clock is **network-bound**, so the in-process
+crawlers cluster together: turbo-crawl sits in the **top tier** alongside the
+dedicated speed engines (crawlee, spider-rs) and ahead of a hand-rolled
+got+cheerio loop — while extracting equivalent content and running **no
+browser**. The heavyweight engines trail ~15×: Scrapy and Colly pay a fresh
+process startup per crawl (the harness shells out to their CLIs), and
+node-crawler's per-request overhead is high. turbo-dom's raw parse advantage
+doesn't show here — at 20 live pages, network swamps a sub-millisecond parse;
+it shows in-memory instead (links ~18k/s, crawl ~14k pages/s, below). And unlike
+every engine in this table, the *same* turbo-crawl also runs Playwright scripts
+(parity table above). See
+[harness/crawlers/README.md](./harness/crawlers/README.md) — competitors
+auto-detect and missing ones are skipped; install them with
+`npm i -D @spider-rs/spider-rs crawlee cheerio got crawler` (+ `brew install
+pipx go && pipx install scrapy` for Scrapy/Colly). (Machine/run dependent.)
 
 ## Development
 

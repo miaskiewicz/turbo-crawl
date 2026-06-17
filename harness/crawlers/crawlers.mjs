@@ -198,15 +198,20 @@ async function gotCheerioCrawl(target, opts) {
 }
 
 // ── crawlee CheerioCrawler (nojs) ────────────────────────────────────────────
+let crawleeRun = 0; // crawlee dedupes URLs in a PERSISTENT queue; use a fresh one per run
 async function crawleeCheerioCrawl(target, opts) {
-  const { CheerioCrawler } = await import("crawlee");
+  const { CheerioCrawler, RequestQueue, log } = await import("crawlee");
+  log.setLevel(log.LEVELS.OFF); // keep the benchmark table clean
+  const requestQueue = await RequestQueue.open(`tc-bench-${crawleeRun++}`);
   let pages = 0;
   let items = 0;
   const t0 = process.hrtime.bigint();
   const crawler = new CheerioCrawler({
+    requestQueue,
     maxRequestsPerCrawl: opts.pages,
     maxConcurrency: CONCURRENCY,
-    minDelayBetweenRequestsMillis: POLITENESS_MS,
+    // crawlee throttles by rate, not a fixed gap — match our ~POLITENESS_MS spacing.
+    maxRequestsPerMinute: Math.round(60000 / POLITENESS_MS),
     async requestHandler({ $, request, enqueueLinks }) {
       pages++;
       $(target.itemSelector).each((_i, el) => {
@@ -220,6 +225,7 @@ async function crawleeCheerioCrawl(target, opts) {
     },
   });
   await crawler.run([target.start]);
+  await requestQueue.drop();
   return { pages, items, ms: ms(t0) };
 }
 
@@ -242,12 +248,11 @@ async function nodeCrawlerCrawl(target, opts) {
           $(target.itemSelector).each((_i, el) => {
             if (cheerioItemText($, el, target.itemAttr)) items++;
           });
-          for (const link of cheerioLinks(
-            $,
-            res.request?.uri?.href ?? target.start,
-            target.host,
-            target.allow,
-          )) {
+          // Resolve relative links against the page's OWN url (res.options.url);
+          // res.request.uri is undefined here, so deep pages must not fall back
+          // to the root or their `../` links 404.
+          const base = res.options?.url ?? target.start;
+          for (const link of cheerioLinks($, base, target.host, target.allow)) {
             if (!seen.has(link) && pages + c.queueSize < opts.pages) {
               seen.add(link);
               c.add(link);
@@ -294,7 +299,10 @@ async function spiderRsCrawl(target, opts) {
   const cheerio = await import("cheerio");
   let pages = 0;
   let items = 0;
-  const website = new Website(target.start).withBudget({ "*": opts.pages }).build();
+  const website = new Website(target.start)
+    .withBudget({ "*": opts.pages })
+    .withDelay(POLITENESS_MS) // same per-request politeness as every other engine
+    .build();
   const onPage = (_err, page) => {
     if (pages >= opts.pages || !page?.content) return;
     if (target.allow && !target.allow(page.url)) return;

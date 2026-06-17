@@ -46,3 +46,7 @@ Thumbs.db
 
 # harness subprocess crawler artifacts
 harness/crawlers/__pycache__/
+
+# crawlee benchmark scratch storage
+storage/
+harness/crawlers/storage/
