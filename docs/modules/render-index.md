@@ -32,6 +32,11 @@ HTML so all existing extraction runs over a rendered page. It owns:
     and for a Crawler `{ fallback }`. Returns `{ ...res, html, discovered }` where
     `html` is the rendered HTML and `discovered` is the list of URLs the page
     pulled during render.
+  - Returned `eval(code, ...args)` re-enters the **live** render heap (window
+    globals, handlers) of the last render and appends the post-eval DOM to history;
+    `latestDom()` / `domHistory()` read that history (one entry per navigation + per
+    mutating eval). The fast backend guards eval with `assertSafeEval`; the secure
+    backend runs full JS contained in the isolate.
   - Returned `close()` disposes the backend.
 
 ## Key internals

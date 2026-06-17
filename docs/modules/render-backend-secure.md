@@ -15,7 +15,12 @@ for open-web crawling. `isolated-vm` + `esbuild` are optional (native-build) dep
     - `renderOpts.hostFetch` — host net fetcher; when present, a `fetchBridge`
       Reference is installed as `__tcHostFetch` so guest `fetch`/XHR work.
     - `renderOpts.settleRounds` — max timer-drain rounds (default `5`).
-  - `close()` — disposes the isolate and resets readiness.
+  - `eval(code, args)` — re-enter the **persistent isolate context** (page globals
+    survive across calls) via `__tcEval` and return the (ivm-copyable) value;
+    appends the post-eval DOM to history. The isolate IS the boundary, so no
+    `assertSafeEval` guard is applied. Throws before the first render.
+  - `latestDom()` / `domHistory()` — the last / all DOM snapshots (host-side).
+  - `close()` — disposes the isolate, resets readiness, clears history.
 
 ## Key internals
 - **Boot is lazy and cached** via `ensure()` (`ready` promise). It dynamically

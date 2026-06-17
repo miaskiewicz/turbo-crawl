@@ -129,6 +129,17 @@ export function jsRenderer(opts = {}) {
 
   return {
     fetchHtml: renderFetch,
+    // Re-enter the live render heap (writer; appends post-eval DOM to history).
+    async eval(code, ...args) {
+      return (await backendPromise).eval(code, args);
+    },
+    // Getters over the DOM history (per navigation + per mutating eval).
+    async latestDom() {
+      return (await backendPromise).latestDom();
+    },
+    async domHistory() {
+      return (await backendPromise).domHistory();
+    },
     async close() {
       await (await backendPromise).close();
     },

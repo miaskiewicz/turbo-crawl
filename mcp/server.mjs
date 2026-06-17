@@ -247,6 +247,8 @@ const INPUT_SCHEMAS = {
     properties: { code: { type: "string" } },
     required: ["code"],
   },
+  latest_dom: { type: "object", properties: {} },
+  dom_history: { type: "object", properties: {} },
 };
 
 // Default a Page with HTTP/2 + DNS cache (dispatcher) and a session-wide 304

@@ -72,6 +72,38 @@ for (const mode of ["fast", "secure"]) {
       await close();
     });
 
+    it("eval re-enters the live heap + records DOM history (no clobber)", async () => {
+      const renderer = jsRenderer({ mode, fetchHtml: stub() });
+      const page = new Page({ fetchHtml: renderer.fetchHtml }).setRenderer(renderer);
+      await page.goto("https://spa.test/");
+
+      // history[0] = the rendered DOM
+      let hist = await page.domHistory();
+      assert.equal(hist.length, 1);
+      assert.match(hist[0], /Rendered/);
+      // live heap: the app's appended nodes are present (not a re-parse)
+      assert.equal(await page.evalJs("return document.querySelectorAll('a').length"), 1);
+      // mutate via eval → NEW history entry; latestDom reflects it; page.html() (the
+      // navigation snapshot) is NOT clobbered
+      await page.evalJs("document.querySelector('h1').textContent = 'Mutated'");
+      hist = await page.domHistory();
+      assert.equal(hist.length, 2);
+      assert.match(await page.latestDom(), /Mutated/);
+      assert.match(page.html(), /Rendered/);
+      assert.doesNotMatch(page.html(), /Mutated/);
+
+      const ok = await page.injectJs("document.body.appendChild(document.createElement('hr'))");
+      assert.deepEqual(ok, { ok: true });
+      assert.equal((await page.domHistory()).length, 3);
+      await renderer.close();
+    });
+
+    it("eval before any render throws", async () => {
+      const renderer = jsRenderer({ mode, fetchHtml: stub() });
+      await assert.rejects(() => renderer.eval("return 1"), /no rendered page/);
+      await renderer.close();
+    });
+
     it("currentScript.getAttribute('src') returns the RAW attribute, not the absolute URL", async () => {
       // Bundler runtimes (Turbopack/webpack/Vite) read currentScript.getAttribute('src')
       // and do a `.startsWith("/_next/")`-style check to derive the chunk path — an

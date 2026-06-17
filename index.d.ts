@@ -148,10 +148,17 @@ export interface JsRendererOptions {
   memoryLimit?: number;
   onRequest?: (url: string) => void;
 }
-export declare function jsRenderer(opts?: JsRendererOptions): {
+export interface JsRenderer {
   fetchHtml: typeof fetchHtml;
+  /** Re-enter the live render heap; appends the post-eval DOM to history. */
+  eval(code: string, ...args: unknown[]): Promise<unknown>;
+  /** Most recent DOM snapshot (per nav + per mutating eval). */
+  latestDom(): Promise<string>;
+  /** All DOM snapshots in order. */
+  domHistory(): Promise<string[]>;
   close(): Promise<void>;
-};
+}
+export declare function jsRenderer(opts?: JsRendererOptions): JsRenderer;
 
 // --- batch -------------------------------------------------------------------
 export type BatchMode = "no-js" | "fast" | "secure";
@@ -261,8 +268,11 @@ export declare class Page {
   setExtraHeaders(headers: Record<string, string>): this;
   get fetchHtml(): typeof fetchHtml;
   setFetchHtml(fn: typeof fetchHtml): this;
+  setRenderer(renderer: JsRenderer | null): this;
   evalJs(code: string, ...args: unknown[]): unknown;
-  injectJs(code: string): { ok: true };
+  injectJs(code: string): { ok: true } | Promise<{ ok: true }>;
+  latestDom(): string | Promise<string>;
+  domHistory(): string[] | Promise<string[]>;
   goto(url: string, opts?: FetchOptions): Promise<NavResult>;
   follow(href: string, opts?: FetchOptions): Promise<NavResult>;
   reload(opts?: FetchOptions): Promise<NavResult>;

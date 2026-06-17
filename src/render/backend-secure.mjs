@@ -89,9 +89,17 @@ async function callGlobal(context, name, args) {
   return ref.apply(undefined, args, { arguments: { copy: true }, result: { copy: true } });
 }
 
+// Append a DOM snapshot only when it differs from the last (read-only evals don't
+// grow the history).
+function pushIfChanged(history, html) {
+  if (history[history.length - 1] !== html) history.push(html);
+}
+
 export function createSecureBackend(opts = {}) {
   const memoryLimit = opts.memoryLimit ?? 256;
   let ready = null;
+  let rendered = false;
+  const history = [];
 
   async function ensure() {
     if (!ready) {
@@ -114,11 +122,32 @@ export function createSecureBackend(opts = {}) {
       await runScripts(context, scripts);
       await callGlobal(context, "__tcFireReady", []);
       await drainTimers(context, renderOpts);
-      return callGlobal(context, "__tcSnapshot", []);
+      const out = await callGlobal(context, "__tcSnapshot", []);
+      rendered = true;
+      pushIfChanged(history, out);
+      return out;
+    },
+    // Re-enter the live isolate heap; the isolate IS the security boundary, so the
+    // node:vm guard is unnecessary here (full JS runs safely contained). Result must
+    // be ivm-copyable (JSON-able). Appends the post-eval DOM to history.
+    async eval(code, args = []) {
+      if (!rendered) throw new Error("turbo-crawl: no rendered page to eval against");
+      const { context } = await ensure();
+      const value = await callGlobal(context, "__tcEval", [String(code), args]);
+      pushIfChanged(history, await callGlobal(context, "__tcSnapshot", []));
+      return value;
+    },
+    latestDom() {
+      return history.length ? history[history.length - 1] : "";
+    },
+    domHistory() {
+      return [...history];
     },
     async close() {
       if (ready) (await ready).isolate.dispose();
       ready = null;
+      rendered = false;
+      history.length = 0;
     },
   };
 }

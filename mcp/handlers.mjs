@@ -62,13 +62,16 @@ function rendererFor(ctx, page, mode) {
   return r;
 }
 
-// Point the Page's fetcher at Lane A ("no-js") or a render tier ("fast"/"secure").
+// Point the Page's fetcher at Lane A ("no-js") or a render tier ("fast"/"secure"),
+// binding the renderer so eval_js/inject_js re-enter the live heap + DOM history.
 function setMode(ctx, page, mode) {
   if (!mode || mode === "no-js") {
     if (ctx.base) page.setFetchHtml(ctx.base);
+    page.setRenderer(null);
     return { mode: "no-js" };
   }
-  page.setFetchHtml(rendererFor(ctx, page, mode).fetchHtml);
+  const r = rendererFor(ctx, page, mode);
+  page.setFetchHtml(r.fetchHtml).setRenderer(r);
   return { mode };
 }
 
@@ -480,8 +483,20 @@ export function buildTools(page) {
     {
       name: "inject_js",
       description:
-        "Inject a <script> with `code` into the page and execute it against the current DOM (DOM mutations persist; the element stays in the serialized HTML). Params: { code }. Returns { ok }.",
+        "Inject a <script> with `code` into the page and execute it against the current DOM (DOM mutations persist; the element stays in the serialized HTML). In render mode it runs in the live heap and appends to the DOM history. Params: { code }. Returns { ok }.",
       handler: ({ code }) => page.injectJs(code),
+    },
+    {
+      name: "latest_dom",
+      description:
+        "Most recent DOM snapshot after eval/inject (render tier); the page's current HTML in no-js mode. Returns an HTML string.",
+      handler: () => page.latestDom(),
+    },
+    {
+      name: "dom_history",
+      description:
+        "DOM history: one serialized HTML snapshot per navigation and per mutating eval/inject (render tier). Returns an array of HTML strings.",
+      handler: () => page.domHistory(),
     },
   ];
 }

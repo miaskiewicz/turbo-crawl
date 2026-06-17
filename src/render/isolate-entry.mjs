@@ -196,6 +196,15 @@ globalThis.__tcDrainTimers = () => {
   return timers.length;
 };
 
+// Re-enter the LIVE render context: run a JS function body (statements; `return`
+// for a value, `arguments` for args) against the persisted window/document/heap
+// after a render. The result must be ivm-copyable (JSON-able) to cross back.
+globalThis.__tcEval = (code, args) => {
+  globalThis.__tcArgs = args || [];
+  // biome-ignore lint: indirect eval runs against the installed render globals.
+  return (0, eval)(`(function(){ ${code}\n}).apply(globalThis, globalThis.__tcArgs)`);
+};
+
 // Serialize the (possibly mutated) DOM back to the host as an HTML string.
 globalThis.__tcSnapshot = () => {
   const root = globalThis.document.documentElement;

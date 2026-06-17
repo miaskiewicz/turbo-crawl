@@ -9,6 +9,7 @@ import { stubFetch } from "./helpers.mjs";
 const HOME = "https://shop.test/";
 const PRODUCT = "https://shop.test/p/1";
 const FORM = "https://shop.test/signup";
+const SPA = "https://shop.test/app";
 
 function tools() {
   const page = new Page({
@@ -16,6 +17,7 @@ function tools() {
       [HOME]: `<title>Home</title><body><main><h1>Shop</h1><a href="/p/1">Widget</a></main></body>`,
       [PRODUCT]: `<title>Widget — $9</title><body><main><h1>Widget</h1><span class="price">$9</span></main></body>`,
       [FORM]: `<title>Sign up</title><body><form action="/signup" method="post"><input name="email"><button type="submit">Go</button></form></body>`,
+      [SPA]: `<title>App</title><body><div id="root"></div><script>window.__APP="live";document.getElementById("root").textContent="Hydrated"</script></body>`,
     }),
   });
   const map = new Map(buildTools(page).map((t) => [t.name, t]));
@@ -77,6 +79,8 @@ describe("MCP handlers (Page API 1:1)", () => {
       "extract_links",
       "eval_js",
       "inject_js",
+      "latest_dom",
+      "dom_history",
     ]) {
       assert.ok(map.has(name), `missing tool ${name}`);
     }
@@ -95,6 +99,18 @@ describe("MCP handlers (Page API 1:1)", () => {
     await call("inject_js", { code: "document.querySelector('h1').textContent = 'Mutated'" });
     assert.equal(await call("text_content", { selector: "h1" }), "Mutated");
     assert.match(await call("html"), /<script>/);
+  });
+
+  it("render mode: eval_js reaches the live heap; latest_dom / dom_history", async () => {
+    const { call } = tools();
+    const nav = await call("render", { mode: "fast", url: SPA });
+    assert.equal(nav.title, "App");
+    // window global set by the page script — present only in the live render heap
+    assert.equal(await call("eval_js", { code: "return window.__APP" }), "live");
+    assert.match(await call("latest_dom"), /Hydrated/);
+    assert.ok((await call("dom_history")).length >= 1);
+    await call("eval_js", { code: "document.body.appendChild(document.createElement('hr'))" });
+    assert.ok((await call("dom_history")).length >= 2);
   });
 
   it("offline tools: detect_js, cookies, snapshot, forms, find_text, fill_many, extract_links, set_mode", async () => {

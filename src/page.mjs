@@ -9,6 +9,7 @@ import { createEnvironment } from "@miaskiewicz/turbo-dom/runtime";
 import { buildSubmission, fillValue } from "./actions.mjs";
 import { accessibilityTree } from "./ax.mjs";
 import { CookieJar } from "./cookies.mjs";
+import { assertSafeEval } from "./eval-guard.mjs";
 import { interactiveElements, links } from "./extract.mjs";
 import { extractHydrationState } from "./hydration.mjs";
 import { byAttrText, byCss, byLabel, byRole, byText, Locator } from "./locator.mjs";
@@ -56,6 +57,7 @@ export class Page {
   #histIndex = -1;
   #requests = []; // URLs the page fetched during render (JS tier), for crawl discovery
   #extraHeaders = {}; // persistent extra HTTP headers merged into every fetch
+  #renderer = null; // bound jsRenderer (live-heap eval + DOM history), or null
 
   /**
    * @param {object} [opts]
@@ -306,29 +308,52 @@ export class Page {
   }
 
   /**
-   * Run a JS function BODY (statements; use `return` for a value, `arguments` for
-   * args) against the current rendered DOM — Selenium `executeScript` /
-   * Playwright `evaluate` ergonomics for multi-statement code. Runs in a node:vm
-   * over the parsed/rendered DOM (`window`/`document`/`navigator`/`console`), not
-   * the page's live render isolate.
+   * Bind a jsRenderer so evalJs/injectJs re-enter its LIVE render heap (window
+   * globals, handlers) and read its DOM history, instead of the parsed snapshot.
+   * Pass `null` to unbind (back to the node:vm-over-current-DOM path).
    */
-  evalJs(code, ...args) {
-    const sandbox = this.#evalContext();
-    sandbox.__args = args;
-    return vm.runInContext(`(function(){ ${code}\n}).apply(null, __args)`, sandbox);
+  setRenderer(renderer) {
+    this.#renderer = renderer;
+    return this;
   }
 
   /**
-   * Inject a `<script>` with `code` into the DOM and execute it against the
-   * current DOM (Playwright `addScriptTag({ content })`). The element persists in
-   * the serialized HTML; DOM mutations the script makes stick. Returns `{ ok }`.
+   * Run a JS function BODY (statements; use `return` for a value, `arguments` for
+   * args). With a bound renderer this re-enters the LIVE render heap and records a
+   * new DOM-history entry; otherwise it runs in a node:vm over the parsed/rendered
+   * DOM (`window`/`document`/`navigator`/`console`) — NOT a security sandbox, so
+   * `assertSafeEval` best-effort-guards it (use the secure backend for untrusted JS).
+   */
+  evalJs(code, ...args) {
+    if (this.#renderer) return this.#renderer.eval(code, ...args);
+    const sandbox = this.#evalContext();
+    sandbox.__args = args;
+    return vm.runInContext(`(function(){ ${assertSafeEval(code)}\n}).apply(null, __args)`, sandbox);
+  }
+
+  /**
+   * Inject a `<script>` with `code` and execute it (Playwright `addScriptTag`).
+   * With a bound renderer it runs in the live heap (DOM history grows); otherwise
+   * the element persists in the serialized HTML and mutations stick. Returns `{ ok }`.
    */
   injectJs(code) {
+    if (this.#renderer) return this.#renderer.eval(code).then(() => ({ ok: true }));
+    assertSafeEval(code);
     const script = this.document.createElement("script");
     script.textContent = code;
     (this.document.body ?? this.document.documentElement)?.appendChild(script);
     vm.runInContext(code, this.#evalContext());
     return { ok: true };
+  }
+
+  /** Most recent DOM (post-eval) from the bound renderer, else current `html()`. */
+  latestDom() {
+    return this.#renderer ? this.#renderer.latestDom() : this.html();
+  }
+
+  /** DOM history (per navigation + per mutating eval), else `[html()]`. */
+  domHistory() {
+    return this.#renderer ? this.#renderer.domHistory() : [this.html()];
   }
 
   /** Evaluate `fn(element, ...args)` against the first match of `selector`. */

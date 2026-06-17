@@ -26,7 +26,13 @@ targets only; open-web crawling should use the secure (isolated-vm) backend.
     - `opts.settleMs` — sleep per settle round (default `1`).
     - `opts.settleRounds` — minimum settle rounds (default `5`).
     - `opts.maxRounds` — max settle rounds (default `50`).
-  - `close()` — no-op (no resources to release).
+  - `eval(code, args)` — re-enter the **kept-alive** sandbox of the last render
+    (window globals, handlers persist) and run a function body; appends the
+    post-eval DOM to `history` (via `pushIfChanged`, so read-only evals don't grow
+    it). Guarded by `assertSafeEval` — node:vm is not a security boundary. Throws if
+    nothing has rendered yet.
+  - `latestDom()` / `domHistory()` — the last / all DOM snapshots.
+  - `close()` — drop the live sandbox + clear history.
 
 ## Key internals
 - `installGlobals(sandbox, { html, url })` (from `@miaskiewicz/turbo-dom/install`)

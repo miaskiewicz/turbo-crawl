@@ -10,12 +10,16 @@ turbo-crawl is two things in one engine, on its own native DOM:
 - **A crawler** — point it at a domain and stream page records: indexed
   interactive elements, a link/form graph, an accessibility tree, markdown and
   plain-text views, rendered-HTML capture, CSS/XPath node queries, and
-  schema-driven structured extraction. Plus a 33-tool **MCP** interface agents
-  drive directly.
+  schema-driven structured extraction. Plus a 53-tool **MCP** interface agents
+  drive directly (incl. `crawl`, `batch`, `render`/`set_mode`, `eval_js`/
+  `inject_js`, cookies/headers, `snapshot`).
 - **A drop-in Playwright replacement** — the same `chromium.launch()` →
   `page.goto()` → locators → actions → `expect` API, so existing Playwright
   scripts and tests run **unchanged** — but against turbo-dom instead of a
-  browser. No Chromium, no pixels, no layout.
+  browser. No Chromium, no pixels, no layout. Now with **network events**
+  (`page.on('response')`, `waitForResponse`), **request routing/mocking**
+  (`page.route`), and **persistent context state** (cookies + `localStorage` +
+  `storageState` across navigations).
 
 For pages that need JavaScript it runs their scripts on turbo-dom (no browser),
 either by mining server-embedded hydration state or by executing page JS inside
@@ -28,11 +32,13 @@ library, and they get their DOM from a real browser (Playwright/Puppeteer/
 Selenium) or an in-process fake DOM with no security isolation (jsdom,
 happy-dom). turbo-crawl is unusual on four axes at once:
 
-1. **AI-agent-ready out of the box.** It ships a full **MCP server** (33 tools:
+1. **AI-agent-ready out of the box.** It ships a full **MCP server** (53 tools:
    navigate, click/fill/submit, query, extract, accessibility tree, markdown,
-   `evaluate`, …) so an agent drives real pages over stdio with **no browser and
-   no glue code** — `npx turbo-crawl-mcp`. Most crawlers are libraries you wrap
-   yourself; this one is an agent tool on day one.
+   `crawl` a whole site, `batch` a URL list, `render`/`set_mode` to run page JS,
+   `eval_js`/`inject_js` against the live render heap with a DOM-history trail,
+   cookies/headers, `snapshot`, …) so an agent drives real pages over stdio with
+   **no browser and no glue code** — `npx turbo-crawl-mcp`. Most crawlers are
+   libraries you wrap yourself; this one is an agent tool on day one.
 2. **Crawler _and_ Playwright-API script runner on one native DOM.** The same
    engine bulk-crawls a domain and runs Playwright-style scripts/tests — no
    browser anywhere in the stack.
@@ -51,15 +57,17 @@ happy-dom). turbo-crawl is unusual on four axes at once:
 See [SPEC.md](./SPEC.md) for the design and [STATUS.md](./STATUS.md) for current
 capabilities.
 
-Status: **v0.1.1 — published and working** ([npm](https://www.npmjs.com/package/@miaskiewicz/turbo-crawl)).
+Status: **v0.1.4 — working** ([npm](https://www.npmjs.com/package/@miaskiewicz/turbo-crawl)).
 Page + interaction, hardened networking (cookies / `document.cookie` bridge /
 robots + crawl-delay / charset / size + redirect caps, HTTP/2 + DNS-cache
-dispatcher, 304 conditional-request cache), crawl orchestration, structured
-extraction, CSS+XPath query, Playwright locators + compat façade, a no-Chromium
-JS-execution render tier, and a 33-tool MCP server. ~100% line coverage
-(`npm run test:cov`); benchmarked against other crawlers (above); a Playwright
-differential test (SPEC §14) bounds representation drift when Chromium is
-installed (dev-only).
+dispatcher, 304 conditional-request cache), crawl orchestration (`Crawler` +
+one-shot `crawlSite`) and a `batch` URL-list runner, structured extraction,
+CSS+XPath query, a Playwright compat façade with **events / network / routing /
+persistent context state**, a no-Chromium JS-execution render tier with
+**re-enterable live-heap `evalJs`/`injectJs` + a DOM-history trail**, and a
+53-tool MCP server. ~100% line coverage (`npm run test:cov`); benchmarked against
+other crawlers (above); a Playwright differential test (SPEC §14) bounds
+representation drift when Chromium is installed (dev-only).
 
 ## Install
 
@@ -115,26 +123,55 @@ const data = page.extract({
 ## Crawl a site
 
 ```js
-import { Crawler } from "@miaskiewicz/turbo-crawl";
+import { Crawler, crawlSite, batch } from "@miaskiewicz/turbo-crawl";
 
+// streaming: backpressure-aware async iterator, one record at a time
 for await (const rec of new Crawler({ start, maxPages: 500, concurrency: 8 })) {
   // rec.url, rec.status, rec.view.interactiveElements, rec.extracted
 }
+
+// one-shot: collect a whole crawl into an array (agent-friendly options)
+const recs = await crawlSite({
+  url: start,
+  maxPages: 200,
+  sameHost: true,
+  allow: "/blog/",        // URL regex to keep
+  deny: "\\?utm",         // URL regex to skip
+  mode: "fast",           // "no-js" (default) | "fast" | "secure" — JS-gated pages render
+});
+
+// fan out over a known URL list with a chosen execution mode
+const out = await batch([url1, url2, url3], { mode: "secure", view: "markdown" });
 ```
 
-Concurrency + per-host politeness, backoff/retry, canonical-form dedupe, robots,
-and depth/page caps are all built in.
+`Crawler` is the engine (streaming); `crawlSite` is a one-shot collect over it;
+`batch` runs a fixed URL list. Concurrency + per-host politeness, backoff/retry,
+canonical-form dedupe, robots + crawl-delay, and depth/page caps are all built in.
 
 ## MCP server (agents)
 
 ```sh
-npx turbo-crawl-mcp          # stdio MCP server (33 tools), e.g.:
-# goto, interactive_elements, accessibility_tree, markdown, text, html, links,
-# requests, query, get_by, hydration_state, extract, click, fill, submit,
-# click_selector, fill_selector, select_option, check, uncheck, get_attribute,
-# text_content, inner_html, input_value, is_visible, is_checked, is_enabled,
-# count, evaluate, set_user_agent, go_back, go_forward, reload
+npx turbo-crawl-mcp          # stdio MCP server (53 tools), e.g.:
+# navigation:  goto, go_back, go_forward, reload, set_user_agent
+# content:     interactive_elements, accessibility_tree, markdown, text, html,
+#              links, requests, snapshot, query, get_by, hydration_state, extract
+# interaction: click, fill, submit, click_selector, fill_selector, select_option,
+#              check, uncheck, fill_many, find_text, forms, extract_links
+# accessors:   get_attribute, text_content, inner_html, input_value, count,
+#              is_visible, is_checked, is_enabled
+# bulk:        crawl, batch
+# render/JS:   render, set_mode, eval_js, inject_js, latest_dom, dom_history,
+#              evaluate, detect_js
+# session:     get_cookies, set_cookie, set_extra_headers, robots_check
+# direct:      fetch_json, fetch_raw
 ```
+
+`render`/`set_mode` switch the Page to the `fast`/`secure` JS tier; then `eval_js`
+and `inject_js` run against the **live render heap** (page globals, handlers) and
+each mutation appends to a DOM-history trail readable via `latest_dom`/
+`dom_history`. (`eval_js`/`inject_js` on the no-JS path run in a `node:vm` over the
+parsed DOM behind a best-effort guard — **not** a security sandbox; use `mode:
+secure` for untrusted JS.)
 
 Or embed: `import { createServer } from "@miaskiewicz/turbo-crawl/mcp"`.
 
@@ -146,20 +183,35 @@ engine — **nothing loads playwright or chromium**:
 ```js
 import { chromium, expect } from "@miaskiewicz/turbo-crawl/playwright";
 
-const browser = await chromium.launch();
-const page = await browser.newPage();
+const browser = await chromium.launch({ mode: "fast" });   // run page JS
+const ctx = await browser.newContext({ storageState });     // reuse auth
+const page = await ctx.newPage();
+
+page.on("console", (m) => console.log(m.type(), m.text()));
+page.route("**/analytics/**", (route) => route.abort());    // block/mock requests
+
 await page.goto("https://example.com");
-await page.getByLabel("Search").fill("widgets");
-await page.getByRole("button", { name: "Go" }).click();
-await expect(page.getByText("Results")).toBeVisible();
+const [resp] = await Promise.all([                          // assert on the network
+  page.waitForResponse((r) => r.url().includes("/api") && r.request().method() === "PUT"),
+  page.getByRole("button", { name: "Save" }).click(),
+]);
+await expect(page.getByText("Saved")).toBeVisible();
+const state = await ctx.storageState();                     // cookies + localStorage
 ```
 
 Locators (`getByRole/Text/Label/Placeholder/TestId/AltText/Title`, `locator(css)`,
 `first/last/nth/filter/count`), actions (`click/fill/check/uncheck/selectOption/
 press/type`), accessors, history (`goBack/goForward/reload`), `expect(...)`
-web-first assertions, and `evaluate`/`$eval`/`$$eval` (against the rendered DOM)
-all work. Pixel/render-only APIs (`screenshot`, `pdf`, `route`, `hover`, …) throw
-a clear "no-JS engine" error.
+web-first assertions, `evaluate`/`$eval`/`$$eval`, **events** (`on`/`once`/`off`
+for `request`/`response`/`console`/`pageerror`/…, `waitForResponse`/
+`waitForRequest`/`waitForEvent`), **routing** (`route`/`unroute` →
+`fulfill`/`abort`/`continue`), **init scripts + headers** (`addInitScript`,
+`setExtraHTTPHeaders`), and **persistent context state** (cookie jar +
+`localStorage`/`sessionStorage` across navigations, `addCookies`/`cookies`/
+`storageState`) all work — events/routes/storage require a JS mode (`launch({ mode:
+"fast" | "secure" })`); without one the façade stays Lane A and still emits
+navigation request/response events. Genuinely pixel-only APIs (`screenshot`,
+`pdf`, `hover`) throw a clear "no-browser engine" error.
 
 ## JS-gated pages — no browser
 
@@ -185,6 +237,25 @@ page.links(); page.markdown(); page.query("h1");
 // or auto-escalate only shell-only pages during a crawl:
 new Crawler({ start, fallback: jsRenderer({ mode: "secure" }).fetchHtml });
 ```
+
+The render tier is **re-enterable**: bind it to a Page and `evalJs`/`injectJs` run
+against the **live render heap** (page globals, event handlers, React state) — not
+a re-parsed snapshot — while each mutation appends to a DOM-history trail:
+
+```js
+const renderer = jsRenderer({ mode: "secure" });
+const page = new Page({ fetchHtml: renderer.fetchHtml }).setRenderer(renderer);
+await page.goto("https://some-spa.example");
+
+await page.evalJs("return window.__APP_STATE.user.id");   // reads the live heap
+await page.injectJs("document.querySelector('button').click()");
+await page.latestDom();    // serialized DOM after the click
+await page.domHistory();   // [render, …, post-click] snapshots, in order
+```
+
+On the no-JS path, `evalJs`/`injectJs` run in a `node:vm` over the parsed DOM
+behind a best-effort token guard — **not a security boundary** (Node's `vm` isn't
+one). Run untrusted JS with `mode: "secure"`, where the V8 isolate contains it.
 
 Classic + **ESM-module** scripts run (modules bundled via esbuild, honoring
 `<script type="importmap">`), and page-initiated **`fetch`** *and*

@@ -7,10 +7,16 @@ import vm from "node:vm";
 
 import { installGlobals } from "@miaskiewicz/turbo-dom/install";
 
+import { assertSafeEval } from "../eval-guard.mjs";
 import { makePageFetch, makeXHR } from "./page-fetch.mjs";
 import { drainRound, installVirtualClock, resetClock } from "./virtual-clock.mjs";
 
 export function createFastBackend() {
+  // The last render's live sandbox is kept so eval() can re-enter the page's actual
+  // heap (window globals, handlers) — not a re-parsed snapshot. `history` records a
+  // serialized DOM entry per navigation and per mutating eval (never clobbered).
+  let live = null;
+  const history = [];
   return {
     /**
      * @param {string} html
@@ -37,11 +43,47 @@ export function createFastBackend() {
       } finally {
         resetClock(); // restore turbo-dom's real clock for any other consumer
       }
-      const root = sandbox.document?.documentElement;
-      return root ? `<!DOCTYPE html>\n${root.outerHTML}` : "";
+      live = sandbox;
+      const out = snapshotOf(sandbox);
+      pushIfChanged(history, out);
+      return out;
     },
-    async close() {},
+    // Re-enter the live render heap and append the post-eval DOM to history (writer).
+    // NOT a security sandbox — assertSafeEval is a best-effort guard; use the secure
+    // backend for untrusted code.
+    eval(code, args = []) {
+      if (!live) throw new Error("turbo-crawl: no rendered page to eval against");
+      live.__tcArgs = args;
+      const value = vm.runInContext(
+        `(function(){ ${assertSafeEval(code)}\n}).apply(null, __tcArgs)`,
+        live,
+      );
+      pushIfChanged(history, snapshotOf(live));
+      return value;
+    },
+    // Getters over the DOM history.
+    latestDom() {
+      return history.length ? history[history.length - 1] : "";
+    },
+    domHistory() {
+      return [...history];
+    },
+    async close() {
+      live = null;
+      history.length = 0;
+    },
   };
+}
+
+function snapshotOf(sandbox) {
+  const root = sandbox.document?.documentElement;
+  return root ? `<!DOCTYPE html>\n${root.outerHTML}` : "";
+}
+
+// Append a DOM snapshot only when it differs from the last (read-only evals don't
+// grow the history).
+function pushIfChanged(history, html) {
+  if (history[history.length - 1] !== html) history.push(html);
 }
 
 // Wire host-net-backed fetch + XHR (with façade event/route hooks) into the page.

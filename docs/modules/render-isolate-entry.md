@@ -23,6 +23,9 @@ This module exports nothing; it installs **globals** on the isolate's
   the host can decide whether to drain again.
 - `__tcSnapshot()` — serialize the (mutated) DOM:
   `<!DOCTYPE html>\n${document.documentElement.outerHTML}` or `""`.
+- `__tcEval(code, args)` — re-enter the live isolate heap: run a function body
+  (`return` for the value, `arguments` for `args`) against the persisted
+  window/document/globals. Result must be ivm-copyable (JSON-able) to cross back.
 
 ## Key internals
 - **Timer queue** (`timers` array): a bare isolate has no `setTimeout`.

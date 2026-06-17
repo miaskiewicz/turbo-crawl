@@ -39,11 +39,12 @@ objects; the last three throw before the first `goto`).
   These run in a `node:vm` context over the *current* DOM — DOM reads/measures,
   not a re-entry of the render isolate.
 - **JS execution** — `evalJs(code, ...args)` runs a function BODY (statements;
-  `return` for a value, `arguments` for args) against the current DOM
-  (Selenium `executeScript` / Playwright `evaluate` ergonomics). `injectJs(code)`
-  appends a `<script>` with `code` and executes it (DOM mutations persist; the
-  element stays in the serialized HTML). Both run in the same `node:vm` DOM
-  context, not the page's live render isolate.
+  `return` for a value, `arguments` for args); `injectJs(code)` injects + runs a
+  `<script>`. With a renderer bound via `setRenderer(jsRenderer(...))` both
+  re-enter the **live render heap** (page globals, handlers) and grow a DOM history
+  (`latestDom()` / `domHistory()`); otherwise they run in a `node:vm` over the
+  parsed DOM behind `assertSafeEval` (best-effort guard, **not** a security
+  boundary — use the secure backend for untrusted JS). `setRenderer(null)` unbinds.
 - **navigator / fetch config** — `setNavigator(props)` (persists across hops,
   applies to current page), `setUserAgent(ua)` (shorthand), `setExtraHeaders(h)`
   (persistent extra HTTP headers merged into every fetch), `get fetchHtml` /

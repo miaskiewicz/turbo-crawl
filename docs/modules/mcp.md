@@ -21,7 +21,7 @@ the surface for a no-JS fetcher.
 - CLI entry (server.mjs): when run directly, `createServer()` + connect a
   `StdioServerTransport`; logs readiness to stderr.
 
-## The 51 tools (grouped)
+## The 53 tools (grouped)
 
 ### Navigation / history (5)
 - `goto` — navigate to `{ url }`; returns `{ status, url, title }`.
@@ -48,12 +48,18 @@ the surface for a no-JS fetcher.
 - `set_mode` — set the navigation mode for subsequent goto/click without
   re-navigating now; `{ mode }`.
 
-### JS execution (2)
-- `eval_js` — execute a JS **function body** (`code`; use `return` for the value,
-  `arguments` for `args`) against the rendered DOM; returns the value. Runs in a
-  node:vm over the parsed/rendered DOM, not the page's live render isolate.
-- `inject_js` — inject a `<script>` with `code`, execute it against the DOM (DOM
-  mutations persist, element stays in the HTML); `{ ok }`.
+### JS execution + DOM history (4)
+- `eval_js` — execute a JS **function body** (`code`; `return` for the value,
+  `arguments` for `args`) and return the value. In render mode (`render`/`set_mode`
+  fast|secure) it re-enters the **live render heap** (page globals, handlers) and
+  records a DOM-history entry on mutation; otherwise it runs in a node:vm over the
+  parsed DOM behind a best-effort guard (**not** a security sandbox — use secure
+  mode for untrusted JS).
+- `inject_js` — inject/execute a `<script>` with `code`; in render mode runs in the
+  live heap (history grows), else the element persists in the HTML; `{ ok }`.
+- `latest_dom` — most recent DOM snapshot after eval/inject (render tier), else the
+  current HTML. `dom_history` — the full ordered list of snapshots (one per
+  navigation + per mutating eval; read-only evals don't grow it).
 
 ### Session / detection (4)
 - `detect_js` — heuristically detect whether the page needs JS;
@@ -127,9 +133,9 @@ the surface for a no-JS fetcher.
 - `is_enabled` — enabled state of first match.
 - `count` — number of elements matching a CSS selector.
 
-(Group counts: navigation 5, batch+crawl 2, render-mode 2, JS-exec 2,
+(Group counts: navigation 5, batch+crawl 2, render-mode 2, JS-exec+DOM-history 4,
 session/detection 4, ergonomic 4, content 7, indexed interactions 3, structured 3,
-locator 2, selector actions 5, selector accessors 8 = **51**.)
+locator 2, selector actions 5, selector accessors 8 = **53**.)
 
 ## Key internals
 - `GET_BY` map + `resolveBy(page, kind, value, name)` — dispatch for `get_by`;
