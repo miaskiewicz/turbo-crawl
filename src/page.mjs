@@ -23,10 +23,19 @@ function isSubmitControl(el) {
   return type === "submit" || (tag === "button" && type !== "button");
 }
 
+// Collect navigator overrides from constructor opts (userAgent is a shorthand for
+// navigator.userAgent). Returns null when nothing is overridden.
+function normalizeNavigator(opts) {
+  const nav = { ...(opts.navigator ?? {}) };
+  if (opts.userAgent) nav.userAgent = opts.userAgent;
+  return Object.keys(nav).length ? nav : null;
+}
+
 export class Page {
   #env = null;
   #fetchHtml;
   #jar;
+  #nav; // navigator property overrides (also drives the HTTP User-Agent), or null
   #url = null;
   #status = 0;
   #snapshot = null; // last interactiveElements() result: index → record (with .ref)
@@ -35,10 +44,13 @@ export class Page {
    * @param {object} [opts]
    * @param {typeof fetchHtml} [opts.fetchHtml]  injectable fetcher (tests / Lane B)
    * @param {CookieJar} [opts.jar]               shared cookie jar (default: fresh)
+   * @param {string} [opts.userAgent]            UA for both navigator.userAgent and the HTTP header
+   * @param {object} [opts.navigator]            navigator property overrides (platform, language, …)
    */
   constructor(opts = {}) {
     this.#fetchHtml = opts.fetchHtml ?? fetchHtml;
     this.#jar = opts.jar ?? new CookieJar();
+    this.#nav = normalizeNavigator(opts);
   }
 
   /** The Page's cookie jar (session state across hops). */
@@ -46,9 +58,34 @@ export class Page {
     return this.#jar;
   }
 
-  // Fetch with the session jar attached, so cookies round-trip across hops.
+  /** The live navigator object (with any overrides applied). Throws before goto. */
+  get navigator() {
+    return this.window.navigator;
+  }
+
+  /**
+   * Override navigator properties (and the HTTP User-Agent, if `userAgent` is
+   * among them). Persists across navigations; applied to the current page too.
+   */
+  setNavigator(props) {
+    this.#nav = { ...(this.#nav ?? {}), ...props };
+    if (this.#env) Object.assign(this.#env.window.navigator, props);
+    return this;
+  }
+
+  /** Shorthand for setNavigator({ userAgent }). */
+  setUserAgent(userAgent) {
+    return this.setNavigator({ userAgent });
+  }
+
+  #uaHeader() {
+    return this.#nav?.userAgent ? { "user-agent": this.#nav.userAgent } : {};
+  }
+
+  // Fetch with the session jar + configured User-Agent; per-call headers win.
   #fetch(url, opts = {}) {
-    return this.#fetchHtml(url, { jar: this.#jar, ...opts });
+    const headers = { ...this.#uaHeader(), ...opts.headers };
+    return this.#fetchHtml(url, { jar: this.#jar, ...opts, headers });
   }
 
   /** Absolute URL of the currently-loaded page (after redirects), or null. */
@@ -91,6 +128,8 @@ export class Page {
     // Bridge the session jar into the DOM so page-side document.cookie reads are
     // consistent (turbo-dom nulls __cookieJar on reset, so re-attach each hop).
     this.#env.document.__cookieJar = this.#jar.cookieMap(finalUrl);
+    // Re-apply navigator overrides (turbo-dom resets globals on reset each hop).
+    if (this.#nav) Object.assign(this.#env.window.navigator, this.#nav);
     this.#url = finalUrl;
     this.#status = status;
     this.#snapshot = null;

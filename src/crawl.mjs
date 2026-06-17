@@ -300,7 +300,13 @@ export class Crawler {
 
     const pool = Array.from(
       { length: st.o.concurrency },
-      () => new Page({ fetchHtml: st.o.fetchHtml, jar: st.o.jar }),
+      () =>
+        new Page({
+          fetchHtml: st.o.fetchHtml,
+          jar: st.o.jar,
+          userAgent: st.o.httpUserAgent,
+          navigator: st.o.navigator,
+        }),
     );
 
     Promise.all(pool.map((p) => worker(st, p)))

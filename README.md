@@ -33,7 +33,12 @@ Pure ESM, Node ≥ 20.
 ```js
 import { Page } from "@miaskiewicz/turbo-crawl";
 
-const page = new Page();
+// configure the pseudo-browser's navigator + HTTP User-Agent
+const page = new Page({
+  userAgent: "MyBot/2.0",                       // → navigator.userAgent + User-Agent header
+  navigator: { platform: "Win32", language: "de-DE", languages: ["de-DE", "en"] },
+});
+page.setUserAgent("MyBot/3.0");                 // also changeable at runtime
 await page.goto("https://example.com");
 
 page.interactiveElements(); // [{ i, tag, role, name, href, visible, jsHandler, ref:WeakRef }]

@@ -131,13 +131,30 @@ export interface NavResult {
   url: string;
   title: string;
 }
+export interface NavigatorOverrides {
+  userAgent?: string;
+  platform?: string;
+  vendor?: string;
+  language?: string;
+  languages?: string[];
+  [key: string]: unknown;
+}
+export interface PageOptions {
+  fetchHtml?: typeof fetchHtml;
+  jar?: CookieJar;
+  userAgent?: string;
+  navigator?: NavigatorOverrides;
+}
 export declare class Page {
-  constructor(opts?: { fetchHtml?: typeof fetchHtml; jar?: CookieJar });
+  constructor(opts?: PageOptions);
   readonly url: string | null;
   readonly status: number;
   readonly document: object;
   readonly window: object;
+  readonly navigator: object;
   readonly cookies: CookieJar;
+  setNavigator(props: NavigatorOverrides): this;
+  setUserAgent(userAgent: string): this;
   goto(url: string, opts?: FetchOptions): Promise<NavResult>;
   follow(href: string, opts?: FetchOptions): Promise<NavResult>;
   title(): string;
@@ -186,6 +203,8 @@ export interface CrawlerOptions {
   userAgent?: string;
   retryBudget?: number;
   backoffMs?: number;
+  httpUserAgent?: string;
+  navigator?: NavigatorOverrides;
   robots?: RobotsCache;
   schema?: Schema;
   markdown?: boolean;
