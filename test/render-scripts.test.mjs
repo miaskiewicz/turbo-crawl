@@ -34,6 +34,19 @@ describe("extractScriptsFromHtml (no-parse string scan)", () => {
     const viaDom = extractScripts(createEnvironment(html).document, BASE);
     assert.deepEqual(viaString, viaDom);
   });
+
+  it("preserves rawSrc (the authored attribute) alongside the resolved url", () => {
+    // Bundler runtimes read getAttribute('src') = the raw attribute; the resolved
+    // absolute url is for fetching only. Both must be carried, distinctly.
+    const [item] = extractScriptsFromHtml(`<script src="/_next/c.js"></script>`, BASE);
+    assert.equal(item.rawSrc, "/_next/c.js"); // authored, root-relative
+    assert.equal(item.url, "https://s/_next/c.js"); // resolved for fetch
+    const [viaDom] = extractScripts(
+      createEnvironment(`<script src="/_next/c.js"></script>`).document,
+      BASE,
+    );
+    assert.equal(viaDom.rawSrc, "/_next/c.js");
+  });
 });
 
 describe("readImportMapFromHtml", () => {

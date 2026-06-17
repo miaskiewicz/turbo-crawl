@@ -72,27 +72,47 @@ for (const mode of ["fast", "secure"]) {
       await close();
     });
 
-    it("exposes document.currentScript to external scripts (bundler runtimes)", async () => {
-      const shell = `<body><div id="root"></div><script src="/runtime.js"></script></body>`;
-      // Turbopack/webpack/Vite runtimes read currentScript.getAttribute('src') on
-      // their first line; if it's undefined the whole runtime throws.
-      const runtime = `var src = document.currentScript.getAttribute("src");
-        var a = document.createElement("a"); a.setAttribute("href", "/seen?src=" + src);
-        document.getElementById("root").appendChild(a);`;
+    it("currentScript.getAttribute('src') returns the RAW attribute, not the absolute URL", async () => {
+      // Bundler runtimes (Turbopack/webpack/Vite) read currentScript.getAttribute('src')
+      // and do a `.startsWith("/_next/")`-style check to derive the chunk path — an
+      // absolute URL breaks it, so the raw root-relative attribute must survive.
+      const shell = `<body data-cs="none"><script src="/_next/runtime.js"></script></body>`;
+      const runtime = `document.body.setAttribute("data-cs", document.currentScript.getAttribute("src"));`;
       const { fetchHtml, close } = jsRenderer({
         mode,
         fetchHtml: async (u) =>
-          u.endsWith("/runtime.js")
+          u.endsWith("/_next/runtime.js")
             ? { html: runtime, finalUrl: u, status: 200, headers: new Headers() }
             : { html: shell, finalUrl: u, status: 200, headers: new Headers() },
       });
       const page = new Page({ fetchHtml });
-      await page.goto("https://rt.test/");
-      // resolved currentScript src is the absolute chunk URL
+      await page.goto("https://app.test/");
+      const html = page.html();
+      assert.ok(html.includes('data-cs="/_next/runtime.js"'), "raw src preserved");
       assert.ok(
-        page.links().some((h) => h.includes("/seen?src=") && h.includes("runtime.js")),
-        "currentScript.getAttribute('src') returned the chunk URL",
+        !html.includes("https://app.test/_next/runtime.js"),
+        "must not be the absolute URL",
       );
+      await close();
+    });
+
+    it("fires the script's load event (the chunk-loaded doorbell)", async () => {
+      // Dev bundler runtimes gate entrypoint execution on each chunk's `load` event.
+      const shell = `<body><div id="root"></div><script src="/chunk.js"></script></body>`;
+      const chunk = `document.currentScript.addEventListener("load", function () {
+        var a = document.createElement("a"); a.setAttribute("href", "/loaded");
+        document.getElementById("root").appendChild(a);
+      });`;
+      const { fetchHtml, close } = jsRenderer({
+        mode,
+        fetchHtml: async (u) =>
+          u.endsWith("/chunk.js")
+            ? { html: chunk, finalUrl: u, status: 200, headers: new Headers() }
+            : { html: shell, finalUrl: u, status: 200, headers: new Headers() },
+      });
+      const page = new Page({ fetchHtml });
+      await page.goto("https://dl.test/");
+      assert.ok(page.links().includes("https://dl.test/loaded"), "load event fired");
       await close();
     });
 

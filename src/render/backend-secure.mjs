@@ -132,7 +132,7 @@ async function runScripts(context, scripts) {
 
 async function runOne(context, s) {
   try {
-    await callGlobal(context, "__tcRun", [s.code, s.url || null]);
+    await callGlobal(context, "__tcRun", [s.code, s.url || null, s.rawSrc || null]);
   } catch {
     // a page script throwing must not abort the render (browser semantics)
   }

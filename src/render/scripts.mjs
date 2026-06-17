@@ -31,7 +31,10 @@ function scriptItem(el, baseUrl) {
   if (!CLASSIC_TYPES.has(type)) return null; // json / ld+json / importmap → skip
   const module = type === "module";
   const src = el.getAttribute("src");
-  if (src) return { url: resolve(baseUrl, src) ?? src, module };
+  // rawSrc preserves the attribute exactly as authored: bundler runtimes read
+  // currentScript.getAttribute('src') and expect the raw (often root-relative)
+  // value, not the resolved absolute URL.
+  if (src) return { url: resolve(baseUrl, src) ?? src, rawSrc: src, module };
   return { code: el.textContent ?? "", module };
 }
 
@@ -50,7 +53,7 @@ function scriptItemFromAttrs(attrs, body, baseUrl) {
   if (!CLASSIC_TYPES.has(type)) return null;
   const module = type === "module";
   const src = attrValue(attrs, "src");
-  if (src) return { url: resolve(baseUrl, src) ?? src, module };
+  if (src) return { url: resolve(baseUrl, src) ?? src, rawSrc: src, module };
   return { code: body, module };
 }
 

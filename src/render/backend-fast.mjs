@@ -76,8 +76,14 @@ function runScripts(sandbox, scripts, timeoutMs) {
   }
 }
 
+// Run one classic script as a REAL turbo-dom <script> element. This gives bundler
+// runtimes a proper document.currentScript (they read .src/.getAttribute('src')
+// for the chunk base URL — bug #1) AND fires the element's `load` event, which the
+// dev runtimes (Turbopack/webpack) gate entrypoint execution on: they don't build
+// until every chunk has signalled loaded. Inject + run + ring the doorbell.
 function runOne(sandbox, doc, s, timeoutMs) {
-  setCurrentScript(doc, s.url || null);
+  const el = injectScript(doc, s);
+  setCurrentScript(doc, el);
   try {
     vm.runInContext(s.code, sandbox, { timeout: timeoutMs });
   } catch {
@@ -85,29 +91,41 @@ function runOne(sandbox, doc, s, timeoutMs) {
   } finally {
     setCurrentScript(doc, null);
   }
+  if (s.url) fireLoad(sandbox.window, el);
 }
 
-// Browsers set document.currentScript to the executing <script> during its sync
-// run; bundler runtimes (Turbopack/webpack/Vite) read currentScript.src /
-// .getAttribute('src') to compute their chunk base URL. turbo-dom leaves it
-// undefined, so those runtimes throw on line 1. Set a minimal stand-in per script.
-function scriptEl(url) {
-  return {
-    nodeName: "SCRIPT",
-    tagName: "SCRIPT",
-    src: url,
-    getAttribute: (name) => (name === "src" ? url : null),
-  };
+// Append a real <script> element. Set the RAW src attribute (as authored), not
+// the resolved absolute URL — runtimes do currentScript.getAttribute('src') and a
+// `.startsWith("/_next/")`-style test that an absolute URL would break.
+function injectScript(doc, s) {
+  const el = doc.createElement("script");
+  if (s.url) el.setAttribute("src", s.rawSrc || s.url);
+  (doc.head || doc.documentElement)?.appendChild(el);
+  return el;
 }
 
-function setCurrentScript(doc, url) {
+function setCurrentScript(doc, el) {
   try {
-    Object.defineProperty(doc, "currentScript", {
-      value: url ? scriptEl(url) : null,
-      configurable: true,
-    });
+    Object.defineProperty(doc, "currentScript", { value: el, configurable: true });
   } catch {
     // read-only DOM impl — best effort
+  }
+}
+
+// Fire the script's load event: dispatchEvent, and also call an el.onload set
+// directly (some runtimes assign el.onload = fn instead of addEventListener).
+function fireLoad(win, el) {
+  try {
+    el.dispatchEvent(new win.Event("load"));
+  } catch {
+    // a listener throwing must not abort the render
+  }
+  if (typeof el.onload === "function") {
+    try {
+      el.onload();
+    } catch {
+      // best effort
+    }
   }
 }
 

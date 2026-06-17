@@ -116,36 +116,52 @@ function finishXhr(xhr) {
   if (xhr.onload) xhr.onload();
 }
 
-// Execute one page script source in the isolate's global scope (sees document).
-// url drives document.currentScript so bundler runtimes (Turbopack/webpack/Vite)
-// can read currentScript.src for their chunk base URL.
-globalThis.__tcRun = (src, url) => {
-  setCurrentScript(url || null);
+// Execute one page script as a REAL <script> element: gives bundler runtimes a
+// proper document.currentScript (they read .src for the chunk base URL) AND fires
+// the element's `load` event — the dev runtimes (Turbopack/webpack) gate
+// entrypoint execution on every chunk signalling loaded.
+globalThis.__tcRun = (src, url, rawSrc) => {
+  const doc = globalThis.document;
+  const el = doc.createElement("script");
+  // rawSrc is the attribute as authored; runtimes read getAttribute('src') and a
+  // `.startsWith("/_next/")` style check an absolute URL would break.
+  if (url) el.setAttribute("src", rawSrc || url);
+  (doc.head || doc.documentElement)?.appendChild(el);
+  setCurrentScript(el);
   try {
     // biome-ignore lint: indirect eval runs page JS against the installed globals.
     (0, eval)(src);
   } finally {
     setCurrentScript(null);
   }
+  if (url) fireLoad(el);
 };
 
-function scriptEl(url) {
-  return {
-    nodeName: "SCRIPT",
-    tagName: "SCRIPT",
-    src: url,
-    getAttribute: (name) => (name === "src" ? url : null),
-  };
-}
-
-function setCurrentScript(url) {
+function setCurrentScript(el) {
   try {
     Object.defineProperty(globalThis.document, "currentScript", {
-      value: url ? scriptEl(url) : null,
+      value: el,
       configurable: true,
     });
   } catch {
     /* read-only DOM impl — best effort */
+  }
+}
+
+// Ring the chunk-loaded doorbell: dispatch `load`, plus a directly-assigned
+// el.onload (some runtimes use el.onload = fn instead of addEventListener).
+function fireLoad(el) {
+  try {
+    el.dispatchEvent(new globalThis.Event("load"));
+  } catch {
+    /* a listener throwing must not abort the render */
+  }
+  if (typeof el.onload === "function") {
+    try {
+      el.onload();
+    } catch {
+      /* best effort */
+    }
   }
 }
 

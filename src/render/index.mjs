@@ -37,9 +37,9 @@ async function resolveScript(fetchHtml, it, baseUrl, importMap) {
   if (it.module) return resolveModule(fetchHtml, it, baseUrl, importMap);
   if (it.code != null) return it;
   const code = await fetchScript(fetchHtml, it.url);
-  // Keep `url` so the backend can set document.currentScript (bundler runtimes
-  // read currentScript.src to derive their chunk base URL).
-  return code == null ? null : { code, module: false, url: it.url };
+  // Keep url + rawSrc so the backend can set document.currentScript: runtimes read
+  // currentScript.getAttribute('src') (the raw attribute) to derive chunk paths.
+  return code == null ? null : { code, module: false, url: it.url, rawSrc: it.rawSrc };
 }
 
 // Bundle a module script's import graph to classic code; skip if esbuild absent.
@@ -47,7 +47,7 @@ async function resolveModule(fetchHtml, it, baseUrl, importMap) {
   const entry = it.code != null ? it.code : `import ${JSON.stringify(it.url)};`;
   try {
     const code = await bundleModule(entry, baseUrl, fetchHtml, importMap);
-    return { code, module: false, url: it.url };
+    return { code, module: false, url: it.url, rawSrc: it.rawSrc };
   } catch {
     return null; // esbuild missing or bundle failed → module skipped
   }
