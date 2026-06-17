@@ -30,6 +30,7 @@ describe("MCP handlers (Page API 1:1)", () => {
       "html",
       "text",
       "links",
+      "requests",
       "click",
       "fill",
       "submit",

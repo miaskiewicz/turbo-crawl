@@ -52,6 +52,7 @@ export class Page {
   #snapshot = null; // last interactiveElements() result: index → record (with .ref)
   #history = []; // visited URLs for back/forward
   #histIndex = -1;
+  #requests = []; // URLs the page fetched during render (JS tier), for crawl discovery
 
   /**
    * @param {object} [opts]
@@ -136,9 +137,10 @@ export class Page {
 
   // Apply a fetched response to the env. Shared by goto/follow/submit.
   // `mode`: "push" (normal nav) | "replace" (reload) | "none" (back/forward).
-  #load({ html, finalUrl, status }, mode = "push") {
+  #load({ html, finalUrl, status, discovered }, mode = "push") {
     if (this.#env) this.#env.reset(html);
     else this.#env = createEnvironment(html);
+    this.#requests = discovered ?? [];
     // Bridge the session jar into the DOM so page-side document.cookie reads are
     // consistent (turbo-dom nulls __cookieJar on reset, so re-attach each hop).
     this.#env.document.__cookieJar = this.#jar.cookieMap(finalUrl);
@@ -207,6 +209,11 @@ export class Page {
 
   links() {
     return links(this.document, this.#url);
+  }
+
+  /** URLs the page fetched during the last render (JS tier); [] in Lane A. */
+  requests() {
+    return this.#requests;
   }
 
   /**

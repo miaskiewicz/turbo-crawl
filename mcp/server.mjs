@@ -22,6 +22,7 @@ const INPUT_SCHEMAS = {
   html: { type: "object", properties: {} },
   text: { type: "object", properties: {} },
   links: { type: "object", properties: {} },
+  requests: { type: "object", properties: {} },
   click: { type: "object", properties: { i: { type: "number" } }, required: ["i"] },
   fill: {
     type: "object",

@@ -4,13 +4,23 @@
 // host net layer by an esbuild plugin. Needs the optional `esbuild` dep; without
 // it, module scripts are skipped (caller treats a throw as "skip").
 
-// esbuild plugin: resolve every import to an absolute URL and load it via host fetch.
-function hostFetchPlugin(hostFetch, base) {
+// Apply an import map's `imports` to a bare specifier (exact, then "/"-prefix).
+function mapSpecifier(spec, imports) {
+  if (imports[spec]) return imports[spec];
+  for (const key of Object.keys(imports)) {
+    if (key.endsWith("/") && spec.startsWith(key)) return imports[key] + spec.slice(key.length);
+  }
+  return spec;
+}
+
+// esbuild plugin: rewrite specifiers via the import map, resolve to an absolute
+// URL, and load each module via the host net layer.
+function hostFetchPlugin(hostFetch, base, imports) {
   return {
     name: "tc-host-fetch",
     setup(build) {
       build.onResolve({ filter: /.*/ }, (args) => ({
-        path: new URL(args.path, importerBase(args.importer, base)).href,
+        path: new URL(mapSpecifier(args.path, imports), importerBase(args.importer, base)).href,
         namespace: "http",
       }));
       build.onLoad({ filter: /.*/, namespace: "http" }, async (args) => {
@@ -30,9 +40,10 @@ function importerBase(importer, base) {
  * @param {string} entry     module source to bundle
  * @param {string} baseUrl   page URL (resolves the entry's relative imports)
  * @param {Function} hostFetch
+ * @param {object} [importMap]  parsed import map (`{ imports: {...} }`)
  * @returns {Promise<string>} bundled classic JS
  */
-export async function bundleModule(entry, baseUrl, hostFetch) {
+export async function bundleModule(entry, baseUrl, hostFetch, importMap = {}) {
   const esbuild = await import("esbuild");
   const out = await esbuild.build({
     stdin: { contents: entry, sourcefile: baseUrl, loader: "js" },
@@ -40,7 +51,7 @@ export async function bundleModule(entry, baseUrl, hostFetch) {
     format: "iife",
     platform: "browser",
     write: false,
-    plugins: [hostFetchPlugin(hostFetch, baseUrl)],
+    plugins: [hostFetchPlugin(hostFetch, baseUrl, importMap.imports ?? {})],
     logLevel: "silent",
   });
   return out.outputFiles[0].text;

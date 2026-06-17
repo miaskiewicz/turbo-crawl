@@ -7,7 +7,7 @@ import vm from "node:vm";
 
 import { installGlobals } from "@miaskiewicz/turbo-dom/install";
 
-import { makePageFetch } from "./page-fetch.mjs";
+import { makePageFetch, makeXHR } from "./page-fetch.mjs";
 
 export function createFastBackend() {
   return {
@@ -23,7 +23,10 @@ export function createFastBackend() {
       installGlobals(sandbox, { html, url: opts.url });
       vm.createContext(sandbox);
       const state = { pending: 0 };
-      if (opts.hostFetch) sandbox.fetch = makePageFetch(opts.hostFetch, opts.url, state);
+      if (opts.hostFetch) {
+        sandbox.fetch = makePageFetch(opts.hostFetch, opts.url, state);
+        sandbox.XMLHttpRequest = makeXHR(opts.hostFetch, opts.url, state);
+      }
       runScripts(sandbox, scripts, opts.timeoutMs ?? 2000);
       await settle(state, opts);
       const root = sandbox.document?.documentElement;

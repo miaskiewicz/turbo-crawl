@@ -10,6 +10,7 @@ export interface FetchResult {
   status: number;
   headers: Headers;
   redirected: boolean;
+  discovered?: string[];
 }
 export interface FetchOptions {
   headers?: Record<string, string>;
@@ -121,6 +122,7 @@ export interface JsRendererOptions {
   settleMs?: number;
   settleRounds?: number;
   memoryLimit?: number;
+  onRequest?: (url: string) => void;
 }
 export declare function jsRenderer(opts?: JsRendererOptions): {
   fetchHtml: typeof fetchHtml;
@@ -224,6 +226,7 @@ export declare class Page {
   title(): string;
   interactiveElements(): InteractiveElement[];
   links(): string[];
+  requests(): string[];
   markdown(): string;
   html(): string;
   text(): string;
@@ -280,6 +283,7 @@ export interface CrawlerOptions {
   allow?: (url: string) => boolean;
   fetchHtml?: typeof fetchHtml;
   fallback?: typeof fetchHtml;
+  followRequests?: boolean;
   jar?: CookieJar;
   signal?: AbortSignal;
 }

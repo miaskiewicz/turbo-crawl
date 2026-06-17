@@ -52,3 +52,46 @@ export function makePageFetch(hostFetch, base, state) {
     }
   };
 }
+
+// Fire an XHR's completion callbacks after a response is applied.
+function finishXhr(xhr) {
+  xhr.readyState = 4;
+  if (xhr.onreadystatechange) xhr.onreadystatechange();
+  if (xhr.onload) xhr.onload();
+}
+
+/**
+ * Minimal host-net-backed XMLHttpRequest for the fast backend (async; the host
+ * fetch resolves on the host loop and `state.pending` keeps the render settling).
+ */
+export function makeXHR(hostFetch, base, state) {
+  return class XMLHttpRequest {
+    readyState = 0;
+    status = 0;
+    responseText = "";
+    response = "";
+    open(method, url) {
+      this._method = method;
+      this._url = requestUrl(url, base);
+      this.readyState = 1;
+    }
+    setRequestHeader() {}
+    getResponseHeader() {
+      return null;
+    }
+    send(body) {
+      state.pending++;
+      hostFetch(this._url, { allowNonHtml: true, method: this._method, body })
+        .then((res) => {
+          this.status = res.status;
+          this.responseText = res.html ?? "";
+          this.response = this.responseText;
+        })
+        .catch(() => {})
+        .finally(() => {
+          state.pending--;
+          finishXhr(this);
+        });
+    }
+  };
+}

@@ -59,8 +59,51 @@ globalThis.__tcSetup = (html, url) => {
   globalThis.clearTimeout = () => {};
   globalThis.setInterval = () => 0; // intervals would never settle; no-op
   globalThis.clearInterval = () => {};
-  if (globalThis.__tcHostFetch) globalThis.fetch = isolateFetch;
+  if (globalThis.__tcHostFetch) {
+    globalThis.fetch = isolateFetch;
+    globalThis.XMLHttpRequest = makeIsolateXHR();
+  }
 };
+
+// Host-net-backed XMLHttpRequest inside the isolate (synchronous bridge via
+// applySyncPromise; completion callbacks fire on a microtask).
+function makeIsolateXHR() {
+  return class XMLHttpRequest {
+    constructor() {
+      this.readyState = 0;
+      this.status = 0;
+      this.responseText = "";
+    }
+    open(method, url) {
+      this._method = method || "GET";
+      this._url = resolveUrl(url);
+      this.readyState = 1;
+    }
+    setRequestHeader() {}
+    getResponseHeader() {
+      return null;
+    }
+    send(body) {
+      const raw = globalThis.__tcHostFetch.applySyncPromise(undefined, [
+        this._url,
+        this._method,
+        body || null,
+      ]);
+      const r = JSON.parse(raw);
+      this.status = r.status;
+      this.responseText = r.body;
+      this.response = r.body;
+      const self = this;
+      Promise.resolve().then(() => finishXhr(self));
+    }
+  };
+}
+
+function finishXhr(xhr) {
+  xhr.readyState = 4;
+  if (xhr.onreadystatechange) xhr.onreadystatechange();
+  if (xhr.onload) xhr.onload();
+}
 
 // Execute one page script source in the isolate's global scope (sees document).
 globalThis.__tcRun = (src) => {

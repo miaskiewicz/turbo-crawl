@@ -149,12 +149,18 @@ function clampWait(minWait) {
   return minWait === Infinity ? 0 : minWait;
 }
 
-// Enqueue accepted out-links from a freshly fetched record at the next depth.
+function enqueueLinks(st, item, urls) {
+  for (const url of urls) {
+    if (acceptLink(st, url)) st.frontier.add(url, item.depth + 1);
+  }
+}
+
+// Enqueue accepted out-links (and JS-tier discovered request URLs, when enabled)
+// from a freshly fetched record at the next depth.
 function harvestLinks(st, item, res) {
   if (res.rec.error || item.depth >= st.o.maxDepth) return;
-  for (const link of res.source.links()) {
-    if (acceptLink(st, link)) st.frontier.add(link, item.depth + 1);
-  }
+  enqueueLinks(st, item, res.source.links());
+  if (st.o.followRequests) enqueueLinks(st, item, res.source.requests());
 }
 
 // Fetch one claimed item, publish its record, and harvest links. Returns true

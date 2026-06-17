@@ -112,6 +112,52 @@ for (const mode of ["fast", "secure"]) {
       await close();
     });
 
+    it("bridges page-initiated XMLHttpRequest to the host net layer", async () => {
+      const shell = `<body><div id="root"></div><script src="/app.js"></script></body>`;
+      const app = `var x = new XMLHttpRequest(); x.open("GET", "/api"); x.onload = function () {
+        var d = JSON.parse(x.responseText); var root = document.getElementById("root");
+        d.ids.forEach(function (i) {
+          var a = document.createElement("a"); a.setAttribute("href", "/p/" + i); root.appendChild(a);
+        });
+      }; x.send();`;
+      const { fetchHtml, close } = jsRenderer({
+        mode,
+        fetchHtml: async (u) => {
+          if (u.endsWith("/app.js"))
+            return { html: app, finalUrl: u, status: 200, headers: new Headers() };
+          if (u.endsWith("/api"))
+            return { html: '{"ids":[7,8]}', finalUrl: u, status: 200, headers: new Headers() };
+          return { html: shell, finalUrl: u, status: 200, headers: new Headers() };
+        },
+      });
+      const page = new Page({ fetchHtml });
+      await page.goto("https://xhr.test/");
+      assert.deepEqual(page.links(), ["https://xhr.test/p/7", "https://xhr.test/p/8"]);
+      await close();
+    });
+
+    it("resolves bare specifiers via an import map", { skip: !esbuildOk }, async () => {
+      const shell = `<body><div id="root"></div>
+        <script type="importmap">{"imports":{"widgets":"/lib/w.js"}}</script>
+        <script type="module" src="/main.js"></script></body>`;
+      const main = `import { mk } from "widgets"; mk(document.getElementById("root"));`;
+      const w = `export function mk(root){ var a=document.createElement("a"); a.setAttribute("href","/p/3"); root.appendChild(a); }`;
+      const { fetchHtml, close } = jsRenderer({
+        mode,
+        fetchHtml: async (u) => {
+          if (u.endsWith("/main.js"))
+            return { html: main, finalUrl: u, status: 200, headers: new Headers() };
+          if (u.endsWith("/lib/w.js"))
+            return { html: w, finalUrl: u, status: 200, headers: new Headers() };
+          return { html: shell, finalUrl: u, status: 200, headers: new Headers() };
+        },
+      });
+      const page = new Page({ fetchHtml });
+      await page.goto("https://imap.test/");
+      assert.deepEqual(page.links(), ["https://imap.test/p/3"]);
+      await close();
+    });
+
     it("bridges page-initiated fetch to the host net layer", async () => {
       const shell = `<body><div id="root"></div><script src="/app.js"></script></body>`;
       const app = `fetch("/api").then(function(r){return r.json();}).then(function(d){
@@ -162,7 +208,65 @@ for (const mode of ["fast", "secure"]) {
   });
 }
 
+describe("Crawler followRequests — discovered URLs reach the frontier", () => {
+  it("enqueues page-fetched URLs when followRequests is set", async () => {
+    const { Crawler } = await import("../src/crawl.mjs");
+    const H = "https://disc.test";
+    const shell = `<body><div id="root"></div><script src="/app.js"></script></body>`;
+    const app = `fetch("/api/data").then(function(){ var a=document.createElement("a");
+      a.setAttribute("href","/dom-link"); document.getElementById("root").appendChild(a); });`;
+    const fb = jsRenderer({
+      mode: "fast",
+      fetchHtml: async (u) =>
+        u.endsWith("/app.js")
+          ? { html: app, finalUrl: u, status: 200, headers: new Headers() }
+          : u.endsWith("/api/data")
+            ? { html: "{}", finalUrl: u, status: 200, headers: new Headers() }
+            : { html: shell, finalUrl: u, status: 200, headers: new Headers() },
+    }).fetchHtml;
+
+    const seen = [];
+    for await (const rec of new Crawler({
+      start: `${H}/`,
+      maxDepth: 1,
+      maxPages: 10,
+      concurrency: 1,
+      fetchHtml: async (u) => ({ html: shell, finalUrl: u, status: 200, headers: new Headers() }),
+      fallback: fb,
+      followRequests: true,
+      sleep: async () => {},
+      now: () => 0,
+    })) {
+      seen.push(rec.url);
+    }
+    assert.ok(seen.includes(`${H}/api/data`), "discovered fetch URL should be crawled");
+    assert.ok(seen.includes(`${H}/dom-link`), "rendered DOM link should be crawled");
+  });
+});
+
 if (secureOk) {
+  describe("secure backend — fetch bridge error path", () => {
+    it("a failing host fetch yields status 0 inside the isolate", async () => {
+      const shell = `<body><div id="root"></div><script src="/app.js"></script></body>`;
+      const app = `fetch("/api").then(function(r){
+        document.getElementById("root").textContent = "status:" + r.status;
+      });`;
+      const { fetchHtml, close } = jsRenderer({
+        mode: "secure",
+        fetchHtml: async (u) => {
+          if (u.endsWith("/app.js"))
+            return { html: app, finalUrl: u, status: 200, headers: new Headers() };
+          if (u.endsWith("/api")) throw new Error("net down");
+          return { html: shell, finalUrl: u, status: 200, headers: new Headers() };
+        },
+      });
+      const page = new Page({ fetchHtml });
+      await page.goto("https://fail.test/");
+      assert.equal(page.text(), "status:0");
+      await close();
+    });
+  });
+
   describe("secure backend isolation", () => {
     it("hostile script cannot reach the host (process/require undefined)", async () => {
       const evil =

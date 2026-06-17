@@ -58,9 +58,11 @@ runtime; no Playwright at runtime. See [SPEC.md](./SPEC.md) for the design and
 
 - Classic inline + external scripts ✓
 - **ESM-module scripts** (`<script type="module">`) ✓ — import graph bundled via
-  esbuild (host-fetched deps), run as classic in both backends.
-- **Page-initiated `fetch`** ✓ — bridged to the host net layer (cookies/UA);
-  secure backend bridges via an ivm `Reference` (`applySyncPromise`); settling
-  waits on in-flight requests.
-- Not yet: `XMLHttpRequest` (only `fetch`), import-map resolution, and feeding
-  page-discovered request URLs into the crawl frontier.
+  esbuild (host-fetched deps), honoring `<script type="importmap">`, run as
+  classic in both backends.
+- **Page-initiated `fetch` and `XMLHttpRequest`** ✓ — bridged to the host net
+  layer (cookies/UA); secure backend bridges via an ivm `Reference`
+  (`applySyncPromise`); settling waits on in-flight requests.
+- **Page-discovered URLs** ✓ — `page.requests()` lists what the page fetched;
+  `new Crawler({ fallback, followRequests: true })` feeds them into the frontier.
+- Not yet: streaming response bodies, `fetch` `Request`/`Headers` fidelity.

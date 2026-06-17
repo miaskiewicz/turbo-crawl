@@ -90,12 +90,12 @@ and depth/page caps are all built in.
 ## MCP server (agents)
 
 ```sh
-npx turbo-crawl-mcp          # stdio MCP server (32 tools), e.g.:
+npx turbo-crawl-mcp          # stdio MCP server (33 tools), e.g.:
 # goto, interactive_elements, accessibility_tree, markdown, text, html, links,
-# query, get_by, hydration_state, extract, click, fill, submit, click_selector,
-# fill_selector, select_option, check, uncheck, get_attribute, text_content,
-# inner_html, input_value, is_visible, is_checked, is_enabled, count, evaluate,
-# set_user_agent, go_back, go_forward, reload
+# requests, query, get_by, hydration_state, extract, click, fill, submit,
+# click_selector, fill_selector, select_option, check, uncheck, get_attribute,
+# text_content, inner_html, input_value, is_visible, is_checked, is_enabled,
+# count, evaluate, set_user_agent, go_back, go_forward, reload
 ```
 
 Or embed: `import { createServer } from "@miaskiewicz/turbo-crawl/mcp"`.
@@ -148,10 +148,13 @@ page.links(); page.markdown(); page.query("h1");
 new Crawler({ start, fallback: jsRenderer({ mode: "secure" }).fetchHtml });
 ```
 
-Classic + **ESM-module** scripts run (modules are bundled via esbuild), and
-page-initiated **`fetch`** is bridged to the host net layer (cookies/UA), so
-client-only data loads render. `isolated-vm` is **optional** (only `mode:"secure"`);
-`esbuild` is **optional** (`mode:"secure"` and ESM-module execution). See
+Classic + **ESM-module** scripts run (modules bundled via esbuild, honoring
+`<script type="importmap">`), and page-initiated **`fetch`** *and*
+**`XMLHttpRequest`** are bridged to the host net layer (cookies/UA), so
+client-only data loads render. URLs the page fetches are recorded — `page.requests()`,
+and `new Crawler({ fallback, followRequests: true })` feeds them into the frontier.
+`isolated-vm` is **optional** (only `mode:"secure"`); `esbuild` is **optional**
+(`mode:"secure"` and ESM-module execution). See
 [docs/js-execution-tier.md](./docs/js-execution-tier.md).
 
 `detectJsRequired(document)` flags shell-only pages, and `Crawler` accepts a

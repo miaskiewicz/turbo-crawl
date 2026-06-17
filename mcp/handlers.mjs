@@ -86,6 +86,12 @@ export function buildTools(page) {
       handler: () => page.links(),
     },
     {
+      name: "requests",
+      description:
+        "URLs the page fetched during render (JS tier) — fetch/XHR/module deps. Empty without the render tier.",
+      handler: () => page.requests(),
+    },
+    {
       name: "click",
       description:
         "Activate interactive element [i]. Links navigate; submit buttons submit their form. Returns the new { status, url } or errors if the element is inert (JS-only).",

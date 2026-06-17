@@ -21,30 +21,42 @@ async function makeBackend(mode) {
   return (await import("./backend-secure.mjs")).createSecureBackend();
 }
 
+// Read a <script type="importmap"> JSON blob from the document, or {} if absent.
+function readImportMap(document) {
+  const el = document.querySelector('script[type="importmap"]');
+  if (!el) return {};
+  try {
+    return JSON.parse(el.textContent ?? "{}");
+  } catch {
+    return {};
+  }
+}
+
 // Resolve each script to runnable classic code: external src is fetched, and
 // module scripts are bundled (import graph → classic IIFE) via the host fetcher.
 async function loadScripts(fetchHtml, document, baseUrl) {
   const items = extractScripts(document, baseUrl);
+  const importMap = readImportMap(document);
   const out = [];
   for (const it of items) {
-    const resolved = await resolveScript(fetchHtml, it, baseUrl);
+    const resolved = await resolveScript(fetchHtml, it, baseUrl, importMap);
     if (resolved) out.push(resolved);
   }
   return out;
 }
 
-async function resolveScript(fetchHtml, it, baseUrl) {
-  if (it.module) return resolveModule(fetchHtml, it, baseUrl);
+async function resolveScript(fetchHtml, it, baseUrl, importMap) {
+  if (it.module) return resolveModule(fetchHtml, it, baseUrl, importMap);
   if (it.code != null) return it;
   const code = await fetchScript(fetchHtml, it.url);
   return code == null ? null : { code, module: false };
 }
 
 // Bundle a module script's import graph to classic code; skip if esbuild absent.
-async function resolveModule(fetchHtml, it, baseUrl) {
+async function resolveModule(fetchHtml, it, baseUrl, importMap) {
   const entry = it.code != null ? it.code : `import ${JSON.stringify(it.url)};`;
   try {
-    return { code: await bundleModule(entry, baseUrl, fetchHtml), module: false };
+    return { code: await bundleModule(entry, baseUrl, fetchHtml, importMap), module: false };
   } catch {
     return null; // esbuild missing or bundle failed → module skipped
   }
@@ -73,15 +85,23 @@ export function jsRenderer(opts = {}) {
 
   async function renderFetch(url, fetchOpts = {}) {
     const res = await fetchHtml(url, fetchOpts);
+    // Record every URL the page pulls during render (scripts, module deps, fetch,
+    // XHR) so a crawl can follow them. Crawler filters by host/allow.
+    const discovered = [];
+    const recording = (u, o) => {
+      discovered.push(u);
+      return fetchHtml(u, o);
+    };
     const env = createEnvironment(res.html);
-    const scripts = await loadScripts(fetchHtml, env.document, res.finalUrl);
+    const scripts = await loadScripts(recording, env.document, res.finalUrl);
     const backend = await backendPromise;
     const html = await backend.render(res.html, scripts, {
       ...opts,
       url: res.finalUrl,
-      hostFetch: fetchHtml,
+      hostFetch: recording,
     });
-    return { ...res, html };
+    if (opts.onRequest) for (const u of discovered) opts.onRequest(u);
+    return { ...res, html, discovered };
   }
 
   return {
