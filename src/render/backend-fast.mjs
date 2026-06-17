@@ -15,7 +15,7 @@ export function createFastBackend() {
      * @param {string} html
      * @param {Array<{code?:string, module:boolean}>} scripts
      * @param {{ url?:string, hostFetch?:Function, timeoutMs?:number, settleMs?:number,
-     *   settleRounds?:number, maxRounds?:number }} [opts]
+     *   settleRounds?:number, renderDeadlineMs?:number }} [opts]
      * @returns {Promise<string>} rendered outerHTML
      */
     async render(html, scripts, opts = {}) {
@@ -130,7 +130,11 @@ function fireLoad(win, el) {
 }
 
 function settleCfg(opts) {
-  return { min: opts.settleRounds ?? 5, max: opts.maxRounds ?? 50, ms: opts.settleMs ?? 1 };
+  return {
+    min: opts.settleRounds ?? 5,
+    ms: opts.settleMs ?? 1,
+    deadlineMs: opts.renderDeadlineMs ?? 5000,
+  };
 }
 
 function sleep(ms) {
@@ -138,11 +142,16 @@ function sleep(ms) {
 }
 
 // Let microtasks + host-backed timers run, and wait for in-flight page fetches to
-// settle (state.pending), bounded by max rounds so a hung request can't stall.
+// settle (state.pending). Bounded by a wall-clock DEADLINE so a busy hydration
+// (React effects re-rendering on host timers) can't stall the render forever —
+// on the deadline we snapshot whatever rendered. NOTE: a purely synchronous
+// infinite loop inside a timer callback blocks the event loop and can't be cut
+// here; turbo-dom's geometry realism is what prevents that loop forming.
 async function settle(state, opts) {
   const cfg = settleCfg(opts);
+  const deadline = Date.now() + cfg.deadlineMs;
   for (let i = 0; i < cfg.min || state.pending > 0; i++) {
-    if (i >= cfg.max) break;
+    if (Date.now() > deadline) break;
     await sleep(cfg.ms);
   }
 }

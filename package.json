@@ -84,7 +84,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@miaskiewicz/turbo-dom": "^0.2.1",
+    "@miaskiewicz/turbo-dom": "^0.2.3",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "esbuild": "^0.25.0 || ^0.28.0",
     "undici": "^8.5.0"

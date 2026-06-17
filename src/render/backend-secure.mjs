@@ -113,7 +113,7 @@ export function createSecureBackend(opts = {}) {
       await callGlobal(context, "__tcSetup", [html, renderOpts.url ?? null]);
       await runScripts(context, scripts);
       await callGlobal(context, "__tcFireReady", []);
-      await drainTimers(context, renderOpts.settleRounds ?? 5);
+      await drainTimers(context, renderOpts);
       return callGlobal(context, "__tcSnapshot", []);
     },
     async close() {
@@ -138,9 +138,18 @@ async function runOne(context, s) {
   }
 }
 
-async function drainTimers(context, rounds) {
-  for (let i = 0; i < rounds; i++) {
-    const remaining = await callGlobal(context, "__tcDrainTimers", []);
-    if (!remaining) return;
+// Run at least `settleRounds` timer-drain rounds, then keep going while the
+// isolate still has queued timers (React effects rescheduling), bounded by a
+// wall-clock deadline so a busy/looping hydration always returns a snapshot.
+function keepDraining(i, min, remaining, deadline) {
+  return (i < min || remaining) && Date.now() < deadline;
+}
+
+async function drainTimers(context, opts) {
+  const min = opts.settleRounds ?? 5;
+  const deadline = Date.now() + (opts.renderDeadlineMs ?? 5000);
+  let remaining = 1;
+  for (let i = 0; keepDraining(i, min, remaining, deadline); i++) {
+    remaining = await callGlobal(context, "__tcDrainTimers", []);
   }
 }

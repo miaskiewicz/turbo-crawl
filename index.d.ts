@@ -143,6 +143,8 @@ export interface JsRendererOptions {
   timeoutMs?: number;
   settleMs?: number;
   settleRounds?: number;
+  /** Wall-clock cap on the post-script settle/hydration phase (ms, default 5000). */
+  renderDeadlineMs?: number;
   memoryLimit?: number;
   onRequest?: (url: string) => void;
 }
