@@ -84,7 +84,6 @@
   "dependencies": {
     "@miaskiewicz/turbo-dom": "^0.2.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "undici": "^6.0.0",
     "esbuild": "^0.25.0 || ^0.28.0"
   },
   "devDependencies": {
