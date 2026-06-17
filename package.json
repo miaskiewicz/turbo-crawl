@@ -14,23 +14,12 @@
     "./mcp": {
       "import": "./mcp/server.mjs"
     },
-    "./adapters/playwright": {
-      "import": "./adapters/playwright.mjs"
-    },
     "./package.json": "./package.json"
   },
   "bin": {
     "turbo-crawl-mcp": "mcp/server.mjs"
   },
-  "files": [
-    "src/**/*.mjs",
-    "mcp/**/*.mjs",
-    "adapters/**/*.mjs",
-    "index.d.ts",
-    "LICENSE",
-    "README.md",
-    "SPEC.md"
-  ],
+  "files": ["src/**/*.mjs", "mcp/**/*.mjs", "index.d.ts", "LICENSE", "README.md", "SPEC.md"],
   "scripts": {
     "test": "node --test 'test/*.test.mjs'",
     "test:cov": "node --test --experimental-test-coverage --test-coverage-include='src/**' 'test/*.test.mjs'",
@@ -38,7 +27,7 @@
     "lint:fix": "oxlint --fix",
     "format": "biome format --write .",
     "format:check": "biome format .",
-    "cc": "git ls-files 'src/*.mjs' 'mcp/*.mjs' 'adapters/*.mjs' | node scripts/cc-check.cjs --max 5",
+    "cc": "git ls-files 'src/*.mjs' 'mcp/*.mjs' | node scripts/cc-check.cjs --max 5",
     "typecheck": "tsgo --noEmit -p tsconfig.json",
     "check": "npm run lint && npm run format:check && npm run cc && npm run typecheck && npm test",
     "bench": "node bench/extract.mjs && node bench/crawl.mjs",
@@ -75,14 +64,6 @@
     "@miaskiewicz/turbo-dom": "^0.2.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "undici": "^6.0.0"
-  },
-  "peerDependencies": {
-    "playwright": ">=1.40"
-  },
-  "peerDependenciesMeta": {
-    "playwright": {
-      "optional": true
-    }
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.0",

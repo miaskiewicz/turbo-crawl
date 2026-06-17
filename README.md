@@ -93,17 +93,25 @@ npx turbo-crawl-mcp          # stdio MCP server: goto, interactive_elements, cli
 
 Or embed: `import { createServer } from "@miaskiewicz/turbo-crawl/mcp"`.
 
-## Lane B — Chromium fallback (optional)
+## JS-gated pages — no browser
 
-JS-gated pages render through Playwright behind the *same* Page interface; the
-base library carries zero Chromium weight.
+turbo-crawl ships **no browser**. For pages that need JavaScript:
 
-```js
-import { createPlaywrightPage } from "@miaskiewicz/turbo-crawl/adapters/playwright";
-const { page, close } = createPlaywrightPage();
-```
+1. **Hydration state (now):** `page.hydrationState()` mines the data frameworks
+   embed server-side (`__NEXT_DATA__`, JSON-LD, `__APOLLO_STATE__`, …) — zero JS,
+   covers most "SPAs".
+2. **JS-execution tier (planned):** run page scripts on turbo-dom inside a
+   killable worker / isolate — Chromium-free. See
+   [docs/js-execution-tier.md](./docs/js-execution-tier.md).
 
-A `Crawler` can auto-escalate shell-only pages via `{ fallback: playwrightFetcher().fetchHtml }`.
+`detectJsRequired(document)` flags shell-only pages, and `Crawler` accepts a
+generic `{ fallback: fetchHtml }` to route them to whatever renderer you plug in.
+
+> **Playwright is not a dependency.** It's a **dev-only** tool used solely by the
+> differential test (`test/differential.test.mjs`) to sanity-check output parity
+> against Chromium. Nothing in the shipped library loads Playwright or Chromium.
+> (Goal: *API* compatibility so Playwright-style scripts can run on this engine —
+> not running Playwright itself.)
 
 ## Development
 

@@ -1,12 +1,14 @@
+// JS-required detection + generic Crawler fallback routing. No Chromium/Playwright
+// adapter — the fallback is just another fetchHtml (the future no-browser JS tier
+// plugs in here; see docs/js-execution-tier.md).
+
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { createEnvironment } from "@miaskiewicz/turbo-dom/runtime";
 
-import { playwrightFetcher } from "../adapters/playwright.mjs";
 import { Crawler } from "../src/crawl.mjs";
 import { detectJsRequired } from "../src/detect.mjs";
-import { Page } from "../src/page.mjs";
 import { stubFetch } from "./helpers.mjs";
 
 const SHELL = `<!doctype html><html><head>
@@ -29,31 +31,8 @@ describe("detectJsRequired", () => {
   });
 });
 
-// A fake Playwright BrowserType that "renders" by returning fixed HTML.
-function fakeLauncher(renderedHtml) {
-  const page = {
-    goto: async () => ({ status: () => 200, headers: () => ({}) }),
-    content: async () => renderedHtml,
-    url: () => "https://spa.test/",
-  };
-  const context = { newPage: async () => page, close: async () => {} };
-  const browser = { newContext: async () => context, close: async () => {} };
-  return { launch: async () => browser };
-}
-
-describe("playwrightFetcher (Lane B as a renderer)", () => {
-  it("returns rendered DOM that the core Page can extract from", async () => {
-    const { fetchHtml, close } = playwrightFetcher({ launcher: fakeLauncher(RENDERED) });
-    const page = new Page({ fetchHtml });
-    const nav = await page.goto("https://spa.test/");
-    assert.equal(nav.title, "App");
-    assert.ok(page.links().includes("https://spa.test/page2"));
-    await close();
-  });
-});
-
-describe("Crawler Lane-B routing", () => {
-  it("escalates a JS-required page to the fallback fetcher", async () => {
+describe("Crawler fallback routing (generic fetcher, no browser)", () => {
+  it("escalates a JS-required page to the configured fallback fetcher", async () => {
     const laneA = stubFetch({ "https://spa.test/": SHELL });
     const laneB = stubFetch({ "https://spa.test/": RENDERED });
     const recs = [];
