@@ -52,7 +52,20 @@ async function bootIsolate(ivm, bundle, wasm, memoryLimit) {
   await mod.evaluate();
   const init = await context.global.get("__tcInit", { reference: true });
   await init.apply(undefined, [wasm], { arguments: { copy: true } });
-  return { isolate, context };
+  return { isolate, context, ivm };
+}
+
+// Host-side fetch bridge: the isolate calls this (applySyncPromise) for page
+// fetches; we run the request via the host net layer and return a JSON string.
+function fetchBridge(ivm, hostFetch) {
+  return new ivm.Reference(async (url, method, body) => {
+    try {
+      const res = await hostFetch(url, { allowNonHtml: true, method, body });
+      return JSON.stringify({ status: res.status, body: res.html ?? "" });
+    } catch {
+      return JSON.stringify({ status: 0, body: "" });
+    }
+  });
 }
 
 async function callGlobal(context, name, args) {
@@ -77,7 +90,10 @@ export function createSecureBackend(opts = {}) {
 
   return {
     async render(html, scripts, renderOpts = {}) {
-      const { context } = await ensure();
+      const { context, ivm } = await ensure();
+      if (renderOpts.hostFetch) {
+        await context.global.set("__tcHostFetch", fetchBridge(ivm, renderOpts.hostFetch));
+      }
       await callGlobal(context, "__tcSetup", [html, renderOpts.url ?? null]);
       await runScripts(context, scripts);
       await drainTimers(context, renderOpts.settleRounds ?? 5);

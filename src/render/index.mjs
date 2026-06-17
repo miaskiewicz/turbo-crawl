@@ -61,7 +61,11 @@ export function jsRenderer(opts = {}) {
     const env = createEnvironment(res.html);
     const scripts = await loadScripts(fetchHtml, env.document, res.finalUrl);
     const backend = await backendPromise;
-    const html = await backend.render(res.html, scripts, { url: res.finalUrl, ...opts });
+    const html = await backend.render(res.html, scripts, {
+      ...opts,
+      url: res.finalUrl,
+      hostFetch: fetchHtml,
+    });
     return { ...res, html };
   }
 

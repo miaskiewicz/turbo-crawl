@@ -17,9 +17,41 @@ globalThis.__tcInit = (wasmBytes) => {
   setParser({ parse, parseBuffer, parseFragment });
 };
 
-// Build the DOM + install window/document globals, then shim timers over the queue.
+// A page-script fetch that bridges to the host net layer. __tcHostFetch is an
+// isolated-vm Reference set by the host; applySyncPromise blocks the isolate
+// thread until the host request resolves, so `await fetch()` settles in-band.
+function fetchArgs(url, init) {
+  return [url, (init && init.method) || "GET", (init && init.body) || null];
+}
+
+function fetchResponse(r, url) {
+  return {
+    ok: r.status >= 200 && r.status < 300,
+    status: r.status,
+    url,
+    text: () => Promise.resolve(r.body),
+    json: () => Promise.resolve(JSON.parse(r.body)),
+  };
+}
+
+function isolateFetch(input, init) {
+  const url = resolveUrl(input);
+  const raw = globalThis.__tcHostFetch.applySyncPromise(undefined, fetchArgs(url, init));
+  return Promise.resolve(fetchResponse(JSON.parse(raw), url));
+}
+
+function resolveUrl(input) {
+  try {
+    return new URL(String(input), globalThis.__tcBase || undefined).href;
+  } catch {
+    return String(input);
+  }
+}
+
+// Build the DOM + install window/document globals, then shim timers + fetch.
 globalThis.__tcSetup = (html, url) => {
   installGlobals(globalThis, { html, url: url || undefined });
+  globalThis.__tcBase = url || undefined;
   globalThis.setTimeout = (cb, delay) => {
     timers.push({ cb, delay: Number(delay) || 0 });
     return timers.length;
@@ -27,6 +59,7 @@ globalThis.__tcSetup = (html, url) => {
   globalThis.clearTimeout = () => {};
   globalThis.setInterval = () => 0; // intervals would never settle; no-op
   globalThis.clearInterval = () => {};
+  if (globalThis.__tcHostFetch) globalThis.fetch = isolateFetch;
 };
 
 // Execute one page script source in the isolate's global scope (sees document).

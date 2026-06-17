@@ -85,6 +85,30 @@ for (const mode of ["fast", "secure"]) {
       await close();
     });
 
+    it("bridges page-initiated fetch to the host net layer", async () => {
+      const shell = `<body><div id="root"></div><script src="/app.js"></script></body>`;
+      const app = `fetch("/api").then(function(r){return r.json();}).then(function(d){
+        var root = document.getElementById("root");
+        d.items.forEach(function(it){
+          var a = document.createElement("a"); a.setAttribute("href", "/p/" + it); root.appendChild(a);
+        });
+      });`;
+      const { fetchHtml, close } = jsRenderer({
+        mode,
+        fetchHtml: async (u) => {
+          if (u.endsWith("/app.js"))
+            return { html: app, finalUrl: u, status: 200, headers: new Headers() };
+          if (u.endsWith("/api"))
+            return { html: '{"items":[1,2]}', finalUrl: u, status: 200, headers: new Headers() };
+          return { html: shell, finalUrl: u, status: 200, headers: new Headers() };
+        },
+      });
+      const page = new Page({ fetchHtml });
+      await page.goto("https://api-spa.test/");
+      assert.deepEqual(page.links(), ["https://api-spa.test/p/1", "https://api-spa.test/p/2"]);
+      await close();
+    });
+
     it("works as a Crawler fallback for shell-only pages", async () => {
       const { Crawler } = await import("../src/crawl.mjs");
       const { fetchHtml } = jsRenderer({ mode, fetchHtml: stub() });
