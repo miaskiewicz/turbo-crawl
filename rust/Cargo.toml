@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["crates/turbo-crawl-core", "crates/turbo-crawl-render"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.6"
+license = "MIT"
+repository = "https://github.com/miaskiewicz/turbo-crawl"
+
+# Tier 1 of the Rust port: the browserless, native-speed core (net / cookies /
+# robots / url / frontier / crawl-scheduling). The JS-execution tier (deno_core)
+# and the napi/playwright shim land in later tiers; turbo-dom ships as its own
+# Rust crate and is wired into tiers 2-3.
+[profile.release]
+opt-level = 3
+lto = "thin"

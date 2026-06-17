@@ -1,0 +1,25 @@
+[package]
+name = "turbo-crawl-core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Browserless native-speed crawler core (Rust port, tier 1)"
+
+[dependencies]
+url = "2"
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "gzip",
+    "brotli",
+    "deflate",
+    "stream",
+] }
+encoding_rs = "0.8"
+bytes = "1"
+tokio = { version = "1", features = ["macros", "rt", "time", "sync"] }
+futures-util = "0.3"
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "test-util"] }

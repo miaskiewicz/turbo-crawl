@@ -1,0 +1,13 @@
+[package]
+name = "turbo-crawl-render"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "turbo-crawl JS-execution tier (tier 3): deno_core isolate + DOM op bridge"
+
+[dependencies]
+deno_core = "0.404"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
