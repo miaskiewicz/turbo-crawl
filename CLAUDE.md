@@ -85,6 +85,43 @@ the same on staged files. All must pass. Never bypass with `--no-verify`.
 - Every commit message ends with:
   `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`
 
+## Releasing / publishing (checklist)
+
+Releases are cut **on `main`** (the existing tag history lives there). SemVer:
+patch for fixes/dep-bumps, minor for additive features (this repo has been using
+patch bumps for features too — match the surrounding history unless told otherwise).
+
+**Publishing is automated: pushing a `v*` tag IS the publish.**
+`.github/workflows/release.yml` fires on any `v*` tag, runs `npm run check`, then
+`npm publish --access public --provenance` using the repo's `NPM_TOKEN` secret.
+There is **no manual `npm publish`** and no `npm login` — Claude just pushes the
+tag; CI ships it. (`npm whoami` failing locally is irrelevant.) The published
+version is whatever `package.json` says in the tagged commit, so the bump MUST be
+committed **before** the tag.
+
+1. **Bump the version in ALL these places** (keep them identical — there is no
+   single source of truth, so a stale one ships a lie):
+   - `package.json` → `"version"`
+   - `src/index.mjs` → `export const version = "X.Y.Z"`
+   - `mcp/server.mjs` → `new Server({ name: "turbo-crawl", version: "X.Y.Z" }, …)`
+   - `README.md` → the `Status: **vX.Y.Z — working**` line (and any tool-count /
+     feature wording that changed)
+   - Sanity check: `grep -rn "<old-version>" package.json src/index.mjs mcp/server.mjs README.md`
+     returns nothing.
+2. **Green gate**: `npm run check` must pass locally (CI re-runs it before publish,
+   and `prepublishOnly` runs it inside `npm publish` — a red tree can't ship).
+3. **Commit**: `chore(release): vX.Y.Z` (a dep-only ship is `chore(deps): …`).
+4. **Tag the release commit**: `git tag -a vX.Y.Z -m "vX.Y.Z"`.
+5. **Push commit + tag**: `git push origin main && git push origin vX.Y.Z`. The tag
+   push triggers `release.yml` → publish. Only `files` in `package.json` ship
+   (src/mcp/playwright `.mjs`, `index.d.ts`, LICENSE, README, SPEC) —
+   no tests/bench/harness/docs.
+6. **Verify** after CI finishes (`gh run watch` or the Actions tab):
+   `npm view @miaskiewicz/turbo-crawl version` shows the new version.
+
+Publishing is outward-facing + irreversible (npm versions can't be reused) — only
+cut a release tag when the user explicitly asks to "ship"/"publish"/"release".
+
 ## Adding a module (checklist)
 
 1. New `src/<name>.mjs`, pure ESM, functions cc ≤ 5.
