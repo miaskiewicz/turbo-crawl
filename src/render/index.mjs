@@ -74,18 +74,46 @@ async function fetchScript(fetchHtml, url) {
  * @param {number} [opts.settleMs]    settle tick between timer-drain rounds
  * @returns {{ fetchHtml: Function, close: () => Promise<void> }}
  */
+// The Playwright-shaped request record for a top-level navigation.
+function navRequest(url, fetchOpts) {
+  return {
+    url,
+    method: (fetchOpts.method ?? "GET").toUpperCase(),
+    headers: fetchOpts.headers ?? {},
+    postData: fetchOpts.body ?? null,
+    resourceType: "document",
+  };
+}
+
+// Emit the navigation's `response`/`requestfinished` to the façade hooks.
+function emitNav(netHooks, req, res) {
+  if (!netHooks) return;
+  netHooks.onResponse?.({
+    url: res.finalUrl,
+    status: res.status,
+    headers: res.headers,
+    body: res.html ?? "",
+    request: req,
+  });
+  netHooks.onRequestFinished?.(req);
+}
+
 export function jsRenderer(opts = {}) {
   const fetchHtml = opts.fetchHtml ?? defaultFetchHtml;
   const backendPromise = makeBackend(opts.mode ?? "secure");
 
   async function renderFetch(url, fetchOpts = {}) {
+    const navReq = navRequest(url, fetchOpts);
+    opts.netHooks?.onRequest?.(navReq);
     const res = await fetchHtml(url, fetchOpts);
+    emitNav(opts.netHooks, navReq, res);
     // Record every URL the page pulls during render (scripts, module deps, fetch,
-    // XHR) so a crawl can follow them. Crawler filters by host/allow.
+    // XHR) so a crawl can follow them. Crawler filters by host/allow. Thread the
+    // session jar so in-render requests send Cookie + ingest Set-Cookie.
     const discovered = [];
-    const recording = (u, o) => {
+    const recording = (u, o = {}) => {
       discovered.push(u);
-      return fetchHtml(u, o);
+      return fetchHtml(u, { ...o, jar: fetchOpts.jar, cache: fetchOpts.cache });
     };
     const scripts = await loadScripts(recording, res.html, res.finalUrl);
     const backend = await backendPromise;
@@ -93,6 +121,7 @@ export function jsRenderer(opts = {}) {
       ...opts,
       url: res.finalUrl,
       hostFetch: recording,
+      storage: opts.storageFor ? opts.storageFor(res.finalUrl) : opts.storage,
     });
     if (opts.onRequest) for (const u of discovered) opts.onRequest(u);
     return { ...res, html, discovered };

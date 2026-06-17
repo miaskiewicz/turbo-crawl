@@ -9,10 +9,10 @@ A shared `state.pending` counter lets the settle loop wait for in-flight request
 before snapshotting.
 
 ## Exports / API
-- `makePageFetch(hostFetch, base, state) → (input, init?) => Promise<Response-like>`
+- `makePageFetch(hostFetch, base, state, hooks?) → (input, init?) => Promise<Response-like>`
   - returns a minimal Response: `{ ok, status, url, text(), json() }`.
   - `init.method`, `init.body`, `init.headers` are forwarded to `hostFetch`.
-- `makeXHR(hostFetch, base, state) → class XMLHttpRequest`
+- `makeXHR(hostFetch, base, state, hooks?) → class XMLHttpRequest`
   - minimal async XHR: `open(method, url)`, `setRequestHeader()` (no-op),
     `getResponseHeader()` (→ null), `send(body)`; sets `status`, `responseText`,
     `response`; fires `onreadystatechange` + `onload` at `readyState === 4`.
@@ -20,6 +20,15 @@ before snapshotting.
   - `hostFetch` — host `fetchHtml(url, opts) → { html, status, ... }`.
   - `base` — page URL, for resolving relative request URLs.
   - `state` — `{ pending: number }` in-flight counter shared with the settle loop.
+  - `hooks` — optional Playwright-façade hooks (see below).
+
+## Façade hooks (events + `route()`)
+`hooks = { onRequest, onResponse, onRequestFinished, onRequestFailed, intercept }`.
+The fetch/XHR emit a raw request record at start and a raw response record on
+completion (the façade wraps them into `PWRequest`/`PWResponse` events). `intercept`
+backs `page.route()`: it runs before `hostFetch` and returns `"abort"` (reject →
+`requestfailed`), a `{ status, body, headers }` mock (fulfill, no network), or
+`null` (continue to `hostFetch`).
 
 ## Key internals
 - `requestUrl(input, base)` — resolves `input` against `base` via `new URL`,

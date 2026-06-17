@@ -128,6 +128,125 @@ const INPUT_SCHEMAS = {
   go_back: { type: "object", properties: {} },
   go_forward: { type: "object", properties: {} },
   reload: { type: "object", properties: {} },
+  batch: {
+    type: "object",
+    properties: {
+      urls: { type: "array", items: { type: "string" } },
+      mode: { type: "string", enum: ["no-js", "fast", "secure"] },
+      view: {
+        type: "string",
+        enum: ["markdown", "text", "html", "links", "interactive", "ax", "hydration"],
+      },
+      concurrency: { type: "number" },
+    },
+    required: ["urls"],
+  },
+  crawl: {
+    type: "object",
+    properties: {
+      url: { type: "string" },
+      maxPages: { type: "number" },
+      maxDepth: { type: "number" },
+      sameHost: { type: "boolean" },
+      allow: { type: "string", description: "URL regex — only crawl matching URLs." },
+      deny: { type: "string", description: "URL regex — skip matching URLs." },
+      mode: { type: "string", enum: ["no-js", "fast", "secure"] },
+      view: { type: "boolean" },
+      markdown: { type: "boolean" },
+      robots: { type: "boolean" },
+    },
+    required: ["url"],
+  },
+  render: {
+    type: "object",
+    properties: {
+      mode: { type: "string", enum: ["no-js", "fast", "secure"] },
+      url: { type: "string" },
+    },
+  },
+  set_mode: {
+    type: "object",
+    properties: { mode: { type: "string", enum: ["no-js", "fast", "secure"] } },
+    required: ["mode"],
+  },
+  detect_js: { type: "object", properties: {} },
+  robots_check: {
+    type: "object",
+    properties: { url: { type: "string" }, userAgent: { type: "string" } },
+    required: ["url"],
+  },
+  get_cookies: { type: "object", properties: {} },
+  set_cookie: {
+    type: "object",
+    properties: {
+      name: { type: "string" },
+      value: { type: "string" },
+      domain: { type: "string" },
+      path: { type: "string" },
+      expires: { type: "number" },
+      secure: { type: "boolean" },
+      httpOnly: { type: "boolean" },
+      sameSite: { type: "string" },
+    },
+    required: ["name", "value", "domain"],
+  },
+  set_extra_headers: {
+    type: "object",
+    properties: { headers: { type: "object" } },
+    required: ["headers"],
+  },
+  snapshot: { type: "object", properties: {} },
+  forms: { type: "object", properties: {} },
+  find_text: {
+    type: "object",
+    properties: { text: { type: "string" }, limit: { type: "number" } },
+    required: ["text"],
+  },
+  fetch_json: {
+    type: "object",
+    properties: { url: { type: "string" } },
+    required: ["url"],
+  },
+  fetch_raw: {
+    type: "object",
+    properties: { url: { type: "string" } },
+    required: ["url"],
+  },
+  fill_many: {
+    type: "object",
+    properties: {
+      fields: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            selector: { type: "string" },
+            i: { type: "number" },
+            value: { type: "string" },
+          },
+        },
+      },
+    },
+    required: ["fields"],
+  },
+  extract_links: {
+    type: "object",
+    properties: {
+      sameHost: { type: "boolean" },
+      pattern: { type: "string" },
+      limit: { type: "number" },
+    },
+  },
+  eval_js: {
+    type: "object",
+    properties: { code: { type: "string" }, args: { type: "array" } },
+    required: ["code"],
+  },
+  inject_js: {
+    type: "object",
+    properties: { code: { type: "string" } },
+    required: ["code"],
+  },
 };
 
 // Default a Page with HTTP/2 + DNS cache (dispatcher) and a session-wide 304
@@ -154,7 +273,7 @@ export function createServer(opts = {}) {
   const byName = new Map(tools.map((t) => [t.name, t]));
 
   const server = new Server(
-    { name: "turbo-crawl", version: "0.1.3" },
+    { name: "turbo-crawl", version: "0.1.4" },
     { capabilities: { tools: {} } },
   );
 

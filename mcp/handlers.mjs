@@ -4,7 +4,14 @@
 // Each handler returns a plain JSON-able result; the SDK layer wraps it as tool
 // output. A handler throwing surfaces as an MCP tool error.
 
+import { buildSubmission } from "../src/actions.mjs";
+import { batch } from "../src/batch.mjs";
+import { crawlSite } from "../src/crawl.mjs";
+import { detectJsRequired } from "../src/detect.mjs";
 import { textOf } from "../src/dom-ops.mjs";
+import { fetchHtml } from "../src/net.mjs";
+import { jsRenderer } from "../src/render/index.mjs";
+import { RobotsCache } from "../src/robots.mjs";
 
 // getBy* resolvers exposed to agents by `kind`.
 const GET_BY = {
@@ -42,12 +49,129 @@ function stripNodes(result) {
   return result;
 }
 
+// --- render-mode control (lazily wires the JS render tier into the Page) ------
+
+// Cache + reuse one renderer per mode; `ctx.base` is the Page's original fetcher.
+function rendererFor(ctx, page, mode) {
+  ctx.base ??= page.fetchHtml;
+  let r = ctx.renderers.get(mode);
+  if (!r) {
+    r = jsRenderer({ mode, fetchHtml: ctx.base });
+    ctx.renderers.set(mode, r);
+  }
+  return r;
+}
+
+// Point the Page's fetcher at Lane A ("no-js") or a render tier ("fast"/"secure").
+function setMode(ctx, page, mode) {
+  if (!mode || mode === "no-js") {
+    if (ctx.base) page.setFetchHtml(ctx.base);
+    return { mode: "no-js" };
+  }
+  page.setFetchHtml(rendererFor(ctx, page, mode).fetchHtml);
+  return { mode };
+}
+
+// Switch mode and re-navigate (default url = current page) so it renders now.
+function renderNow(ctx, page, mode, url) {
+  setMode(ctx, page, mode ?? "fast");
+  return page.goto(url ?? page.url);
+}
+
+async function robotsCheck(ctx, url, userAgent) {
+  ctx.robots ??= new RobotsCache();
+  const allowed = await ctx.robots.allowed(url, userAgent);
+  const crawlDelay = await ctx.robots.crawlDelay(new URL(url).origin, userAgent);
+  return { allowed, crawlDelay };
+}
+
+// --- cookies ------------------------------------------------------------------
+
+function toCookie(c) {
+  const expires = c.expiresAt === Infinity ? -1 : Math.floor(c.expiresAt / 1000);
+  const { name, value, domain, path, secure, httpOnly, sameSite } = c;
+  return { name, value, domain, path, expires, secure: !!secure, httpOnly: !!httpOnly, sameSite };
+}
+
+// --- snapshot / forms / links -------------------------------------------------
+
+function headings(doc) {
+  return [...doc.querySelectorAll("h1,h2,h3,h4,h5,h6")].map((h) => ({
+    level: Number(h.tagName[1]),
+    text: textOf(h),
+  }));
+}
+
+function snapshot(page) {
+  return {
+    url: page.url,
+    title: page.title(),
+    headings: headings(page.document),
+    interactive: page.interactiveElements(),
+    links: page.links(),
+  };
+}
+
+function formField(el) {
+  const type = (el.getAttribute("type") || el.tagName).toLowerCase();
+  return { name: el.getAttribute("name"), type, value: el.value ?? el.getAttribute("value") ?? "" };
+}
+
+function formInfo(form, url) {
+  const sub = buildSubmission(form, url);
+  return {
+    action: form.getAttribute("action"),
+    method: sub.method,
+    submitUrl: sub.url,
+    fields: [...form.querySelectorAll("input,select,textarea")].map(formField),
+  };
+}
+
+function forms(page) {
+  return [...page.document.querySelectorAll("form")].map((f) => formInfo(f, page.url));
+}
+
+function linkFilter(opts, origin) {
+  const re = opts.pattern ? new RegExp(opts.pattern) : null;
+  const host = opts.sameHost ? origin : null;
+  return (u) => (!re || re.test(u)) && (!host || u.startsWith(host));
+}
+
+function extractLinks(page, opts) {
+  const origin = page.url ? new URL(page.url).origin : "";
+  const keep = page.links().filter(linkFilter(opts, origin));
+  return opts.limit ? keep.slice(0, opts.limit) : keep;
+}
+
+// --- direct resource fetch (API/asset, bypassing the page) --------------------
+
+async function fetchResource(page, url, asJson) {
+  const res = await fetchHtml(url, { allowNonHtml: true, jar: page.cookies });
+  const body = res.html ?? "";
+  const tail = asJson ? { json: JSON.parse(body) } : { body };
+  return { status: res.status, finalUrl: res.finalUrl, ...tail };
+}
+
+// --- multi-fill ---------------------------------------------------------------
+
+function fillOne(page, f) {
+  if (f.selector != null) page.locator(f.selector).first().fill(f.value);
+  else page.fill(f.i, f.value);
+}
+
+function fillMany(page, fields) {
+  const list = fields ?? [];
+  for (const f of list) fillOne(page, f);
+  return { ok: true, filled: list.length };
+}
+
 /**
  * Build the tool table for a Page (or a managed pool exposing the Page API).
  * @param {import('../src/page.mjs').Page} page
  * @returns {Array<{name:string, description:string, handler:(args:object)=>Promise<any>|any}>}
  */
 export function buildTools(page) {
+  const ctx = { base: null, renderers: new Map(), robots: null };
   return [
     {
       name: "goto",
@@ -239,6 +363,125 @@ export function buildTools(page) {
       name: "reload",
       description: "Reload the current page. Returns { status, url }.",
       handler: () => page.reload(),
+    },
+    {
+      name: "batch",
+      description:
+        "Crawl a list of URLs and return one result per URL. mode: no-js (static, default) | fast (in-process JS render) | secure (isolate JS render). view: markdown (default) | text | html | links | interactive | ax | hydration. Returns [{ url, ok, status, finalUrl, title, data }] (failures: { url, ok:false, error }).",
+      handler: ({ urls, mode, view, concurrency }) => batch(urls, { mode, view, concurrency }),
+    },
+    {
+      name: "crawl",
+      description:
+        "Full-site crawl from a start URL over a frontier (same-host by default). Params: url, maxPages, maxDepth, sameHost, allow/deny (URL regex), mode (no-js|fast|secure — JS modes render only JS-gated pages), view, markdown, robots (respect robots.txt). Returns [{ url, status, depth, title, links, view?, extracted? }].",
+      handler: (a) => crawlSite(a),
+    },
+    {
+      name: "render",
+      description:
+        "Re-render the current page (or { url }) with the JS-execution tier and switch the Page to that mode for later navigations. mode: fast (default, in-process) | secure (isolate) | no-js. Returns { status, url, title }.",
+      handler: ({ mode, url }) => renderNow(ctx, page, mode, url),
+    },
+    {
+      name: "set_mode",
+      description:
+        "Set the navigation mode for subsequent goto/click without re-navigating now. mode: no-js (static) | fast | secure. Returns { mode }.",
+      handler: ({ mode }) => setMode(ctx, page, mode),
+    },
+    {
+      name: "detect_js",
+      description:
+        "Heuristically detect whether the current page needs JavaScript to render its content. Returns { jsRequired, textLength, scripts, reason }.",
+      handler: () => detectJsRequired(page.document),
+    },
+    {
+      name: "robots_check",
+      description:
+        "Check robots.txt for a URL. Returns { allowed, crawlDelay } for the given userAgent (default turbo-crawl).",
+      handler: ({ url, userAgent }) => robotsCheck(ctx, url, userAgent),
+    },
+    {
+      name: "get_cookies",
+      description:
+        "List the session cookies the Page jar holds. Returns [{ name, value, domain, path, expires, secure, httpOnly, sameSite }].",
+      handler: () => page.cookies.all().map(toCookie),
+    },
+    {
+      name: "set_cookie",
+      description:
+        "Add a cookie to the Page jar (auth/session). Params: name, value, domain, path, expires (epoch seconds; -1 session), secure, httpOnly, sameSite.",
+      handler: (c) => {
+        page.cookies.add(c);
+        return { ok: true };
+      },
+    },
+    {
+      name: "set_extra_headers",
+      description:
+        "Set persistent extra HTTP headers (e.g. Authorization) merged into every subsequent request. Params: { headers: { name: value } }.",
+      handler: ({ headers }) => {
+        page.setExtraHeaders(headers);
+        return { ok: true };
+      },
+    },
+    {
+      name: "snapshot",
+      description:
+        "One-shot page state in a single call: { url, title, headings, interactive (indexed elements), links }. Saves round-trips.",
+      handler: () => snapshot(page),
+    },
+    {
+      name: "forms",
+      description:
+        "Enumerate the page's forms with their submit URL/method and fields. Returns [{ action, method, submitUrl, fields:[{ name, type, value }] }].",
+      handler: () => forms(page),
+    },
+    {
+      name: "find_text",
+      description:
+        "Find elements containing visible text. Returns matches as { html, text } (up to limit, default 20).",
+      handler: ({ text, limit }) =>
+        page
+          .getByText(text)
+          .elements()
+          .slice(0, limit ?? 20)
+          .map(elementSummary),
+    },
+    {
+      name: "fetch_json",
+      description:
+        "Fetch a URL (API/asset) directly through the session jar and parse JSON. Returns { status, finalUrl, json }.",
+      handler: ({ url }) => fetchResource(page, url, true),
+    },
+    {
+      name: "fetch_raw",
+      description:
+        "Fetch a URL directly through the session jar and return the raw body. Returns { status, finalUrl, body }.",
+      handler: ({ url }) => fetchResource(page, url, false),
+    },
+    {
+      name: "fill_many",
+      description:
+        "Fill several fields in one call. Params: { fields: [{ selector, value } | { i, value }] }. Returns { ok, filled }.",
+      handler: ({ fields }) => fillMany(page, fields),
+    },
+    {
+      name: "extract_links",
+      description:
+        "Page links, filtered. Params: sameHost (bool), pattern (URL regex), limit. Returns the matching absolute URLs.",
+      handler: (opts) => extractLinks(page, opts),
+    },
+    {
+      name: "eval_js",
+      description:
+        "Execute JavaScript against the current rendered DOM and return the value. `code` is a function body — use `return` for the result and `arguments` for `args`. Has window/document/navigator/console. Runs in a node:vm over the parsed/rendered DOM (not the page's live render isolate). Params: { code, args? }.",
+      handler: ({ code, args }) => page.evalJs(code, ...(args ?? [])),
+    },
+    {
+      name: "inject_js",
+      description:
+        "Inject a <script> with `code` into the page and execute it against the current DOM (DOM mutations persist; the element stays in the serialized HTML). Params: { code }. Returns { ok }.",
+      handler: ({ code }) => page.injectJs(code),
     },
   ];
 }

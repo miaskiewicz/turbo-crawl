@@ -55,6 +55,7 @@ export class Page {
   #history = []; // visited URLs for back/forward
   #histIndex = -1;
   #requests = []; // URLs the page fetched during render (JS tier), for crawl discovery
+  #extraHeaders = {}; // persistent extra HTTP headers merged into every fetch
 
   /**
    * @param {object} [opts]
@@ -102,9 +103,29 @@ export class Page {
     return this.#nav?.userAgent ? { "user-agent": this.#nav.userAgent } : {};
   }
 
+  /** The current page fetcher (Lane-A by default; a render-tier fetchHtml once set). */
+  get fetchHtml() {
+    return this.#fetchHtml;
+  }
+
+  /**
+   * Swap the page fetcher — e.g. enable the JS render tier (`jsRenderer().fetchHtml`)
+   * for subsequent navigations. Returns `this`.
+   */
+  setFetchHtml(fn) {
+    this.#fetchHtml = fn;
+    return this;
+  }
+
+  /** Persistent extra HTTP headers merged into every fetch (auth bearer, etc.). */
+  setExtraHeaders(headers) {
+    this.#extraHeaders = { ...headers };
+    return this;
+  }
+
   // Fetch with the session jar + cache + configured User-Agent; per-call headers win.
   #fetch(url, opts = {}) {
-    const headers = { ...this.#uaHeader(), ...opts.headers };
+    const headers = { ...this.#uaHeader(), ...this.#extraHeaders, ...opts.headers };
     return this.#fetchHtml(url, {
       jar: this.#jar,
       cache: this.#cache,
@@ -282,6 +303,32 @@ export class Page {
   evaluate(pageFunction, ...args) {
     if (typeof pageFunction === "function") return this.#callFn(pageFunction, args);
     return vm.runInContext(String(pageFunction), this.#evalContext());
+  }
+
+  /**
+   * Run a JS function BODY (statements; use `return` for a value, `arguments` for
+   * args) against the current rendered DOM — Selenium `executeScript` /
+   * Playwright `evaluate` ergonomics for multi-statement code. Runs in a node:vm
+   * over the parsed/rendered DOM (`window`/`document`/`navigator`/`console`), not
+   * the page's live render isolate.
+   */
+  evalJs(code, ...args) {
+    const sandbox = this.#evalContext();
+    sandbox.__args = args;
+    return vm.runInContext(`(function(){ ${code}\n}).apply(null, __args)`, sandbox);
+  }
+
+  /**
+   * Inject a `<script>` with `code` into the DOM and execute it against the
+   * current DOM (Playwright `addScriptTag({ content })`). The element persists in
+   * the serialized HTML; DOM mutations the script makes stick. Returns `{ ok }`.
+   */
+  injectJs(code) {
+    const script = this.document.createElement("script");
+    script.textContent = code;
+    (this.document.body ?? this.document.documentElement)?.appendChild(script);
+    vm.runInContext(code, this.#evalContext());
+    return { ok: true };
   }
 
   /** Evaluate `fn(element, ...args)` against the first match of `selector`. */

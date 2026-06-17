@@ -153,6 +153,30 @@ export declare function jsRenderer(opts?: JsRendererOptions): {
   close(): Promise<void>;
 };
 
+// --- batch -------------------------------------------------------------------
+export type BatchMode = "no-js" | "fast" | "secure";
+export type BatchView = "markdown" | "text" | "html" | "links" | "interactive" | "ax" | "hydration";
+export interface BatchOptions {
+  /** "no-js" (Lane A static, default) | "fast" (in-proc JS) | "secure" (isolate JS). */
+  mode?: BatchMode;
+  /** Per-URL view to return as `data` (default "markdown"). */
+  view?: BatchView;
+  /** Parallelism — honored only for "no-js" (JS modes run sequentially). */
+  concurrency?: number;
+  /** Underlying network fetcher (injectable for tests / Lane B). */
+  fetchHtml?: typeof fetchHtml;
+}
+export interface BatchResult {
+  url: string;
+  ok: boolean;
+  status?: number;
+  finalUrl?: string;
+  title?: string;
+  data?: unknown;
+  error?: string;
+}
+export declare function batch(urls: string[], opts?: BatchOptions): Promise<BatchResult[]>;
+
 // --- actions -----------------------------------------------------------------
 export declare function fillValue(el: object, value: unknown): void;
 export declare function serializeForm(form: object, submitter?: object): [string, string][];
@@ -234,6 +258,11 @@ export declare class Page {
   readonly cookies: CookieJar;
   setNavigator(props: NavigatorOverrides): this;
   setUserAgent(userAgent: string): this;
+  setExtraHeaders(headers: Record<string, string>): this;
+  get fetchHtml(): typeof fetchHtml;
+  setFetchHtml(fn: typeof fetchHtml): this;
+  evalJs(code: string, ...args: unknown[]): unknown;
+  injectJs(code: string): { ok: true };
   goto(url: string, opts?: FetchOptions): Promise<NavResult>;
   follow(href: string, opts?: FetchOptions): Promise<NavResult>;
   reload(opts?: FetchOptions): Promise<NavResult>;
@@ -322,3 +351,18 @@ export declare class Crawler {
   options: CrawlerOptions;
   [Symbol.asyncIterator](): AsyncIterator<CrawlRecord>;
 }
+export interface CrawlSiteOptions {
+  url?: string | string[];
+  start?: string | string[];
+  maxPages?: number;
+  maxDepth?: number;
+  sameHost?: boolean;
+  allow?: string;
+  deny?: string;
+  mode?: BatchMode;
+  view?: boolean | "fast";
+  markdown?: boolean;
+  robots?: boolean;
+  fetchHtml?: typeof fetchHtml;
+}
+export declare function crawlSite(opts?: CrawlSiteOptions): Promise<CrawlRecord[]>;

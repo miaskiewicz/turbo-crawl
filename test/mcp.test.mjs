@@ -8,12 +8,14 @@ import { stubFetch } from "./helpers.mjs";
 
 const HOME = "https://shop.test/";
 const PRODUCT = "https://shop.test/p/1";
+const FORM = "https://shop.test/signup";
 
 function tools() {
   const page = new Page({
     fetchHtml: stubFetch({
       [HOME]: `<title>Home</title><body><main><h1>Shop</h1><a href="/p/1">Widget</a></main></body>`,
       [PRODUCT]: `<title>Widget — $9</title><body><main><h1>Widget</h1><span class="price">$9</span></main></body>`,
+      [FORM]: `<title>Sign up</title><body><form action="/signup" method="post"><input name="email"><button type="submit">Go</button></form></body>`,
     }),
   });
   const map = new Map(buildTools(page).map((t) => [t.name, t]));
@@ -57,9 +59,79 @@ describe("MCP handlers (Page API 1:1)", () => {
       "go_back",
       "go_forward",
       "reload",
+      "batch",
+      "crawl",
+      "render",
+      "set_mode",
+      "detect_js",
+      "robots_check",
+      "get_cookies",
+      "set_cookie",
+      "set_extra_headers",
+      "snapshot",
+      "forms",
+      "find_text",
+      "fetch_json",
+      "fetch_raw",
+      "fill_many",
+      "extract_links",
+      "eval_js",
+      "inject_js",
     ]) {
       assert.ok(map.has(name), `missing tool ${name}`);
     }
+  });
+
+  it("eval_js runs a statement body; inject_js mutates the DOM", async () => {
+    const { call } = tools();
+    await call("goto", { url: HOME });
+    assert.equal(
+      await call("eval_js", {
+        code: "return document.querySelectorAll('a').length + arguments[0]",
+        args: [10],
+      }),
+      11,
+    );
+    await call("inject_js", { code: "document.querySelector('h1').textContent = 'Mutated'" });
+    assert.equal(await call("text_content", { selector: "h1" }), "Mutated");
+    assert.match(await call("html"), /<script>/);
+  });
+
+  it("offline tools: detect_js, cookies, snapshot, forms, find_text, fill_many, extract_links, set_mode", async () => {
+    const { call } = tools();
+    await call("goto", { url: HOME });
+
+    assert.equal(typeof (await call("detect_js")).jsRequired, "boolean");
+
+    await call("set_cookie", { name: "sid", value: "x", domain: "shop.test" });
+    assert.equal((await call("get_cookies"))[0].name, "sid");
+    assert.deepEqual(await call("set_extra_headers", { headers: { "x-a": "1" } }), { ok: true });
+    assert.deepEqual(await call("set_mode", { mode: "no-js" }), { mode: "no-js" });
+
+    const snap = await call("snapshot");
+    assert.equal(snap.title, "Home");
+    assert.ok(snap.headings.some((h) => h.text === "Shop"));
+    assert.ok(snap.links.includes("https://shop.test/p/1"));
+
+    assert.deepEqual(await call("extract_links", { sameHost: true }), ["https://shop.test/p/1"]);
+    const found = await call("find_text", { text: "Widget" });
+    assert.ok(found.length >= 1);
+  });
+
+  it("forms enumerates fields; fill_many sets them", async () => {
+    const { call } = tools();
+    await call("goto", { url: FORM });
+    const [form] = await call("forms");
+    assert.equal(form.method, "POST");
+    assert.ok(form.fields.some((f) => f.name === "email"));
+    assert.deepEqual(
+      await call("fill_many", { fields: [{ selector: "[name=email]", value: "a@b.c" }] }),
+      {
+        ok: true,
+        filled: 1,
+      },
+    );
+    assert.equal(await call("input_value", { selector: "[name=email]" }), "a@b.c");
   });
 
   it("evaluate + accessor tools work over MCP", async () => {

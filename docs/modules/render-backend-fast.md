@@ -13,6 +13,15 @@ targets only; open-web crawling should use the secure (isolated-vm) backend.
     - `opts.url` — page URL (passed to `installGlobals` and the host fetch).
     - `opts.hostFetch` — host net fetcher; when present, `fetch` +
       `XMLHttpRequest` are injected into the sandbox.
+    - `opts.netHooks` — Playwright-façade request/response + `route()` hooks passed
+      to `makePageFetch`/`makeXHR`.
+    - `opts.storage` — `{ localStorage, sessionStorage }` injected over turbo-dom's
+      per-env stores (via `defineProperty`) so they persist across renders.
+    - `opts.initScripts` — code strings run (as synthetic sync scripts) before any
+      page script.
+    - `opts.hooks.onConsole(type,args)` — page `console.*` is installed into the
+      sandbox and forwarded here; `opts.hooks.onPageError(err)` receives thrown
+      script errors (also surfaced as `pageerror`).
     - `opts.timeoutMs` — per-script execution cap (default `2000`).
     - `opts.settleMs` — sleep per settle round (default `1`).
     - `opts.settleRounds` — minimum settle rounds (default `5`).

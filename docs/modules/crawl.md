@@ -11,6 +11,13 @@ look JS-gated can be re-rendered through a configured Lane-B fallback fetcher.
 `class Crawler` — `constructor(options)` merges `options` over `DEFAULTS` into
 `this.options`. It is **async-iterable**: `for await (const rec of new Crawler({…}))`.
 
+`crawlSite(opts) → Promise<record[]>` — a one-shot convenience that runs a crawl to
+completion and returns all records as an array, translating agent-friendly option
+names (`url`, `sameHost`, `allow`/`deny` URL regexes, `mode`) into `CrawlerOptions`.
+`mode` of `"fast"`/`"secure"` wires a render-tier **Lane-B fallback** (renders only
+JS-gated pages, reusing the same base fetcher); `"no-js"` (default) stays Lane A.
+Backs the MCP `crawl` tool.
+
 **CrawlerOptions** (defaults in parens):
 - `start` — seed URL or array of URLs (filtered to HTTP).
 - `concurrency` (4) — number of warm Pages / parallel workers.

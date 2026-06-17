@@ -8,6 +8,8 @@ import { createDispatcher } from "./dispatcher.mjs";
 import { extractSchema } from "./schema.mjs";
 import { Frontier } from "./frontier.mjs";
 import { Page } from "./page.mjs";
+import { jsRenderer } from "./render/index.mjs";
+import { RobotsCache } from "./robots.mjs";
 import { isHttpUrl } from "./url.mjs";
 
 const DEFAULTS = {
@@ -358,4 +360,63 @@ export class Crawler {
     const { source, finalNav, lane } = await maybeLaneB(st, page, item, out.nav, fallbackPage);
     return buildRecord(st, item, source, finalNav, lane);
   }
+}
+
+// --- crawlSite: a one-shot convenience that collects a whole crawl into an array,
+// translating the agent-friendly option names (url/sameHost/allow/deny/mode) into
+// the Crawler's. JS modes ("fast"/"secure") render only JS-gated pages (Lane B).
+
+const toRegExp = (s) => (s ? new RegExp(s) : null);
+
+// allow/deny string regexes → a single keep-predicate (or undefined when neither set).
+function allowPredicate(opts) {
+  const allow = toRegExp(opts.allow);
+  const deny = toRegExp(opts.deny);
+  if (!allow && !deny) return undefined;
+  return (url) => (!allow || allow.test(url)) && !(deny && deny.test(url));
+}
+
+// A render-tier Lane-B fallback for "fast"/"secure"; {} for "no-js" (or unset).
+// Reuses the caller's base fetcher so the render runs over the same source.
+function modeFallback(opts) {
+  if (!opts.mode || opts.mode === "no-js") return {};
+  const r = jsRenderer({ mode: opts.mode, fetchHtml: opts.fetchHtml });
+  return { fallback: r.fetchHtml, close: () => r.close() };
+}
+
+function prune(obj) {
+  return Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined));
+}
+
+function crawlOptions(opts, fallback) {
+  return prune({
+    start: opts.url ?? opts.start,
+    maxPages: opts.maxPages,
+    maxDepth: opts.maxDepth,
+    sameHostOnly: opts.sameHost !== false,
+    allow: allowPredicate(opts),
+    robots: opts.robots ? new RobotsCache() : undefined,
+    fallback,
+    view: opts.view,
+    markdown: opts.markdown,
+    fetchHtml: opts.fetchHtml,
+  });
+}
+
+/**
+ * Run a crawl to completion and return all records as an array.
+ * @param {object} opts  url|start, maxPages, maxDepth, sameHost, allow, deny,
+ *   mode ("no-js"|"fast"|"secure"), view, markdown, robots, fetchHtml
+ * @returns {Promise<object[]>}
+ */
+export async function crawlSite(opts = {}) {
+  const { fallback, close } = modeFallback(opts);
+  const crawler = new Crawler(crawlOptions(opts, fallback));
+  const out = [];
+  try {
+    for await (const rec of crawler) out.push(rec);
+  } finally {
+    await close?.();
+  }
+  return out;
 }

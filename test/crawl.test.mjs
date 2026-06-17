@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { Crawler } from "../src/crawl.mjs";
+import { Crawler, crawlSite } from "../src/crawl.mjs";
 import { stubFetch } from "./helpers.mjs";
 
 const H = "https://site.test";
@@ -151,5 +151,51 @@ describe("Crawler", () => {
     });
     const recs = await collect(c);
     assert.equal(recs.length, 5);
+  });
+});
+
+describe("crawlSite (one-shot collect)", () => {
+  it("collects all records; honors maxPages", async () => {
+    const fetchHtml = stubFetch(SITE);
+    const recs = await crawlSite({ url: `${H}/`, fetchHtml });
+    assert.equal(recs.length, 5);
+    assert.ok(recs.every((r) => r.url.startsWith(H)));
+
+    const capped = await crawlSite({ url: `${H}/`, fetchHtml: stubFetch(SITE), maxPages: 2 });
+    assert.equal(capped.length, 2);
+  });
+
+  it("allow/deny URL regex filters the frontier", async () => {
+    const fetchHtml = stubFetch(SITE);
+    const recs = await crawlSite({ url: `${H}/`, fetchHtml, deny: "/b" });
+    const urls = recs.map((r) => r.url);
+    assert.ok(!urls.some((u) => u.includes("/b")));
+    assert.ok(urls.includes(`${H}/a`));
+  });
+
+  it("sameHost:false + allow keeps only matching offsite links", async () => {
+    const fetchHtml = stubFetch({ ...SITE, "https://other.test/x": "<title>Ext</title>" });
+    const recs = await crawlSite({
+      url: `${H}/`,
+      fetchHtml,
+      sameHost: false,
+      allow: "site\\.test|other\\.test/x",
+      maxDepth: 1,
+    });
+    assert.ok(recs.some((r) => r.url === "https://other.test/x"));
+  });
+
+  it("mode:fast renders JS-gated pages via the Lane-B fallback", async () => {
+    const fetchHtml = stubFetch({
+      // a shell page (low text + external script) → detected as JS-required
+      [`${H}/`]: `<title>App</title><body><div id="root"></div><script src="/app.js"></script></body>`,
+      [`${H}/app.js`]: `document.getElementById('root').textContent='Hydrated content from JS render tier';`,
+    });
+    const [rec] = await crawlSite({ url: `${H}/`, fetchHtml, mode: "fast", maxDepth: 0 });
+    assert.match(rec.title, /App/);
+    assert.ok(
+      fetchHtml.calls.some(([u]) => u.endsWith("/app.js")),
+      "rendered (fetched the script)",
+    );
   });
 });

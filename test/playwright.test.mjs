@@ -100,10 +100,10 @@ describe("playwright compat façade", () => {
   it("pixel/render-only APIs throw a clear, pointed error", async () => {
     const page = await (await chromium.launch(browserOpts())).newPage(browserOpts());
     await page.goto("https://s/");
-    for (const fn of ["screenshot", "pdf", "route"]) {
-      assert.throws(() => page[fn](), /no-JS engine|JavaScript/);
+    for (const fn of ["screenshot", "pdf"]) {
+      assert.throws(() => page[fn](), /no-browser engine|pixel rendering/);
     }
-    await assert.rejects(() => page.hover(), /no-JS engine|JavaScript/);
+    await assert.rejects(() => page.hover(), /no-browser engine|pixel rendering/);
   });
 
   it("goBack/goForward/reload + content()", async () => {

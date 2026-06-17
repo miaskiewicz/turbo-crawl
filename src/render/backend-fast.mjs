@@ -26,14 +26,13 @@ export function createFastBackend() {
       // Own time + scheduling BEFORE any page script runs (React/MUI read them).
       const ctl = installVirtualClock(sandbox);
       const state = { pending: 0 };
-      if (opts.hostFetch) {
-        sandbox.fetch = makePageFetch(opts.hostFetch, opts.url, state);
-        sandbox.XMLHttpRequest = makeXHR(opts.hostFetch, opts.url, state);
-      }
+      installNet(sandbox, opts, state);
+      installStorage(sandbox, opts.storage);
+      installConsole(sandbox, opts.hooks?.onConsole);
       shimDocWrite(sandbox.document);
       try {
         // sync → defer → DOMContentLoaded → async → load (browser order)
-        runLifecycle(sandbox, scripts, opts.timeoutMs ?? 2000);
+        runLifecycle(sandbox, scripts, opts);
         await settle(ctl, state, opts);
       } finally {
         resetClock(); // restore turbo-dom's real clock for any other consumer
@@ -43,6 +42,42 @@ export function createFastBackend() {
     },
     async close() {},
   };
+}
+
+// Wire host-net-backed fetch + XHR (with façade event/route hooks) into the page.
+function installNet(sandbox, opts, state) {
+  if (!opts.hostFetch) return;
+  sandbox.fetch = makePageFetch(opts.hostFetch, opts.url, state, opts.netHooks);
+  sandbox.XMLHttpRequest = makeXHR(opts.hostFetch, opts.url, state, opts.netHooks);
+}
+
+// Override turbo-dom's per-env Web Storage with the context-persistent stores so
+// localStorage/sessionStorage survive across navigations (auth tokens, etc.).
+// defineProperty (not plain assignment) so a read-only `window.localStorage` is
+// still replaced.
+function setProp(obj, key, value) {
+  Object.defineProperty(obj, key, { value, writable: true, configurable: true });
+}
+
+function installStorage(sandbox, storage) {
+  if (!storage) return;
+  for (const key of ["localStorage", "sessionStorage"]) {
+    setProp(sandbox, key, storage[key]);
+    if (sandbox.window) setProp(sandbox.window, key, storage[key]);
+  }
+}
+
+// Page console is absent in the bare sandbox; install one that forwards to the
+// façade's `console` event (and keeps page `console.*` calls from throwing).
+const CONSOLE_TYPES = { log: "log", info: "info", warn: "warning", error: "error", debug: "debug" };
+
+function installConsole(sandbox, onConsole) {
+  const con = {};
+  for (const [method, type] of Object.entries(CONSOLE_TYPES)) {
+    con[method] = (...args) => onConsole?.(type, args);
+  }
+  sandbox.console = con;
+  if (sandbox.window) sandbox.window.console = con;
 }
 
 // Make `document.write`/`writeln` append to the body (legacy builders that emit
@@ -88,19 +123,24 @@ const isSync = (s) => s.async !== true && s.defer !== true;
 // `_R_` RSC bootstrap must run AFTER every inline `__next_f.push` flight row has
 // buffered, so it replays the whole stream and closes it on load. Running it at
 // its DOM position (mid-stream) leaves the RSC stream unterminated → no commit.
-function runLifecycle(sandbox, scripts, timeoutMs) {
-  runPhase(sandbox, scripts.filter(isSync), timeoutMs);
-  runPhase(sandbox, scripts.filter(isDefer), timeoutMs);
+function runLifecycle(sandbox, scripts, opts) {
+  const ctx = { timeoutMs: opts.timeoutMs ?? 2000, onError: opts.hooks?.onPageError };
+  // addInitScript: runs before any page script, on this navigation.
+  runPhase(sandbox, (opts.initScripts ?? []).map(initScript), ctx);
+  runPhase(sandbox, scripts.filter(isSync), ctx);
+  runPhase(sandbox, scripts.filter(isDefer), ctx);
   fireDomContentLoaded(sandbox.document, sandbox.window);
-  runPhase(sandbox, scripts.filter(isAsync), timeoutMs);
+  runPhase(sandbox, scripts.filter(isAsync), ctx);
   fireWindowLoad(sandbox.window);
 }
 
-function runPhase(sandbox, scripts, timeoutMs) {
+const initScript = (code) => ({ code });
+
+function runPhase(sandbox, scripts, ctx) {
   const doc = sandbox.document;
   for (const s of scripts) {
     if (s.code == null) continue; // external fetch failed (modules are pre-bundled)
-    runOne(sandbox, doc, s, timeoutMs);
+    runOne(sandbox, doc, s, ctx);
   }
 }
 
@@ -109,13 +149,13 @@ function runPhase(sandbox, scripts, timeoutMs) {
 // for the chunk base URL — bug #1) AND fires the element's `load` event, which the
 // dev runtimes (Turbopack/webpack) gate entrypoint execution on: they don't build
 // until every chunk has signalled loaded. Inject + run + ring the doorbell.
-function runOne(sandbox, doc, s, timeoutMs) {
+function runOne(sandbox, doc, s, ctx) {
   const el = injectScript(doc, s);
   setCurrentScript(doc, el);
   try {
-    vm.runInContext(s.code, sandbox, { timeout: timeoutMs });
-  } catch {
-    // a page script throwing must not abort the render
+    vm.runInContext(s.code, sandbox, { timeout: ctx.timeoutMs });
+  } catch (err) {
+    ctx.onError?.(err); // surface as a `pageerror` event; never abort the render
   } finally {
     setCurrentScript(doc, null);
   }

@@ -15,7 +15,8 @@ Start with [`../CLAUDE.md`](../CLAUDE.md) (working rules), [`../SPEC.md`](../SPE
 
 **Crawl orchestration**
 - [`page`](./modules/page.md) · [`crawl`](./modules/crawl.md) ·
-  [`frontier`](./modules/frontier.md) · [`detect`](./modules/detect.md)
+  [`frontier`](./modules/frontier.md) · [`detect`](./modules/detect.md) ·
+  [`batch`](./modules/batch.md)
 
 **Extraction & interaction**
 - [`extract`](./modules/extract.md) · [`visible`](./modules/visible.md) ·
@@ -39,9 +40,10 @@ Start with [`../CLAUDE.md`](../CLAUDE.md) (working rules), [`../SPEC.md`](../SPE
   [`render-isolate-polyfills`](./modules/render-isolate-polyfills.md)
 
 **Agent surfaces**
-- [`mcp`](./modules/mcp.md) — MCP server (33 tools)
+- [`mcp`](./modules/mcp.md) — MCP server (51 tools, incl. `crawl`/`batch`,
+  `render`/`set_mode`, `eval_js`/`inject_js`, cookies/headers, `snapshot`)
 - [`playwright-compat`](./modules/playwright-compat.md) — run Playwright scripts,
-  no browser loaded
+  no browser loaded (events / network / routes / persistent context state)
 
 ## Harness
 - [`../harness/competitive/README.md`](../harness/competitive/README.md) —

@@ -38,8 +38,17 @@ objects; the last three throw before the first `goto`).
   (first match; throws if none), `$$eval(selector, fn, ...args)` (all matches).
   These run in a `node:vm` context over the *current* DOM — DOM reads/measures,
   not a re-entry of the render isolate.
-- **navigator config** — `setNavigator(props)` (persists across hops, applies to
-  current page), `setUserAgent(ua)` (shorthand).
+- **JS execution** — `evalJs(code, ...args)` runs a function BODY (statements;
+  `return` for a value, `arguments` for args) against the current DOM
+  (Selenium `executeScript` / Playwright `evaluate` ergonomics). `injectJs(code)`
+  appends a `<script>` with `code` and executes it (DOM mutations persist; the
+  element stays in the serialized HTML). Both run in the same `node:vm` DOM
+  context, not the page's live render isolate.
+- **navigator / fetch config** — `setNavigator(props)` (persists across hops,
+  applies to current page), `setUserAgent(ua)` (shorthand), `setExtraHeaders(h)`
+  (persistent extra HTTP headers merged into every fetch), `get fetchHtml` /
+  `setFetchHtml(fn)` (swap the fetcher — e.g. enable the JS render tier for later
+  navigations).
 
 ## Key internals
 - One turbo-dom env per Page (`#env`); `#load` calls `env.reset(html)` on every

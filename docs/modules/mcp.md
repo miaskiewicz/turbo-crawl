@@ -21,7 +21,7 @@ the surface for a no-JS fetcher.
 - CLI entry (server.mjs): when run directly, `createServer()` + connect a
   `StdioServerTransport`; logs readiness to stderr.
 
-## The 33 tools (grouped)
+## The 51 tools (grouped)
 
 ### Navigation / history (5)
 - `goto` — navigate to `{ url }`; returns `{ status, url, title }`.
@@ -29,6 +29,52 @@ the surface for a no-JS fetcher.
 - `go_forward` — forward in history; `{ status, url }` or `null` at the end.
 - `reload` — reload current page; `{ status, url }`.
 - `set_user_agent` — set UA (navigator + HTTP header) for subsequent navigations.
+
+### Batch + crawl (2)
+- `batch` — fetch a list `{ urls, mode?, view?, concurrency? }`; `mode` is
+  `no-js` (default) | `fast` | `secure`, `view` is `markdown` (default) | `text` |
+  `html` | `links` | `interactive` | `ax` | `hydration`. Returns one
+  `{ url, ok, status, finalUrl, title, data }` per URL (failures: `{ url, ok:false,
+  error }`). Uses the real network, independent of the driving Page.
+- `crawl` — full-site crawl from `{ url, maxPages?, maxDepth?, sameHost?, allow?,
+  deny?, mode?, view?, markdown?, robots? }` over a frontier. `allow`/`deny` are URL
+  regexes; JS modes render only JS-gated pages (Lane B). Returns
+  `[{ url, status, depth, title, links, view?, extracted? }]`.
+
+### Render-mode control (2)
+- `render` — re-render the current page (or `{ url }`) with the JS tier and switch
+  the Page to that `mode` (fast default | secure | no-js) for later navigations;
+  `{ status, url, title }`.
+- `set_mode` — set the navigation mode for subsequent goto/click without
+  re-navigating now; `{ mode }`.
+
+### JS execution (2)
+- `eval_js` — execute a JS **function body** (`code`; use `return` for the value,
+  `arguments` for `args`) against the rendered DOM; returns the value. Runs in a
+  node:vm over the parsed/rendered DOM, not the page's live render isolate.
+- `inject_js` — inject a `<script>` with `code`, execute it against the DOM (DOM
+  mutations persist, element stays in the HTML); `{ ok }`.
+
+### Session / detection (4)
+- `detect_js` — heuristically detect whether the page needs JS;
+  `{ jsRequired, textLength, scripts, reason }`.
+- `robots_check` — `{ allowed, crawlDelay }` for `{ url, userAgent? }` from
+  robots.txt.
+- `get_cookies` — the Page jar's cookies as
+  `[{ name, value, domain, path, expires, secure, httpOnly, sameSite }]`.
+- `set_cookie` — add a cookie to the jar (`{ name, value, domain, path?, expires?,
+  secure?, httpOnly?, sameSite? }`); `set_extra_headers` — persistent extra HTTP
+  headers (`{ headers }`) merged into every request.
+
+### Ergonomic helpers (4)
+- `snapshot` — `{ url, title, headings, interactive, links }` in one call.
+- `forms` — `[{ action, method, submitUrl, fields:[{ name, type, value }] }]`.
+- `find_text` — elements containing visible `text` → `{ html, text }` (up to
+  `limit`, default 20).
+- `fetch_json` / `fetch_raw` — fetch a URL directly through the session jar →
+  `{ status, finalUrl, json|body }`. `fill_many` — fill several fields
+  (`[{ selector|i, value }]`) in one call. `extract_links` — `links` filtered by
+  `sameHost`/`pattern`/`limit`.
 
 ### Page content / representations (7)
 - `interactive_elements` — indexed array of interactive elements (the `[i]`
@@ -81,8 +127,9 @@ the surface for a no-JS fetcher.
 - `is_enabled` — enabled state of first match.
 - `count` — number of elements matching a CSS selector.
 
-(Group counts: 5 + 7 + 3 + 3 + 2 + 5 + 8 = 33. `count` lands in the accessor
-group, giving 8 accessors.)
+(Group counts: navigation 5, batch+crawl 2, render-mode 2, JS-exec 2,
+session/detection 4, ergonomic 4, content 7, indexed interactions 3, structured 3,
+locator 2, selector actions 5, selector accessors 8 = **51**.)
 
 ## Key internals
 - `GET_BY` map + `resolveBy(page, kind, value, name)` — dispatch for `get_by`;

@@ -19,6 +19,15 @@ HTML so all existing extraction runs over a rendered page. It owns:
   - `opts.settleMs` — settle tick between timer-drain rounds (fast backend).
   - `opts.onRequest` — optional callback invoked once per discovered URL after a
     render.
+  - `opts.netHooks` — Playwright-façade request/response hooks; the nav fetch and
+    page-initiated fetch/XHR (via `page-fetch`) emit through them.
+  - `opts.storage` / `opts.storageFor(url)` — persistent Web Storage handed to the
+    fast backend (`storageFor` resolves it per final URL / origin).
+  - `opts.initScripts` — code strings run before any page script (addInitScript).
+  - `opts.hooks` — `{ onConsole, onPageError }` console/error capture (fast backend).
+  - **Cookie threading**: `renderFetch` passes `fetchOpts.jar`/`cache` into the
+    `recording` fetcher, so in-render script/fetch/XHR requests send `Cookie` and
+    ingest `Set-Cookie` (session persists across navigations), not just the nav.
   - Returned `fetchHtml(url, fetchOpts)` is drop-in for `new Page({ fetchHtml })`
     and for a Crawler `{ fallback }`. Returns `{ ...res, html, discovered }` where
     `html` is the rendered HTML and `discovered` is the list of URLs the page

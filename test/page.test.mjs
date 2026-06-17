@@ -58,4 +58,39 @@ describe("Page", () => {
     // old page's elements are gone after reset
     assert.ok(!page.interactiveElements().some((e) => e.name === "Blue Widget"));
   });
+
+  it("evalJs runs a statement body with args; injectJs mutates + persists", async () => {
+    const page = makePage();
+    await page.goto(PAGE_TWO);
+    assert.equal(page.evalJs("return document.title + arguments[0]", "!"), "About Us!");
+    page.injectJs("document.querySelector('a').textContent = 'HOME'");
+    assert.equal(page.document.querySelector("a").textContent, "HOME");
+    assert.match(page.html(), /<script>/);
+  });
+
+  it("setExtraHeaders merges into every fetch; setFetchHtml swaps the fetcher", async () => {
+    const calls = [];
+    const stub = async (url, opts = {}) => {
+      calls.push(opts.headers);
+      return {
+        html: "<title>H</title><body>x</body>",
+        finalUrl: url,
+        status: 200,
+        headers: new Headers(),
+      };
+    };
+    const page = new Page({ fetchHtml: stub });
+    page.setExtraHeaders({ authorization: "Bearer t" });
+    await page.goto("https://h.test/");
+    assert.equal(calls[0].authorization, "Bearer t");
+
+    let swapped = false;
+    page.setFetchHtml(async (url, o) => {
+      swapped = true;
+      return stub(url, o);
+    });
+    assert.equal(typeof page.fetchHtml, "function");
+    await page.goto("https://h.test/");
+    assert.equal(swapped, true);
+  });
 });
