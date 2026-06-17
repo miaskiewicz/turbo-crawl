@@ -10,13 +10,22 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
-import { Page } from "../src/index.mjs";
+import { Page, ResponseCache, createDispatcher } from "../src/index.mjs";
 import { buildTools } from "./handlers.mjs";
 
 // JSON Schemas for tool inputs (kept inline; the handlers themselves are schema-free).
 const INPUT_SCHEMAS = {
   goto: { type: "object", properties: { url: { type: "string" } }, required: ["url"] },
-  interactive_elements: { type: "object", properties: {} },
+  interactive_elements: {
+    type: "object",
+    properties: {
+      fast: {
+        type: "boolean",
+        description:
+          "Skip the getComputedStyle visibility pass (cheaper; `visible` is then always true).",
+      },
+    },
+  },
   accessibility_tree: { type: "object", properties: {} },
   markdown: { type: "object", properties: {} },
   html: { type: "object", properties: {} },
@@ -121,14 +130,26 @@ const INPUT_SCHEMAS = {
   reload: { type: "object", properties: {} },
 };
 
+// Default a Page with HTTP/2 + DNS cache (dispatcher) and a session-wide 304
+// response cache, so MCP agents get the same network wins as the Crawler. If the
+// caller supplies their own Page, they own its config — we add nothing.
+function defaultPage(opts) {
+  if (opts.page) return { page: opts.page, dispatcher: undefined, cache: undefined };
+  const dispatcher = opts.dispatcher ?? createDispatcher();
+  const cache = opts.cache ?? new ResponseCache();
+  return { page: new Page({ dispatcher, cache }), dispatcher, cache };
+}
+
 /**
  * Create an MCP Server wired to a Page. Does not connect a transport.
  * @param {object} [opts]
- * @param {Page}   [opts.page]  the Page to drive (default: a fresh one)
- * @returns {{ server: Server, page: Page }}
+ * @param {Page}   [opts.page]        the Page to drive (default: a fresh one with HTTP/2 + 304 cache)
+ * @param {object} [opts.dispatcher]  undici Agent for the default Page (default: a fresh HTTP/2 one)
+ * @param {object} [opts.cache]       ResponseCache for the default Page (default: a fresh session cache)
+ * @returns {{ server: Server, page: Page, dispatcher?: object, cache?: object }}
  */
 export function createServer(opts = {}) {
-  const page = opts.page ?? new Page();
+  const { page, dispatcher, cache } = defaultPage(opts);
   const tools = buildTools(page);
   const byName = new Map(tools.map((t) => [t.name, t]));
 
@@ -152,7 +173,7 @@ export function createServer(opts = {}) {
     return { content: [{ type: "text", text: JSON.stringify(result ?? null) }] };
   });
 
-  return { server, page };
+  return { server, page, dispatcher, cache };
 }
 
 // CLI entry: start the stdio transport when run directly.

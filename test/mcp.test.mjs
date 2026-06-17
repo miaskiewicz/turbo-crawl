@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { buildTools } from "../mcp/handlers.mjs";
+import { createServer } from "../mcp/server.mjs";
 import { Page } from "../src/page.mjs";
 import { stubFetch } from "./helpers.mjs";
 
@@ -102,5 +103,38 @@ describe("MCP handlers (Page API 1:1)", () => {
     await call("goto", { url: HOME });
     assert.match(await call("markdown"), /# Shop/);
     assert.equal((await call("accessibility_tree")).role !== undefined, true);
+  });
+
+  it("interactive_elements forwards fast → visibility:false", () => {
+    let seen;
+    const page = {
+      interactiveElements: (o) => {
+        seen = o;
+        return [];
+      },
+    };
+    const map = new Map(buildTools(page).map((t) => [t.name, t]));
+    map.get("interactive_elements").handler({ fast: true });
+    assert.deepEqual(seen, { visibility: false });
+    map.get("interactive_elements").handler({});
+    assert.deepEqual(seen, { visibility: true });
+  });
+});
+
+describe("createServer wiring", () => {
+  it("defaults a Page with an HTTP/2 dispatcher + a 304 cache", async () => {
+    const { server, page, dispatcher, cache } = createServer();
+    assert.ok(server && page);
+    assert.equal(typeof dispatcher.close, "function"); // undici Agent
+    assert.equal(typeof cache.validators, "function"); // ResponseCache
+    await dispatcher.close();
+  });
+
+  it("honors a caller-supplied Page and adds no dispatcher/cache", () => {
+    const page = new Page();
+    const r = createServer({ page });
+    assert.equal(r.page, page);
+    assert.equal(r.dispatcher, undefined);
+    assert.equal(r.cache, undefined);
   });
 });

@@ -57,8 +57,8 @@ export function buildTools(page) {
     {
       name: "interactive_elements",
       description:
-        "List the page's interactive elements as an indexed array (the [i] handles for click/fill).",
-      handler: () => page.interactiveElements(),
+        "List the page's interactive elements as an indexed array (the [i] handles for click/fill). Pass fast:true to skip the visibility pass.",
+      handler: ({ fast } = {}) => page.interactiveElements({ visibility: !fast }),
     },
     {
       name: "accessibility_tree",
