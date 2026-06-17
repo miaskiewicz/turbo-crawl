@@ -50,7 +50,8 @@
     "prepare": "git config core.hooksPath .githooks || true",
     "harness": "node harness/competitive/run.mjs",
     "harness:js": "node harness/competitive/run.mjs js-quotes",
-    "prepublishOnly": "npm run check"
+    "prepublishOnly": "npm run check",
+    "hotpath": "node harness/hotpath/run.mjs"
   },
   "publishConfig": {
     "access": "public"
