@@ -1,6 +1,6 @@
 {
   "name": "@miaskiewicz/turbo-crawl",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Native-speed, browserless web crawler for AI agents — fetch + parse + extract on turbo-dom, no headless browser. Indexed interactive elements, link graph, accessibility tree, markdown, structured extraction, and an MCP interface.",
   "license": "MIT",
   "type": "module",
@@ -20,6 +20,9 @@
     "./playwright/expect": {
       "import": "./playwright/expect.mjs",
       "require": "./playwright/expect.mjs"
+    },
+    "./playwright/test": {
+      "import": "./playwright/test.mjs"
     },
     "./package.json": "./package.json",
     "./render": {

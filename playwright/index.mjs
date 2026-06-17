@@ -460,3 +460,6 @@ export const firefox = browserType;
 export const webkit = browserType;
 export { expect };
 export { PWPage, Browser, BrowserContext };
+// `test` is defined after `chromium` (it consumes it); the re-export sits last so
+// test.mjs evaluates with the launcher binding already initialized (no TDZ cycle).
+export { test } from "./test.mjs";

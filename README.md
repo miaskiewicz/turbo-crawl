@@ -57,7 +57,7 @@ happy-dom). turbo-crawl is unusual on four axes at once:
 See [SPEC.md](./SPEC.md) for the design and [STATUS.md](./STATUS.md) for current
 capabilities.
 
-Status: **v0.1.8 — working** ([npm](https://www.npmjs.com/package/@miaskiewicz/turbo-crawl)).
+Status: **v0.1.9 — working** ([npm](https://www.npmjs.com/package/@miaskiewicz/turbo-crawl)).
 Page + interaction, hardened networking (cookies / `document.cookie` bridge /
 robots + crawl-delay / charset / size + redirect caps, HTTP/2 + DNS-cache
 dispatcher, 304 conditional-request cache), crawl orchestration (`Crawler` +
@@ -214,6 +214,47 @@ Locators (`getByRole/Text/Label/Placeholder/TestId/AltText/Title` — all accept
 "fast" | "secure" })`); without one the façade stays Lane A and still emits
 navigation request/response events. Genuinely pixel-only APIs (`screenshot`,
 `pdf`, `hover`) throw a clear "no-browser engine" error.
+
+### `test` runner (`@playwright/test` drop-in, no browser)
+
+The façade also ships a `test` — a `@playwright/test`-style runner with fixtures,
+executed on **`node:test`** over the turbo engine. Import `test`/`expect` from here
+instead of `@playwright/test` so **no spec ever pulls in `@playwright/test` or
+launches Chromium** (the common leak: a shared `harness.ts` that does
+`import { test } from '@playwright/test'` runs its specs on real Chromium
+regardless of any page-fixture swap).
+
+```js
+import { test, expect } from "@miaskiewicz/turbo-crawl/playwright";
+
+test.use({ mode: "fast", baseURL: "http://localhost:3000" }); // omit mode → Lane A
+
+test.describe("auth", () => {
+  test.beforeEach(async ({ page }) => page.goto("/login"));
+  test("signs in", async ({ page }) => {
+    await page.getByLabel("Email").fill("a@b.test");
+    await page.getByRole("button", { name: "Sign in" }).click();
+    await expect(page.getByText("Welcome")).toBeVisible();
+  });
+});
+
+// shared base — every spec/harness extends this, never @playwright/test:
+export const authedTest = test.extend({
+  account: async ({ request, baseURL }, use) => use(await seed(request, baseURL)),
+});
+```
+
+Run specs with **`node --test`** (ESM), not the `playwright` CLI — the CLI only
+discovers its own `test`. Built-in fixtures: `page`, `context`, `browser`,
+`request` (a minimal real-HTTP `APIRequestContext`), plus the option fixtures
+`baseURL` / `storageState` / `mode` / `browserName` / `launchOptions` (override via
+`test.use({…})`). Supported: `test.describe` (+`.serial`/`.parallel`/`.only`/
+`.skip`/`.configure`), `before/afterEach`, `before/afterAll`, `test.skip`/`only`/
+`fixme` (static **and** runtime `test.skip(cond?, reason?)`), `test.fail`,
+`test.use`, `test.step`, `test.extend`. Out of scope (node:test owns running):
+worker-scoped fixtures, projects, and the reporter/CLI surface. For a CJS test
+file, `require("@miaskiewicz/turbo-crawl/playwright/test")`'s engine graph can't be
+`require`d (turbo-dom top-level `await`) — run under ESM/`node --test`.
 
 ### `expect(...)` web-first assertions
 
