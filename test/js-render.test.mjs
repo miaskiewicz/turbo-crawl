@@ -10,10 +10,15 @@ import { Page } from "../src/page.mjs";
 import { jsRenderer } from "../src/render/index.mjs";
 import { extractScripts } from "../src/render/scripts.mjs";
 
-let secureOk = true;
+let esbuildOk = true;
+try {
+  await import("esbuild");
+} catch {
+  esbuildOk = false;
+}
+let secureOk = esbuildOk;
 try {
   await import("isolated-vm");
-  await import("esbuild");
 } catch {
   secureOk = false;
 }
@@ -82,6 +87,28 @@ for (const mode of ["fast", "secure"]) {
       await page.goto("https://x.test/");
       // first statement throws; the render still completes and snapshots the DOM
       assert.equal(typeof page.text(), "string");
+      await close();
+    });
+
+    it("executes ESM-module scripts (bundled import graph)", { skip: !esbuildOk }, async () => {
+      const shell = `<body><div id="root"></div><script type="module" src="/main.js"></script></body>`;
+      const main = `import { render } from "/render.js"; render(document.getElementById("root"));`;
+      const renderMod = `export function render(root){
+        var a = document.createElement("a"); a.setAttribute("href", "/p/9"); root.appendChild(a);
+      }`;
+      const { fetchHtml, close } = jsRenderer({
+        mode,
+        fetchHtml: async (u) => {
+          if (u.endsWith("/main.js"))
+            return { html: main, finalUrl: u, status: 200, headers: new Headers() };
+          if (u.endsWith("/render.js"))
+            return { html: renderMod, finalUrl: u, status: 200, headers: new Headers() };
+          return { html: shell, finalUrl: u, status: 200, headers: new Headers() };
+        },
+      });
+      const page = new Page({ fetchHtml });
+      await page.goto("https://esm.test/");
+      assert.deepEqual(page.links(), ["https://esm.test/p/9"]);
       await close();
     });
 

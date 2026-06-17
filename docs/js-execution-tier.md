@@ -206,8 +206,15 @@ const page = new Page({ fetchHtml });                  // same Page API
 
 ## Known gaps (shipped tier)
 
+> **Update:** both gaps below are now **resolved**. ESM-module scripts are bundled
+> via esbuild (host-fetched deps) and run as classic in both backends; page
+> `fetch` is bridged to the host net layer (secure backend via an ivm `Reference`
+> + `applySyncPromise`, settling waits on in-flight requests). The detail below is
+> kept as the design rationale. Remaining: `XMLHttpRequest`, import-map
+> resolution, and feeding page-discovered URLs into the frontier.
+
 The render tier executes inline + external **classic** `<script>`s and snapshots
-the rendered DOM. Two capabilities are not handled yet — both tracked as tasks.
+the rendered DOM. Two capabilities were not handled initially — both now done.
 
 ### 1. ESM-module page scripts (`<script type="module">`)
 **Current:** `extractScripts` flags module scripts (`module: true`); both backends

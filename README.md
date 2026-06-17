@@ -148,10 +148,11 @@ page.links(); page.markdown(); page.query("h1");
 new Crawler({ start, fallback: jsRenderer({ mode: "secure" }).fetchHtml });
 ```
 
-`isolated-vm` + `esbuild` are **optional** deps — only needed for `mode:"secure"`
-(the `fast` backend uses Node's built-in `vm`). ESM-module page scripts and
-page-initiated `fetch` are not yet handled; embedded data is covered by
-`hydrationState()`. See [docs/js-execution-tier.md](./docs/js-execution-tier.md).
+Classic + **ESM-module** scripts run (modules are bundled via esbuild), and
+page-initiated **`fetch`** is bridged to the host net layer (cookies/UA), so
+client-only data loads render. `isolated-vm` is **optional** (only `mode:"secure"`);
+`esbuild` is **optional** (`mode:"secure"` and ESM-module execution). See
+[docs/js-execution-tier.md](./docs/js-execution-tier.md).
 
 `detectJsRequired(document)` flags shell-only pages, and `Crawler` accepts a
 generic `{ fallback: fetchHtml }` to route them to whatever renderer you plug in.

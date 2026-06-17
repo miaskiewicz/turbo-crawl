@@ -54,13 +54,13 @@ runtime; no Playwright at runtime. See [SPEC.md](./SPEC.md) for the design and
 - `isolated-vm` + `esbuild` — only for `jsRenderer({ mode: "secure" })`. The
   `fast` backend uses Node's built-in `vm`; the rest of the library needs neither.
 
-## Open (tracked tasks)
+## Render tier — coverage
 
-- **ESM-module page scripts** (`<script type="module">`) are skipped by the render
-  tier — needs `vm.SourceTextModule` / ivm module bridging. (docs gap #1)
-- **Page-initiated `fetch`/XHR** is not bridged across the render boundary —
-  client-only data loads don't populate (embedded data covered by
-  `hydrationState()`). (docs gap #2)
-
-Both are documented in [docs/js-execution-tier.md](./docs/js-execution-tier.md)
-under **Known gaps**.
+- Classic inline + external scripts ✓
+- **ESM-module scripts** (`<script type="module">`) ✓ — import graph bundled via
+  esbuild (host-fetched deps), run as classic in both backends.
+- **Page-initiated `fetch`** ✓ — bridged to the host net layer (cookies/UA);
+  secure backend bridges via an ivm `Reference` (`applySyncPromise`); settling
+  waits on in-flight requests.
+- Not yet: `XMLHttpRequest` (only `fetch`), import-map resolution, and feeding
+  page-discovered request URLs into the crawl frontier.

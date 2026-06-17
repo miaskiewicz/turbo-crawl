@@ -13,6 +13,7 @@
 import { createEnvironment } from "@miaskiewicz/turbo-dom/runtime";
 
 import { fetchHtml as defaultFetchHtml } from "../net.mjs";
+import { bundleModule } from "./bundle-modules.mjs";
 import { extractScripts } from "./scripts.mjs";
 
 async function makeBackend(mode) {
@@ -20,19 +21,33 @@ async function makeBackend(mode) {
   return (await import("./backend-secure.mjs")).createSecureBackend();
 }
 
-// Resolve each script to inline code (external src fetched via the host net layer).
+// Resolve each script to runnable classic code: external src is fetched, and
+// module scripts are bundled (import graph → classic IIFE) via the host fetcher.
 async function loadScripts(fetchHtml, document, baseUrl) {
   const items = extractScripts(document, baseUrl);
   const out = [];
   for (const it of items) {
-    if (it.code != null) {
-      out.push(it);
-      continue;
-    }
-    const code = await fetchScript(fetchHtml, it.url);
-    if (code != null) out.push({ code, module: it.module });
+    const resolved = await resolveScript(fetchHtml, it, baseUrl);
+    if (resolved) out.push(resolved);
   }
   return out;
+}
+
+async function resolveScript(fetchHtml, it, baseUrl) {
+  if (it.module) return resolveModule(fetchHtml, it, baseUrl);
+  if (it.code != null) return it;
+  const code = await fetchScript(fetchHtml, it.url);
+  return code == null ? null : { code, module: false };
+}
+
+// Bundle a module script's import graph to classic code; skip if esbuild absent.
+async function resolveModule(fetchHtml, it, baseUrl) {
+  const entry = it.code != null ? it.code : `import ${JSON.stringify(it.url)};`;
+  try {
+    return { code: await bundleModule(entry, baseUrl, fetchHtml), module: false };
+  } catch {
+    return null; // esbuild missing or bundle failed → module skipped
+  }
 }
 
 async function fetchScript(fetchHtml, url) {
