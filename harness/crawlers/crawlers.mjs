@@ -367,11 +367,14 @@ async function collyCrawl(target, opts) {
 // ── crawlee Playwright/Puppeteer (js) ────────────────────────────────────────
 async function crawleeBrowserCrawl(target, opts, which) {
   const crawlee = await import("crawlee");
+  crawlee.log.setLevel(crawlee.log.LEVELS.OFF);
   const CrawlerClass = which === "puppeteer" ? crawlee.PuppeteerCrawler : crawlee.PlaywrightCrawler;
+  const requestQueue = await crawlee.RequestQueue.open(`tc-bench-${crawleeRun++}`);
   let pages = 0;
   let items = 0;
   const t0 = process.hrtime.bigint();
   const crawler = new CrawlerClass({
+    requestQueue,
     maxRequestsPerCrawl: opts.pages,
     maxConcurrency: CONCURRENCY,
     async requestHandler({ page, enqueueLinks }) {
@@ -385,6 +388,7 @@ async function crawleeBrowserCrawl(target, opts, which) {
     },
   });
   await crawler.run([target.start]);
+  await requestQueue.drop();
   return { pages, items, ms: ms(t0) };
 }
 

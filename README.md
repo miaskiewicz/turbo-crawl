@@ -251,7 +251,31 @@ node-crawler's per-request overhead is high. turbo-dom's raw parse advantage
 doesn't show here — at 20 live pages, network swamps a sub-millisecond parse;
 it shows in-memory instead (links ~18k/s, crawl ~14k pages/s, below). And unlike
 every engine in this table, the *same* turbo-crawl also runs Playwright scripts
-(parity table above). See
+(parity table above).
+
+### JS-executing crawlers — turbo-crawl vs real browsers
+
+The other set targets `quotes.toscrape.com/js`, where quotes are built
+client-side (a non-JS crawler sees ~0). Here turbo-crawl's JS tiers run the
+page's own scripts — `js-fast` in an in-process `vm`, `js-secure` in a true V8
+isolate — against turbo-dom, while every competitor drives a **real headless
+Chromium** (`npm run crawl-bench:js`, 10 pages, median of 3):
+
+| crawler | JS engine | items | median ms | pages/s |
+|---|---|---|---|---|
+| **turbo-crawl (js-secure)** | **V8 isolate, no browser** | 120 | 4096 | **2.4** |
+| **turbo-crawl (js-fast)** | **in-proc vm, no browser** | 100 | 4184 | **2.4** |
+| crawlee `PuppeteerCrawler` | headless Chromium | 100 | 5074 | 2.0 |
+| crawlee `PlaywrightCrawler` | headless Chromium | 100 | 6173 | 1.6 |
+| puppeteer-cluster | headless Chromium | 100 | 17062 | 0.6 |
+
+turbo-crawl executes the **same page JavaScript** and extracts the **same
+quotes** as a real browser — yet runs faster than every browser-driving crawler
+(and ~4× faster than puppeteer-cluster), with no Chromium process, even though
+turbo-crawl is the only engine here also honoring the 150 ms politeness delay.
+The `js-secure` row does this inside a **hardened V8 isolate** — most crawlers
+that run page JS either drive a full browser (this table) or use an in-process
+fake DOM with no real isolation. See
 [harness/crawlers/README.md](./harness/crawlers/README.md) — competitors
 auto-detect and missing ones are skipped; install them with
 `npm i -D @spider-rs/spider-rs crawlee cheerio got crawler` (+ `brew install
