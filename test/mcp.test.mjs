@@ -43,12 +43,33 @@ describe("MCP handlers (Page API 1:1)", () => {
       "check",
       "uncheck",
       "get_attribute",
+      "text_content",
+      "inner_html",
+      "input_value",
+      "is_visible",
+      "is_checked",
+      "is_enabled",
+      "count",
+      "evaluate",
+      "set_user_agent",
       "go_back",
       "go_forward",
       "reload",
     ]) {
       assert.ok(map.has(name), `missing tool ${name}`);
     }
+  });
+
+  it("evaluate + accessor tools work over MCP", async () => {
+    const { call } = tools();
+    await call("goto", { url: HOME });
+    assert.equal(
+      await call("evaluate", { expression: "document.querySelectorAll('a').length" }),
+      1,
+    );
+    assert.equal(await call("text_content", { selector: "h1" }), "Shop");
+    assert.equal(await call("count", { selector: "a" }), 1);
+    assert.equal(await call("is_visible", { selector: "h1" }), true);
   });
 
   it("get_by + click_selector + get_attribute work over MCP", async () => {

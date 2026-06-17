@@ -2,16 +2,19 @@
 
 Native-speed, **browserless** crawler for AI agents on turbo-dom. No Chromium at
 runtime; no Playwright at runtime. See [SPEC.md](./SPEC.md) for the design and
-[docs/js-execution-tier.md](./docs/js-execution-tier.md) for the JS-render plan.
+[docs/js-execution-tier.md](./docs/js-execution-tier.md) for the JS-render tier.
 
 ## What works today
 
-- **Page**: `goto`/`follow`, `interactiveElements` (indexed, `WeakRef`),
-  `links`, `markdown`, `text`, `html`, `accessibilityTree`, `extract(schema)`,
-  `query(css|xpath)`, `hydrationState`, cascade visibility.
-- **Interaction (no JS)**: link/form graph — `click`/`fill`/`submit`, GET +
-  POST (urlencoded **and** multipart) form synthesis; JS-only handlers surfaced
-  honestly (inert, throw).
+- **Page**: `goto`/`follow`/`reload`/`goBack`/`goForward`, `interactiveElements`
+  (indexed, `WeakRef`), `links`, `markdown`, `text`, `html`, `accessibilityTree`,
+  `extract(schema)`, `query(css|xpath)`, `hydrationState`, cascade visibility,
+  `evaluate`/`$eval`/`$$eval`.
+- **Locators (Playwright-style)**: `locator(css)`, `getByRole/Text/Label/
+  Placeholder/TestId/AltText/Title`, `first/last/nth/filter/count`, accessors,
+  and actions (`click/fill/check/uncheck/selectOption/press/type`).
+- **Interaction (no JS)**: link/form graph — GET + POST (urlencoded **and**
+  multipart) form synthesis; JS-only handlers surfaced honestly (inert, throw).
 - **Networking**: `fetchHtml` over undici — redirects (auto + opt-in manual cap),
   gzip/br, charset sniff, max-size, content-type gate; `CookieJar` (RFC 6265
   subset incl. SameSite=None/Secure) bridged to `document.cookie`; robots.txt
@@ -19,42 +22,45 @@ runtime; no Playwright at runtime. See [SPEC.md](./SPEC.md) for the design and
 - **Crawl**: `Crawler` async iterator — global + per-host concurrency, politeness,
   backoff/retry, canonical dedupe, depth/page caps, warm Page pool, generic
   `{ fallback }` routing for JS-required pages.
-- **Pseudo-browser config**: `userAgent` / `navigator` overrides (platform,
-  language, …) reflected in both the DOM and the HTTP UA header.
-- **Agent surface**: MCP server, 12 tools (goto, interactive_elements,
-  accessibility_tree, markdown, html, text, links, click, fill, submit, extract,
-  hydration_state, query).
-- **No-browser SPA recovery**: `hydrationState()` mines `__NEXT_DATA__`, JSON-LD,
-  `__APOLLO_STATE__`/`__INITIAL_STATE__`, typed JSON — zero JS.
+- **Pseudo-browser config**: `userAgent` / `navigator` overrides (DOM + HTTP UA).
+- **No-browser SPA handling**:
+  - `hydrationState()` mines `__NEXT_DATA__`/JSON-LD/`__APOLLO_STATE__`/… (zero JS).
+  - **JS-execution render tier** `jsRenderer({ mode })`: runs the page's own
+    scripts on turbo-dom and extracts from the rendered DOM. `secure` =
+    isolated-vm + turbo-dom **WASM** (true V8 isolate; open-web/hostile-safe);
+    `fast` = in-process `node:vm` + native parser (local/trusted).
+- **Agent surface**: MCP server, **32 tools** (navigation, views, locators by
+  selector/role/text, actions, accessors, `evaluate`, history, UA).
+
+## Playwright
+
+- **Runtime: not a dependency.** Compatibility façade
+  (`@miaskiewicz/turbo-crawl/playwright`) runs existing Playwright scripts on the
+  no-JS engine — `chromium.launch()`→pseudo-browser, locators, actions, `expect`,
+  `evaluate`/`$eval`/`$$eval`. Pixel/render-only APIs (`screenshot/pdf/route/
+  hover`) throw a clear "no-JS engine" error.
+- **Dev only**: real Playwright is a devDependency used solely by the differential
+  test (`test/differential.test.mjs`, auto-skips without the browser).
 
 ## Quality gates
 
-- **197 tests**, **100% line coverage** of `src/**` (`npm run test:cov`).
-- `npm run check` = oxlint (0/0) + biome + cc-check (**cc < 6**) + tsgo + tests.
-- Pre-commit hook runs the same. Benchmarks: full agent view ~2.5k pages/s,
-  links ~18k/s, crawl ~14k pages/s, flat heap.
+- **~240 tests**, ~100% line coverage of `src/**` (the optional secure render
+  backend has one unreachable isolate-boot guard line). `npm run check` =
+  oxlint (0/0) + biome + cc-check (**cc < 6**) + tsgo + tests; same in pre-commit.
+- Benchmarks: full agent view ~2.5k pages/s, links ~18k/s, crawl ~14k pages/s.
 
-## Playwright: dev-only, never shipped
+## Optional dependencies
 
-Nothing in the library loads Playwright or Chromium. Playwright is a
-**devDependency** used solely by `test/differential.test.mjs` to sanity-check
-output parity against a Chromium oracle (auto-skips if the browser isn't
-installed). The Lane-B Chromium *adapter* has been **removed**.
+- `isolated-vm` + `esbuild` — only for `jsRenderer({ mode: "secure" })`. The
+  `fast` backend uses Node's built-in `vm`; the rest of the library needs neither.
 
-## Open / planned
+## Open (tracked tasks)
 
-- **#7/#13 — No-Chromium JS-execution tier.** Run page scripts on turbo-dom in a
-  killable worker (v1) or a true `isolated-vm` isolate running turbo-dom's **WASM**
-  build (v2, best safety+perf). Spec: [docs/js-execution-tier.md](./docs/js-execution-tier.md).
-- **#14 — Playwright-script API compatibility.** Run existing Playwright scripts
-  on this no-JS engine (no playwright/chromium loaded):
-  - *Layer 1 (pure DOM, cheap):* Locator + `getByRole/Text/Label/Placeholder/
-    TestId/AltText/Title`, `locator(css)`, `first/last/nth/filter/count`,
-    `selectOption`, `check/uncheck`, accessors
-    (`getAttribute/textContent/innerText/innerHTML/inputValue/isVisible/
-    isEnabled/isChecked`), history (`goBack/goForward/reload`).
-  - *Layer 2 (façade `turbo-crawl/playwright`):* `chromium.launch()`→pseudo-browser,
-    `newPage()`→Page, Locator actions, `expect(...)` web-first assertions subset,
-    waiting methods resolve immediately (static DOM per navigation).
-  - *Layer 3 (JS-only → clear "needs JS tier" error):* `evaluate`, `hover`-JS,
-    `route/intercept`, `screenshot`/`pdf`, `boundingBox`. Unlocked by #13.
+- **ESM-module page scripts** (`<script type="module">`) are skipped by the render
+  tier — needs `vm.SourceTextModule` / ivm module bridging. (docs gap #1)
+- **Page-initiated `fetch`/XHR** is not bridged across the render boundary —
+  client-only data loads don't populate (embedded data covered by
+  `hydrationState()`). (docs gap #2)
+
+Both are documented in [docs/js-execution-tier.md](./docs/js-execution-tier.md)
+under **Known gaps**.

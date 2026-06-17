@@ -90,10 +90,17 @@ describe("playwright compat façade", () => {
     );
   });
 
-  it("JS-only APIs throw a clear, pointed error", async () => {
+  it("evaluate / $eval run against the rendered DOM", async () => {
     const page = await (await chromium.launch(browserOpts())).newPage(browserOpts());
     await page.goto("https://s/");
-    for (const fn of ["evaluate", "screenshot", "pdf", "route"]) {
+    assert.equal(await page.evaluate(() => document.querySelectorAll("a").length), 1);
+    assert.equal(await page.$eval("a", (el) => el.getAttribute("href")), "/p/1");
+  });
+
+  it("pixel/render-only APIs throw a clear, pointed error", async () => {
+    const page = await (await chromium.launch(browserOpts())).newPage(browserOpts());
+    await page.goto("https://s/");
+    for (const fn of ["screenshot", "pdf", "route"]) {
       assert.throws(() => page[fn](), /no-JS engine|JavaScript/);
     }
     await assert.rejects(() => page.hover(), /no-JS engine|JavaScript/);

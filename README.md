@@ -6,19 +6,22 @@
 
 turbo-crawl turns turbo-dom into a headless, agent-grade fetch/extract engine:
 indexed interactive elements, a link/form graph, an accessibility tree, markdown
-and plain-text views, rendered-HTML capture, CSS/XPath node queries, and
-schema-driven structured extraction — plus an MCP interface agents drive
-directly. It is **a crawler, not a browser**: no pixels, no page JS, no layout.
-A Chromium fallback (Lane B) handles JS-gated pages behind the same API.
+and plain-text views, rendered-HTML capture, CSS/XPath node queries, Playwright
+locators, and schema-driven structured extraction — plus an MCP interface agents
+drive directly. It is **a crawler, not a browser**: no pixels, no layout. For
+pages that need JavaScript it runs their scripts on turbo-dom (no Chromium) —
+either by mining server-embedded hydration state or via a true-isolate
+JS-execution tier (see below).
 
-See [SPEC.md](./SPEC.md) for the full design and phase plan.
+See [SPEC.md](./SPEC.md) for the design and [STATUS.md](./STATUS.md) for current
+capabilities.
 
-Status: **alpha (v0)**. Phases 0–5 implemented: Page + interaction, networking
-(cookies incl. `document.cookie` bridge / robots + crawl-delay / charset /
-size + redirect caps), crawl orchestration, structured extraction, CSS+XPath
-query, the MCP server, and the optional Playwright (Lane B) adapter.
-**100% line coverage** (`npm run test:cov`); a Playwright differential test
-(SPEC §14) bounds representation drift when Chromium is installed.
+Status: **alpha (v0)**. Page + interaction, hardened networking (cookies /
+`document.cookie` bridge / robots + crawl-delay / charset / size + redirect
+caps), crawl orchestration, structured extraction, CSS+XPath query, Playwright
+locators + compat façade, a no-Chromium JS-execution render tier, and a 32-tool
+MCP server. ~100% line coverage (`npm run test:cov`); a Playwright differential
+test (SPEC §14) bounds representation drift when Chromium is installed (dev-only).
 
 ## Install
 
@@ -45,7 +48,7 @@ page.interactiveElements(); // [{ i, tag, role, name, href, visible, jsHandler, 
 page.links();               // absolute http(s) targets
 page.markdown();            // readable Markdown of the main content
 page.text();                // plain text, line-broken at block boundaries
-page.html();                // serialized DOM (rendered DOM behind the Lane-B adapter)
+page.html();                // serialized DOM (rendered DOM when using jsRenderer)
 page.accessibilityTree();   // { role, name, value?, children }
 
 // no-JS form flow: fill → submit → follow a result
@@ -87,8 +90,12 @@ and depth/page caps are all built in.
 ## MCP server (agents)
 
 ```sh
-npx turbo-crawl-mcp          # stdio MCP server: goto, interactive_elements, click, fill,
-                             # submit, extract, query, markdown, text, html, links, …
+npx turbo-crawl-mcp          # stdio MCP server (32 tools), e.g.:
+# goto, interactive_elements, accessibility_tree, markdown, text, html, links,
+# query, get_by, hydration_state, extract, click, fill, submit, click_selector,
+# fill_selector, select_option, check, uncheck, get_attribute, text_content,
+# inner_html, input_value, is_visible, is_checked, is_enabled, count, evaluate,
+# set_user_agent, go_back, go_forward, reload
 ```
 
 Or embed: `import { createServer } from "@miaskiewicz/turbo-crawl/mcp"`.
@@ -111,9 +118,10 @@ await expect(page.getByText("Results")).toBeVisible();
 
 Locators (`getByRole/Text/Label/Placeholder/TestId/AltText/Title`, `locator(css)`,
 `first/last/nth/filter/count`), actions (`click/fill/check/uncheck/selectOption/
-press/type`), accessors, history (`goBack/goForward/reload`), and `expect(...)`
-web-first assertions all work. JS-only APIs (`evaluate`, `screenshot`, `route`,
-`hover`, …) throw a clear "needs the JS-execution tier" error.
+press/type`), accessors, history (`goBack/goForward/reload`), `expect(...)`
+web-first assertions, and `evaluate`/`$eval`/`$$eval` (against the rendered DOM)
+all work. Pixel/render-only APIs (`screenshot`, `pdf`, `route`, `hover`, …) throw
+a clear "no-JS engine" error.
 
 ## JS-gated pages — no browser
 

@@ -142,6 +142,36 @@ describe("locators — actions", () => {
   });
 });
 
+describe("evaluate / $eval / $$eval", () => {
+  it("evaluate runs a function or expression against the DOM", async () => {
+    const p = await page();
+    assert.equal(
+      p.evaluate(() => document.querySelectorAll("a").length),
+      2,
+    );
+    assert.equal(p.evaluate("document.querySelectorAll('a').length"), 2);
+    assert.equal(
+      p.evaluate((n) => document.querySelectorAll("a").length + n, 3),
+      5,
+    );
+  });
+  it("$eval passes the first match; $$eval passes all matches", async () => {
+    const p = await page();
+    assert.equal(
+      p.$eval("a", (el) => el.getAttribute("href")),
+      "/p/1",
+    );
+    assert.deepEqual(
+      p.$$eval("a", (els) => els.map((e) => e.getAttribute("href"))),
+      ["/p/1", "/p/2"],
+    );
+  });
+  it("$eval throws when nothing matches", async () => {
+    const p = await page();
+    assert.throws(() => p.$eval(".nope", (el) => el), /found no element/);
+  });
+});
+
 describe("history — goBack / goForward / reload", () => {
   it("navigates the back/forward stack", async () => {
     const p = await page(); // at https://s/

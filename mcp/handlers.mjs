@@ -171,6 +171,55 @@ export function buildTools(page) {
       handler: ({ selector, name }) => page.locator(selector).first().getAttribute(name),
     },
     {
+      name: "text_content",
+      description: "Text content of the first element matching a selector.",
+      handler: ({ selector }) => page.locator(selector).first().textContent(),
+    },
+    {
+      name: "inner_html",
+      description: "innerHTML of the first element matching a selector.",
+      handler: ({ selector }) => page.locator(selector).first().innerHTML(),
+    },
+    {
+      name: "input_value",
+      description: "Current value of the first form control matching a selector.",
+      handler: ({ selector }) => page.locator(selector).first().inputValue(),
+    },
+    {
+      name: "is_visible",
+      description: "Whether the first element matching a selector is visible (cascade).",
+      handler: ({ selector }) => page.locator(selector).isVisible(),
+    },
+    {
+      name: "is_checked",
+      description: "Whether the first checkbox/radio matching a selector is checked.",
+      handler: ({ selector }) => page.locator(selector).first().isChecked(),
+    },
+    {
+      name: "is_enabled",
+      description: "Whether the first element matching a selector is enabled.",
+      handler: ({ selector }) => page.locator(selector).first().isEnabled(),
+    },
+    {
+      name: "count",
+      description: "Number of elements matching a CSS selector.",
+      handler: ({ selector }) => page.locator(selector).count(),
+    },
+    {
+      name: "evaluate",
+      description:
+        "Evaluate a JavaScript expression string against the current (rendered) DOM; returns the JSON-able result. (Function form is JS-API only.)",
+      handler: ({ expression }) => page.evaluate(expression),
+    },
+    {
+      name: "set_user_agent",
+      description: "Set the User-Agent (navigator + HTTP header) for subsequent navigations.",
+      handler: ({ userAgent }) => {
+        page.setUserAgent(userAgent);
+        return { ok: true };
+      },
+    },
+    {
       name: "go_back",
       description: "Navigate back in history. Returns { status, url } or null at the start.",
       handler: () => page.goBack(),

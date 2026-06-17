@@ -2,6 +2,8 @@
 // resets it per hop (SPEC §3.2: navigation = re-parse, not re-render). The unit an
 // agent drives.
 
+import vm from "node:vm";
+
 import { createEnvironment } from "@miaskiewicz/turbo-dom/runtime";
 
 import { buildSubmission, fillValue } from "./actions.mjs";
@@ -236,6 +238,43 @@ export class Page {
   /** Structured extraction against a selector-bound schema (SPEC §7.4). */
   extract(schema) {
     return extractSchema(this.document, schema, this.#url);
+  }
+
+  // --- in-page evaluation (Playwright Layer-3) ------------------------------
+  // Runs the caller's OWN function against the CURRENT (already-rendered) DOM in a
+  // node:vm context — not the live render isolate. Enough for DOM reads/measures
+  // (document.title, querySelectorAll counts, attribute reads). The page's own JS
+  // already ran during render (jsRenderer); this does not re-enter that context.
+
+  #evalContext() {
+    const win = this.window;
+    const sandbox = { window: win, document: this.document, navigator: win.navigator, console };
+    sandbox.globalThis = sandbox;
+    return vm.createContext(sandbox);
+  }
+
+  #callFn(fn, args) {
+    const sandbox = this.#evalContext();
+    sandbox.__args = args;
+    return vm.runInContext(`(${fn.toString()}).apply(null, __args)`, sandbox);
+  }
+
+  /** Evaluate a function (or expression string) against the current DOM. */
+  evaluate(pageFunction, ...args) {
+    if (typeof pageFunction === "function") return this.#callFn(pageFunction, args);
+    return vm.runInContext(String(pageFunction), this.#evalContext());
+  }
+
+  /** Evaluate `fn(element, ...args)` against the first match of `selector`. */
+  $eval(selector, fn, ...args) {
+    const el = this.document.querySelector(selector);
+    if (!el) throw new Error(`turbo-crawl: $eval found no element for "${selector}"`);
+    return this.#callFn(fn, [el, ...args]);
+  }
+
+  /** Evaluate `fn(elements, ...args)` against all matches of `selector`. */
+  $$eval(selector, fn, ...args) {
+    return this.#callFn(fn, [[...this.document.querySelectorAll(selector)], ...args]);
   }
 
   /**

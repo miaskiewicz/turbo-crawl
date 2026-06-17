@@ -1,8 +1,10 @@
 # Design: No-Chromium JS-Execution Tier
 
-> Status: **spec / not built**. Decision pending.
-> Supersedes the §11 "Lane B" Chromium fallback. Chromium remains a **dev-only**
-> differential oracle (`test/differential.test.mjs`), never a runtime dependency.
+> Status: **shipped** (`src/render/`, `jsRenderer({ mode })`). Both backends live:
+> `secure` (isolated-vm + turbo-dom WASM, true V8 isolate) and `fast` (in-process
+> `node:vm` + native parser). Supersedes the §11 "Lane B" Chromium fallback;
+> Chromium remains a **dev-only** differential oracle, never a runtime dependency.
+> See **Known gaps** at the bottom for what's not handled yet.
 
 ## Goal
 
@@ -201,3 +203,51 @@ const page = new Page({ fetchHtml });                  // same Page API
 5. The turbo-dom A1 seam: is "build runtime over a host-supplied SoA buffer inside
    a bare isolate" something turbo-dom wants to expose? (Owner offered turbo-dom
    changes.)
+
+## Known gaps (shipped tier)
+
+The render tier executes inline + external **classic** `<script>`s and snapshots
+the rendered DOM. Two capabilities are not handled yet — both tracked as tasks.
+
+### 1. ESM-module page scripts (`<script type="module">`)
+**Current:** `extractScripts` flags module scripts (`module: true`); both backends
+**skip** them at execution time. So a site that boots purely from an ESM entry
+(`<script type="module" src="/main.js">` with `import` graph) renders only what
+its classic scripts produce — often nothing.
+
+**Why it's non-trivial:** modules need a loader + resolver, not a plain eval.
+- *fast backend:* `node:vm` `SourceTextModule` + a `link` callback that resolves
+  relative/bare specifiers (host-fetch each dependency, honor import maps).
+- *secure backend:* isolated-vm's module API (`isolate.compileModule` +
+  `module.instantiate(context, resolveCallback)`), where `resolveCallback`
+  fetches dependencies across the boundary and compiles them in-isolate.
+- *shortcut:* esbuild-bundle the module graph per page (host-side) into one
+  classic script, then run it like today — fastest to ship, at the cost of a
+  bundle step per rendered page.
+
+**Impact:** modern ESM-first SPAs under-render. Embedded-state sites are still
+covered by `hydrationState()` regardless.
+
+### 2. Page-initiated `fetch` / `XMLHttpRequest`
+**Current:** in the render context `window.fetch`/`XMLHttpRequest` are turbo-dom
+**stubs** with no network. A SPA that renders a shell then `fetch`es its data and
+paints the result will snapshot **empty** (the fetch resolves to nothing).
+`hydrationState()` covers the common case where the same data is embedded
+server-side (`__NEXT_DATA__`/`__APOLLO_STATE__`/…), but not true client-only loads.
+
+**Why it's non-trivial:** the fetch must route through turbo-crawl's net layer
+(cookies / UA / robots / redirects), and the **secure** backend's isolate has no
+network at all.
+- *fast backend:* inject the host `fetch` (wrapping `net.fetchHtml`-style logic)
+  directly into the `vm` context — straightforward, in-process.
+- *secure backend:* bridge via an ivm `Reference` — the isolate calls a host
+  callback that performs the fetch and returns the body across the boundary.
+  Async is the hard part: the render must **await in-flight bridged requests**
+  before snapshotting (extend the settle loop to track pending fetches, not just
+  timers), and the callback marshals body/headers back as copies.
+
+**Also:** discovered request URLs could be fed into the crawl frontier (optional).
+
+**Impact:** client-only data loads don't populate. Settling currently waits on
+microtasks + a bounded timer-drain only; once fetch is bridged, settling must
+also wait on outstanding requests (with a wall-clock budget).

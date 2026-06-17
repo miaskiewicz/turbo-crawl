@@ -230,6 +230,9 @@ export declare class Page {
   accessibilityTree(): AxNode;
   extract(schema: Schema): object;
   hydrationState(): HydrationState;
+  evaluate(pageFunction: Function | string, ...args: unknown[]): unknown;
+  $eval(selector: string, fn: Function, ...args: unknown[]): unknown;
+  $$eval(selector: string, fn: Function, ...args: unknown[]): unknown;
   query(selector: string, opts?: QueryOptions): QueryResult[] | QueryResult | null;
   click(i: number, opts?: FetchOptions): Promise<NavResult>;
   fill(i: number, value: unknown): { ok: true };

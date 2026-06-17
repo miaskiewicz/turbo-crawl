@@ -74,6 +74,47 @@ const INPUT_SCHEMAS = {
     properties: { selector: { type: "string" }, name: { type: "string" } },
     required: ["selector", "name"],
   },
+  text_content: {
+    type: "object",
+    properties: { selector: { type: "string" } },
+    required: ["selector"],
+  },
+  inner_html: {
+    type: "object",
+    properties: { selector: { type: "string" } },
+    required: ["selector"],
+  },
+  input_value: {
+    type: "object",
+    properties: { selector: { type: "string" } },
+    required: ["selector"],
+  },
+  is_visible: {
+    type: "object",
+    properties: { selector: { type: "string" } },
+    required: ["selector"],
+  },
+  is_checked: {
+    type: "object",
+    properties: { selector: { type: "string" } },
+    required: ["selector"],
+  },
+  is_enabled: {
+    type: "object",
+    properties: { selector: { type: "string" } },
+    required: ["selector"],
+  },
+  count: { type: "object", properties: { selector: { type: "string" } }, required: ["selector"] },
+  evaluate: {
+    type: "object",
+    properties: { expression: { type: "string" } },
+    required: ["expression"],
+  },
+  set_user_agent: {
+    type: "object",
+    properties: { userAgent: { type: "string" } },
+    required: ["userAgent"],
+  },
   go_back: { type: "object", properties: {} },
   go_forward: { type: "object", properties: {} },
   reload: { type: "object", properties: {} },

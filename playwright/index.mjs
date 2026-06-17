@@ -167,10 +167,18 @@ class PWPage {
     return loc.first();
   }
 
-  // JS-only — unsupported without the render tier
-  evaluate() {
-    throw jsTier("evaluate");
+  // evaluate runs against the current (already-rendered) DOM — see Page.evaluate.
+  async evaluate(pageFunction, ...args) {
+    return this.#page.evaluate(pageFunction, ...args);
   }
+  async $eval(selector, fn, ...args) {
+    return this.#page.$eval(selector, fn, ...args);
+  }
+  async $$eval(selector, fn, ...args) {
+    return this.#page.$$eval(selector, fn, ...args);
+  }
+
+  // genuinely JS-render / pixel only — unsupported without a browser
   screenshot() {
     throw jsTier("screenshot");
   }
