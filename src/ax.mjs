@@ -129,3 +129,8 @@ export function accessibilityTree(document) {
   const tree = build(body);
   return tree ?? { role: "document", children: [] };
 }
+
+/** Accessibility subtree rooted at an element (null if it contributes nothing). */
+export function axSubtree(el) {
+  return build(el);
+}

@@ -55,6 +55,13 @@ describe("MCP handlers (Page API 1:1)", () => {
       "is_visible",
       "is_checked",
       "is_enabled",
+      "is_editable",
+      "is_focused",
+      "is_empty",
+      "aria_role",
+      "accessible_name",
+      "accessible_description",
+      "aria_snapshot",
       "count",
       "evaluate",
       "set_user_agent",
@@ -84,6 +91,18 @@ describe("MCP handlers (Page API 1:1)", () => {
     ]) {
       assert.ok(map.has(name), `missing tool ${name}`);
     }
+  });
+
+  it("locator accessors: editable/focused/empty/role/name/description + aria_snapshot", async () => {
+    const { call } = tools();
+    await call("goto", { url: FORM });
+    assert.equal(await call("is_editable", { selector: "input[name=email]" }), true);
+    assert.equal(await call("is_focused", { selector: "input[name=email]" }), false);
+    assert.equal(await call("is_empty", { selector: "button" }), false);
+    assert.equal(await call("aria_role", { selector: "button" }), "button");
+    assert.equal(await call("accessible_name", { selector: "button" }), "Go");
+    assert.equal(await call("accessible_description", { selector: "button" }), "");
+    assert.match(await call("aria_snapshot"), /- button "Go"/);
   });
 
   it("eval_js runs a statement body; inject_js mutates the DOM", async () => {

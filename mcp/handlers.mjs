@@ -193,6 +193,11 @@ export function buildTools(page) {
       handler: () => page.accessibilityTree(),
     },
     {
+      name: "aria_snapshot",
+      description: "Return a YAML-ish ARIA snapshot (role/name tree) of the page body.",
+      handler: () => page.ariaSnapshot(),
+    },
+    {
       name: "markdown",
       description: "Return readable Markdown of the page's main content.",
       handler: () => page.markdown(),
@@ -332,6 +337,36 @@ export function buildTools(page) {
       name: "is_enabled",
       description: "Whether the first element matching a selector is enabled.",
       handler: ({ selector }) => page.locator(selector).first().isEnabled(),
+    },
+    {
+      name: "is_editable",
+      description: "Whether the first element matching a selector is editable.",
+      handler: ({ selector }) => page.locator(selector).first().isEditable(),
+    },
+    {
+      name: "is_focused",
+      description: "Whether the first element matching a selector is the active element.",
+      handler: ({ selector }) => page.locator(selector).isFocused(),
+    },
+    {
+      name: "is_empty",
+      description: "Whether the first element matching a selector has no text and no children.",
+      handler: ({ selector }) => page.locator(selector).first().isEmpty(),
+    },
+    {
+      name: "aria_role",
+      description: "Resolved ARIA role of the first element matching a selector.",
+      handler: ({ selector }) => page.locator(selector).first().ariaRole(),
+    },
+    {
+      name: "accessible_name",
+      description: "Accessible name of the first element matching a selector.",
+      handler: ({ selector }) => page.locator(selector).first().accessibleName(),
+    },
+    {
+      name: "accessible_description",
+      description: "Accessible description of the first element matching a selector.",
+      handler: ({ selector }) => page.locator(selector).first().accessibleDescription(),
     },
     {
       name: "count",

@@ -10,7 +10,7 @@ turbo-crawl is two things in one engine, on its own native DOM:
 - **A crawler** — point it at a domain and stream page records: indexed
   interactive elements, a link/form graph, an accessibility tree, markdown and
   plain-text views, rendered-HTML capture, CSS/XPath node queries, and
-  schema-driven structured extraction. Plus a 53-tool **MCP** interface agents
+  schema-driven structured extraction. Plus a 60-tool **MCP** interface agents
   drive directly (incl. `crawl`, `batch`, `render`/`set_mode`, `eval_js`/
   `inject_js`, cookies/headers, `snapshot`).
 - **A drop-in Playwright replacement** — the same `chromium.launch()` →
@@ -32,7 +32,7 @@ library, and they get their DOM from a real browser (Playwright/Puppeteer/
 Selenium) or an in-process fake DOM with no security isolation (jsdom,
 happy-dom). turbo-crawl is unusual on four axes at once:
 
-1. **AI-agent-ready out of the box.** It ships a full **MCP server** (53 tools:
+1. **AI-agent-ready out of the box.** It ships a full **MCP server** (60 tools:
    navigate, click/fill/submit, query, extract, accessibility tree, markdown,
    `crawl` a whole site, `batch` a URL list, `render`/`set_mode` to run page JS,
    `eval_js`/`inject_js` against the live render heap with a DOM-history trail,
@@ -57,7 +57,7 @@ happy-dom). turbo-crawl is unusual on four axes at once:
 See [SPEC.md](./SPEC.md) for the design and [STATUS.md](./STATUS.md) for current
 capabilities.
 
-Status: **v0.1.6 — working** ([npm](https://www.npmjs.com/package/@miaskiewicz/turbo-crawl)).
+Status: **v0.1.7 — working** ([npm](https://www.npmjs.com/package/@miaskiewicz/turbo-crawl)).
 Page + interaction, hardened networking (cookies / `document.cookie` bridge /
 robots + crawl-delay / charset / size + redirect caps, HTTP/2 + DNS-cache
 dispatcher, 304 conditional-request cache), crawl orchestration (`Crawler` +
@@ -65,7 +65,7 @@ one-shot `crawlSite`) and a `batch` URL-list runner, structured extraction,
 CSS+XPath query, a Playwright compat façade with **events / network / routing /
 persistent context state**, a no-Chromium JS-execution render tier with
 **re-enterable live-heap `evalJs`/`injectJs` + a DOM-history trail**, and a
-53-tool MCP server. ~100% line coverage (`npm run test:cov`); benchmarked against
+60-tool MCP server. ~100% line coverage (`npm run test:cov`); benchmarked against
 other crawlers (above); a Playwright differential test (SPEC §14) bounds
 representation drift when Chromium is installed (dev-only).
 
@@ -151,14 +151,16 @@ canonical-form dedupe, robots + crawl-delay, and depth/page caps are all built i
 ## MCP server (agents)
 
 ```sh
-npx turbo-crawl-mcp          # stdio MCP server (53 tools), e.g.:
+npx turbo-crawl-mcp          # stdio MCP server (60 tools), e.g.:
 # navigation:  goto, go_back, go_forward, reload, set_user_agent
-# content:     interactive_elements, accessibility_tree, markdown, text, html,
-#              links, requests, snapshot, query, get_by, hydration_state, extract
+# content:     interactive_elements, accessibility_tree, aria_snapshot, markdown,
+#              text, html, links, requests, snapshot, query, get_by,
+#              hydration_state, extract
 # interaction: click, fill, submit, click_selector, fill_selector, select_option,
 #              check, uncheck, fill_many, find_text, forms, extract_links
 # accessors:   get_attribute, text_content, inner_html, input_value, count,
-#              is_visible, is_checked, is_enabled
+#              is_visible, is_checked, is_enabled, is_editable, is_focused,
+#              is_empty, aria_role, accessible_name, accessible_description
 # bulk:        crawl, batch
 # render/JS:   render, set_mode, eval_js, inject_js, latest_dom, dom_history,
 #              evaluate, detect_js
@@ -199,11 +201,11 @@ await expect(page.getByText("Saved")).toBeVisible();
 const state = await ctx.storageState();                     // cookies + localStorage
 ```
 
-Locators (`getByRole/Text/Label/Placeholder/TestId/AltText/Title`, `locator(css)`,
-`first/last/nth/filter/count`), actions (`click/fill/check/uncheck/selectOption/
-press/type`), accessors, history (`goBack/goForward/reload`), `expect(...)`
-web-first assertions, `evaluate`/`$eval`/`$$eval`, **events** (`on`/`once`/`off`
-for `request`/`response`/`console`/`pageerror`/…, `waitForResponse`/
+Locators (`getByRole/Text/Label/Placeholder/TestId/AltText/Title` — all accept a
+**RegExp** name/text, `locator(css)`, `first/last/nth/filter/count`), actions
+(`click/fill/check/uncheck/selectOption/press/type`), accessors, history
+(`goBack/goForward/reload`), `evaluate`/`$eval`/`$$eval`, **events** (`on`/`once`/
+`off` for `request`/`response`/`console`/`pageerror`/…, `waitForResponse`/
 `waitForRequest`/`waitForEvent`), **routing** (`route`/`unroute` →
 `fulfill`/`abort`/`continue`), **init scripts + headers** (`addInitScript`,
 `setExtraHTTPHeaders`), and **persistent context state** (cookie jar +
@@ -212,6 +214,43 @@ for `request`/`response`/`console`/`pageerror`/…, `waitForResponse`/
 "fast" | "secure" })`); without one the façade stays Lane A and still emits
 navigation request/response events. Genuinely pixel-only APIs (`screenshot`,
 `pdf`, `hover`) throw a clear "no-browser engine" error.
+
+### `expect(...)` web-first assertions
+
+`expect` from `@miaskiewicz/turbo-crawl/playwright` is a drop-in for
+`@playwright/test`'s `expect` (it must be — `@playwright/test`'s own `expect`
+brand-rejects a non-Playwright `Locator`). `expect(x)` dispatches on its argument:
+a **Locator**, a **Page**, an **APIResponse**, or any plain value. Every form
+supports `.not`; matchers run once (no auto-retry — nothing changes without JS).
+String/RegExp/array argument forms match Playwright.
+
+| Class | Supported matchers |
+| --- | --- |
+| **Locator** | `toBeAttached` · `toBeVisible` · `toBeHidden` · `toBeEnabled` · `toBeDisabled` · `toBeEditable` · `toBeChecked` · `toBeEmpty` · `toBeFocused` · `toBeInViewport` · `toHaveText` · `toContainText` · `toHaveValue` · `toHaveValues` · `toHaveCount` · `toHaveId` · `toHaveRole` · `toHaveClass` · `toContainClass` · `toHaveCSS` · `toHaveAttribute` · `toHaveAccessibleName` · `toHaveAccessibleDescription` · `toHaveAccessibleErrorMessage` · `toHaveJSProperty` · `toMatchAriaSnapshot` |
+| **Page** | `toHaveTitle` · `toHaveURL` · `toMatchAriaSnapshot` |
+| **APIResponse** | `toBeOK` |
+| **Generic value** | `toBe` · `toEqual` · `toStrictEqual` · `toBeTruthy` · `toBeFalsy` · `toBeNull` · `toBeDefined` · `toBeUndefined` · `toBeNaN` · `toBeGreaterThan(OrEqual)` · `toBeLessThan(OrEqual)` · `toBeCloseTo` · `toContain` · `toContainEqual` · `toHaveLength` · `toHaveProperty` · `toMatch` · `toMatchObject` · `toBeInstanceOf` · `toThrow` / `toThrowError` · `.resolves` / `.rejects` |
+
+`toHaveCSS` reads turbo-dom's **real computed-style cascade** (CSSOM);
+`toBeInViewport` uses its **geometry** (approximate flow layout — no real paint,
+enough for the in/out question). `toMatchAriaSnapshot` is built from the
+accessibility tree as a structural role/name *subset* match — Playwright's YAML
+extras (`[level=…]`, selected/checked properties, strict child nesting) are not
+modeled.
+
+Statics: `expect.extend({ … })` (custom matchers), `expect.poll(fn)`,
+`expect.configure(opts)`, `expect.soft` (no deferred aggregation without a test
+runner, so it throws like `expect`).
+
+#### Unsupported Playwright assertions (and why)
+
+Only the **pixel** matchers — they need a rasterizing renderer the no-Chromium
+engine has no equivalent for (same reason `page.screenshot()`/`pdf()` throw). They
+throw a clear error rather than silently passing:
+
+| Matcher | Why it can't be supported |
+| --- | --- |
+| `toHaveScreenshot` / `toMatchSnapshot` (image) | No pixel renderer to rasterize the page. |
 
 ## JS-gated pages — no browser
 

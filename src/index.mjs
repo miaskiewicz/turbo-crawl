@@ -2,7 +2,7 @@
 // Native-speed, browserless crawler for AI agents, built on turbo-dom.
 // See SPEC.md for the full design and phase plan (§12).
 
-export const version = "0.1.6";
+export const version = "0.1.7";
 
 export { Page } from "./page.mjs";
 export { fetchHtml, HttpError } from "./net.mjs";
@@ -15,6 +15,7 @@ export { isVisible } from "./visible.mjs";
 export { markdown } from "./markdown.mjs";
 export { text } from "./text.mjs";
 export { accessibilityTree } from "./ax.mjs";
+export { ariaSnapshot, matchesAriaSnapshot } from "./aria-snapshot.mjs";
 export { buildSubmission, serializeForm, fillValue } from "./actions.mjs";
 export { resolve, isHttpUrl, canonicalize } from "./url.mjs";
 export { Crawler, crawlSite } from "./crawl.mjs";

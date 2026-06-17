@@ -24,10 +24,20 @@ First trimmed, non-empty value from this ordered candidate list:
 Returns `""` if none produce a non-empty string. Each candidate is trimmed;
 `null`/`undefined` are treated as empty.
 
+### `accessibleDescription(el) → string`
+Text of the `aria-describedby` targets (space-joined), else the `title` attribute.
+
+### `accessibleErrorMessage(el) → string`
+Text of the `aria-errormessage` targets — but only when `aria-invalid="true"`
+(else `""`). Backs the `toHaveAccessibleErrorMessage` assertion.
+
 ## Key internals
 - `IMPLICIT_ROLE` / `INPUT_ROLE` lookup tables.
 - `firstNonEmpty(getters)` — runs getters in order, returns the first trimmed
   non-empty string; underpins `accessibleName`.
+- `idList(el, attr)` / `resolveIds(doc, ids)` — IDREF-list parse + referenced-text
+  join behind the accessible description/error-message getters (imports `textOf`
+  from `dom-ops`).
 
 ## Depends on / used by
 - No internal deps (leaf module).

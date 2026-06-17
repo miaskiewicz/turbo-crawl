@@ -21,7 +21,7 @@ the surface for a no-JS fetcher.
 - CLI entry (server.mjs): when run directly, `createServer()` + connect a
   `StdioServerTransport`; logs readiness to stderr.
 
-## The 53 tools (grouped)
+## The 60 tools (grouped)
 
 ### Navigation / history (5)
 - `goto` — navigate to `{ url }`; returns `{ status, url, title }`.
@@ -82,10 +82,11 @@ the surface for a no-JS fetcher.
   (`[{ selector|i, value }]`) in one call. `extract_links` — `links` filtered by
   `sameHost`/`pattern`/`limit`.
 
-### Page content / representations (7)
+### Page content / representations (8)
 - `interactive_elements` — indexed array of interactive elements (the `[i]`
   handles for click/fill).
 - `accessibility_tree` — `{ role, name, value?, children }` tree.
+- `aria_snapshot` — YAML-ish ARIA snapshot (role/name tree) of the page body.
 - `markdown` — readable Markdown of the main content.
 - `html` — serialized current DOM.
 - `text` — plain text with block-boundary line breaks.
@@ -123,7 +124,7 @@ the surface for a no-JS fetcher.
 - `check` — check the checkbox/radio matching a selector.
 - `uncheck` — uncheck the checkbox matching a selector.
 
-### Selector-string accessors (7)
+### Selector-string accessors (14)
 - `get_attribute` — attribute of first match (`{ selector, name }`).
 - `text_content` — text content of first match.
 - `inner_html` — innerHTML of first match.
@@ -131,11 +132,17 @@ the surface for a no-JS fetcher.
 - `is_visible` — visibility of first match (cascade).
 - `is_checked` — checked state of first matching checkbox/radio.
 - `is_enabled` — enabled state of first match.
+- `is_editable` — editable state of first match.
+- `is_focused` — whether first match is the document's active element.
+- `is_empty` — whether first match has no text and no element children.
+- `aria_role` — resolved ARIA role of first match.
+- `accessible_name` — accessible name of first match.
+- `accessible_description` — accessible description of first match.
 - `count` — number of elements matching a CSS selector.
 
 (Group counts: navigation 5, batch+crawl 2, render-mode 2, JS-exec+DOM-history 4,
-session/detection 4, ergonomic 4, content 7, indexed interactions 3, structured 3,
-locator 2, selector actions 5, selector accessors 8 = **53**.)
+session/detection 4, ergonomic 4, content 8, indexed interactions 3, structured 3,
+locator 2, selector actions 5, selector accessors 14 = **60**.)
 
 ## Key internals
 - `GET_BY` map + `resolveBy(page, kind, value, name)` — dispatch for `get_by`;

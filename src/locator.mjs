@@ -4,23 +4,30 @@
 // it with chaining + accessors + actions. No JS execution — pure DOM.
 
 import { fillValue } from "./actions.mjs";
-import { accessibleName, roleOf } from "./aria.mjs";
+import { accessibleDescription, accessibleErrorMessage, accessibleName, roleOf } from "./aria.mjs";
 import {
   attrOf,
+  cssValueOf,
   innerHTMLOf,
   inputValueOf,
   isCheckedEl,
+  isEditableEl,
+  isEmptyEl,
   isEnabledEl,
   isVisibleEl,
+  jsPropOf,
   selectOption,
+  selectedValuesOf,
   setChecked,
   textOf,
+  viewportRatioOf,
 } from "./dom-ops.mjs";
 
 // --- text matching ---------------------------------------------------------
 
 function textMatch(value, want, exact) {
   const v = (value ?? "").trim();
+  if (want instanceof RegExp) return want.test(v);
   return exact ? v === want : v.toLowerCase().includes(String(want).toLowerCase());
 }
 
@@ -56,9 +63,24 @@ export function byText(want, opts = {}) {
     );
 }
 
+// Resolve by id without a CSS selector: `useId()` ids like ":r0:" contain colons
+// that are invalid in a `#id` selector (querySelector throws). Prefer the DOM's
+// own getElementById (handles any id); fall back to an attribute scan.
+function scanById(root, id) {
+  const withId = root.querySelectorAll("[id]");
+  for (let i = 0; i < withId.length; i++) {
+    if (withId[i].getAttribute("id") === id) return withId[i];
+  }
+  return null;
+}
+
+function byId(root, id) {
+  return root.getElementById ? root.getElementById(id) : scanById(root, id);
+}
+
 function labelTarget(label, root) {
   const forId = label.getAttribute("for");
-  if (forId) return root.querySelector(`#${forId}`);
+  if (forId) return byId(root, forId);
   return label.querySelector("input,select,textarea");
 }
 
@@ -166,6 +188,43 @@ export class Locator {
   }
   isChecked() {
     return isCheckedEl(this.#firstEl());
+  }
+  isEditable() {
+    return isEditableEl(this.#firstEl());
+  }
+  isEmpty() {
+    return isEmptyEl(this.#firstEl());
+  }
+  isFocused() {
+    const els = this.elements();
+    return els.length > 0 && this.#page.document.activeElement === els[0];
+  }
+  ariaRole() {
+    return roleOf(this.#firstEl());
+  }
+  accessibleName() {
+    return accessibleName(this.#firstEl());
+  }
+  accessibleDescription() {
+    return accessibleDescription(this.#firstEl());
+  }
+  accessibleErrorMessage() {
+    return accessibleErrorMessage(this.#firstEl());
+  }
+  selectedValues() {
+    return selectedValuesOf(this.#firstEl());
+  }
+  jsProperty(name) {
+    return jsPropOf(this.#firstEl(), name);
+  }
+  cssValue(name) {
+    return cssValueOf(this.#firstEl(), this.#page.window, name);
+  }
+  viewportRatio() {
+    return viewportRatioOf(this.#firstEl(), this.#page.window);
+  }
+  allTextContents() {
+    return this.elements().map((el) => textOf(el));
   }
 
   // actions

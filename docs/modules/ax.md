@@ -6,6 +6,9 @@ Computes a nested, geometry-free accessibility tree (`{ role, name, value?, chil
 ## Exports (precise signatures + behavior)
 - `accessibilityTree(document)` → `{ role, name?, value?, children? }`
   - Roots at `body`, else `documentElement`. Returns the built tree, or `{ role: "document", children: [] }` if the root itself is pruned away.
+- `axSubtree(el)` → the built node for the subtree rooted at element `el` (or
+  `null` if it contributes nothing). Exposes the internal `build`; consumed by
+  `src/aria-snapshot.mjs`.
 
 ## Key internals
 - **Role resolution** (`roleOf`): explicit `role=` attribute wins; otherwise `<input>` maps by lowercased `type` through `INPUT_ROLE` (`checkbox/radio/button/submit/reset`, `hidden` → `null` = skipped, any other/unknown type → `"textbox"`); all other tags map through the `IMPLICIT` table (`A`→link, `BUTTON`→button, `NAV`→navigation, headings→heading, `UL`/`OL`→list, `LI`→listitem, `IMG`→img, `SELECT`→combobox, `TEXTAREA`→textbox, etc.). Unlisted tags resolve to `null` (no role).

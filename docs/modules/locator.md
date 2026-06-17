@@ -16,13 +16,20 @@ accessors, and actions. No JS execution — pure DOM.
   no descendant also matches (`hasMatchingChild` returns false). Avoids selecting an
   outer container when a leaf carries the text.
 - `byLabel(want, opts?)` — for each `<label>` whose `textContent` matches, resolves
-  its target: `#{for}` if the `for` attribute is set, else the first
+  its target: by id (`for` attribute) via `byId` if set, else the first
   `input,select,textarea` descendant. Skips labels with no resolvable target.
 - `byAttrText(attr, want, opts?)` — over `[${attr}]` elements, matches
   `attrOf(el, attr)` against `want`.
 
-`opts.exact` selects exact (`===` after trim) vs substring (case-insensitive
-`includes`) matching via `textMatch`.
+`want` may be a **string** or a **RegExp** (Playwright accepts both for
+`getByRole({name})`, `getByText`, `getByLabel`, …); `textMatch` tests the RegExp
+against the trimmed value. For strings, `opts.exact` selects exact (`===` after
+trim) vs substring (case-insensitive `includes`) matching.
+
+`byId(root, id)` resolves a `for=`/id target **without a CSS selector** —
+`useId()` ids like `:r0:` contain colons that throw in a `#id` selector. It prefers
+the DOM's own `getElementById` (handles any id), falling back to an `[id]`
+attribute scan (`scanById`) when the root lacks `getElementById`.
 
 ### `class Locator`
 Constructed `new Locator(page, resolve)`; private `#page`, `#resolve`.
@@ -41,7 +48,18 @@ no elements"` if empty, except `isVisible`):
 - `innerHTML()`, `getAttribute(name)`, `inputValue()`.
 - `isVisible()` — `false` on a **zero-match** locator (Playwright `toBeHidden`
   semantics), else `isVisibleEl(first, page.window)`.
-- `isEnabled()`, `isChecked()`.
+- `isEnabled()`, `isChecked()`, `isEditable()`, `isEmpty()`.
+- `isFocused()` — `false` on a zero-match locator, else
+  `page.document.activeElement === first`.
+- `ariaRole()`, `accessibleName()`, `accessibleDescription()`,
+  `accessibleErrorMessage()` — ARIA reads (back the `toHaveRole`/`toHaveAccessible*`
+  assertions).
+- `selectedValues()` — selected `<option>` values of a (multi-)`<select>`.
+- `jsProperty(name)` — a DOM IDL property read (`toHaveJSProperty`).
+- `cssValue(name)` — computed CSS value from turbo-dom's real cascade (`toHaveCSS`).
+- `viewportRatio()` — fraction of the element's box inside the viewport, from
+  turbo-dom's approximate geometry (`toBeInViewport`).
+- `allTextContents()` — `textOf` of **every** match (array text assertions).
 
 **Actions** (operate on the first match):
 - `click(opts)` → `page.clickElement(first, opts)`.
@@ -52,9 +70,10 @@ no elements"` if empty, except `isVisible`):
   key effect).
 
 ## Key internals
-`textMatch` (exact vs substring), `collect` (filtered NodeList → array),
-`roleMatches`, `hasMatchingChild`, `labelTarget`; `#firstEl` (throws on empty),
-`#derive` (wraps a transform of the resolved set into a new lazy `Locator`).
+`textMatch` (RegExp `.test`, else exact vs substring), `collect` (filtered
+NodeList → array), `roleMatches`, `hasMatchingChild`, `labelTarget`, `byId` /
+`scanById` (colon-safe id resolution); `#firstEl` (throws on empty), `#derive`
+(wraps a transform of the resolved set into a new lazy `Locator`).
 
 ## Depends on / used by
 - Depends on `actions.mjs` (`fillValue`), `aria.mjs` (`accessibleName`, `roleOf`),

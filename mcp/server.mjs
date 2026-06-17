@@ -114,6 +114,37 @@ const INPUT_SCHEMAS = {
     properties: { selector: { type: "string" } },
     required: ["selector"],
   },
+  is_editable: {
+    type: "object",
+    properties: { selector: { type: "string" } },
+    required: ["selector"],
+  },
+  is_focused: {
+    type: "object",
+    properties: { selector: { type: "string" } },
+    required: ["selector"],
+  },
+  is_empty: {
+    type: "object",
+    properties: { selector: { type: "string" } },
+    required: ["selector"],
+  },
+  aria_role: {
+    type: "object",
+    properties: { selector: { type: "string" } },
+    required: ["selector"],
+  },
+  accessible_name: {
+    type: "object",
+    properties: { selector: { type: "string" } },
+    required: ["selector"],
+  },
+  accessible_description: {
+    type: "object",
+    properties: { selector: { type: "string" } },
+    required: ["selector"],
+  },
+  aria_snapshot: { type: "object", properties: {} },
   count: { type: "object", properties: { selector: { type: "string" } }, required: ["selector"] },
   evaluate: {
     type: "object",
@@ -275,7 +306,7 @@ export function createServer(opts = {}) {
   const byName = new Map(tools.map((t) => [t.name, t]));
 
   const server = new Server(
-    { name: "turbo-crawl", version: "0.1.6" },
+    { name: "turbo-crawl", version: "0.1.7" },
     { capabilities: { tools: {} } },
   );
 

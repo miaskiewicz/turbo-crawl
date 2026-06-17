@@ -7,6 +7,7 @@ import vm from "node:vm";
 import { createEnvironment } from "@miaskiewicz/turbo-dom/runtime";
 
 import { buildSubmission, fillValue } from "./actions.mjs";
+import { ariaSnapshot } from "./aria-snapshot.mjs";
 import { accessibilityTree } from "./ax.mjs";
 import { CookieJar } from "./cookies.mjs";
 import { assertSafeEval } from "./eval-guard.mjs";
@@ -275,6 +276,12 @@ export class Page {
 
   accessibilityTree() {
     return accessibilityTree(this.document);
+  }
+
+  /** YAML-ish ARIA snapshot text of the page body (Playwright `ariaSnapshot`). */
+  ariaSnapshot() {
+    const root = this.document.querySelector("body") ?? this.document.documentElement;
+    return ariaSnapshot(root);
   }
 
   /** Structured extraction against a selector-bound schema (SPEC §7.4). */

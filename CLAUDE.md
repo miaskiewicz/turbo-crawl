@@ -138,7 +138,7 @@ cut a release tag when the user explicitly asks to "ship"/"publish"/"release".
 - **Per-module reference:** [`docs/modules/`](./docs/modules/) — networking
   (net/cookies/robots/url), orchestration (page/crawl/frontier/detect), extraction
   & interaction (extract/visible/actions/aria/dom-ops/locator), views
-  (markdown/ax/text/schema/query/xpath/hydration), render tier
+  (markdown/ax/aria-snapshot/text/schema/query/xpath/hydration), render tier
   (render-*), agent surfaces (mcp, playwright-compat).
 - **Design / status:** [`SPEC.md`](./SPEC.md), [`STATUS.md`](./STATUS.md),
   [`docs/js-execution-tier.md`](./docs/js-execution-tier.md).

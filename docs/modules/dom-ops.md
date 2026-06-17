@@ -15,6 +15,18 @@ for the cascade). Each function operates on a single turbo-dom element.
 - `inputValueOf(el) → string` — `String(el.value)`; `""` when value is null/undefined.
 - `isEnabledEl(el) → boolean` — `true` when the `disabled` attribute is absent.
 - `isCheckedEl(el) → boolean` — `Boolean(el.checked)`.
+- `isEditableEl(el) → boolean` — `true` for a `contenteditable` element, or an
+  enabled, non-`readonly` `INPUT`/`TEXTAREA`/`SELECT`.
+- `isEmptyEl(el) → boolean` — `true` when the element has no text and no element
+  children (Playwright `toBeEmpty`).
+- `selectedValuesOf(el) → string[]` — selected `<option>` values of a (multi-)
+  `<select>`, in document order (`value` attr, else the option's label text).
+- `jsPropOf(el, name) → unknown` — a DOM IDL property read (`el[name]`) backing
+  `toHaveJSProperty`; page-script expandos aren't present in Lane A.
+- `cssValueOf(el, window, name) → string` — computed CSS value via turbo-dom's real
+  cascade (`window.getComputedStyle(el).getPropertyValue(name)`); backs `toHaveCSS`.
+- `viewportRatioOf(el, window) → number` — fraction (0..1) of the element's box
+  inside the viewport, from turbo-dom's approximate geometry; backs `toBeInViewport`.
 - `isVisibleEl(el, window) → boolean` — delegates to `visible.isVisible`.
 
 ### Writers

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { byLabel } from "../src/locator.mjs";
 import { Page } from "../src/page.mjs";
 import { stubFetch } from "./helpers.mjs";
 
@@ -53,6 +54,34 @@ describe("locators — resolution", () => {
     });
     await p.goto("https://w/");
     assert.equal(p.getByLabel("Name").getAttribute("name"), "nm");
+  });
+  it("getByLabel handles colon useId() ids (MUI/React) via getElementById", async () => {
+    const p = new Page({
+      fetchHtml: stubFetch({
+        "https://m/": '<body><label for=":r0:">Title</label><input id=":r0:" name="t"></body>',
+      }),
+    });
+    await p.goto("https://m/");
+    assert.equal(p.getByLabel("Title").count(), 1);
+    assert.equal(p.getByLabel("Title").getAttribute("name"), "t");
+  });
+  it("byLabel falls back to CSS.escape when the root lacks getElementById", async () => {
+    const p = new Page({
+      fetchHtml: stubFetch({
+        "https://e/":
+          '<body><label for=":r0:">Email</label><input id=":r0:" name="e">' +
+          '<label for=":gone:">Ghost</label></body>',
+      }),
+    });
+    await p.goto("https://e/");
+    // A root that exposes querySelector/querySelectorAll but no getElementById.
+    const real = p.document;
+    const root = { querySelectorAll: (s) => real.querySelectorAll(s) };
+    const found = byLabel("Email")(root);
+    assert.equal(found.length, 1);
+    assert.equal(found[0].getAttribute("name"), "e");
+    // a `for=` pointing at a missing id resolves to nothing (scan returns null)
+    assert.equal(byLabel("Ghost")(root).length, 0);
   });
   it("getByPlaceholder / getByTestId / getByAltText / getByTitle", async () => {
     const p = await page();

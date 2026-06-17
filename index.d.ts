@@ -116,6 +116,8 @@ export interface AxNode {
   children?: AxNode[];
 }
 export declare function accessibilityTree(document: object): AxNode;
+export declare function ariaSnapshot(root: object): string;
+export declare function matchesAriaSnapshot(root: object, expected: string): boolean;
 
 export interface FieldSpec {
   selector?: string;
@@ -212,7 +214,7 @@ export interface NavResult {
 }
 
 export interface ByOptions {
-  name?: string;
+  name?: string | RegExp;
   exact?: boolean;
 }
 export declare class Locator {
@@ -231,6 +233,18 @@ export declare class Locator {
   isVisible(): boolean;
   isEnabled(): boolean;
   isChecked(): boolean;
+  isEditable(): boolean;
+  isEmpty(): boolean;
+  isFocused(): boolean;
+  ariaRole(): string;
+  accessibleName(): string;
+  accessibleDescription(): string;
+  accessibleErrorMessage(): string;
+  selectedValues(): string[];
+  jsProperty(name: string): unknown;
+  cssValue(name: string): string;
+  viewportRatio(): number;
+  allTextContents(): string[];
   click(opts?: FetchOptions): Promise<NavResult>;
   fill(value: unknown): this;
   type(value: unknown): this;
@@ -280,12 +294,12 @@ export declare class Page {
   goForward(opts?: FetchOptions): Promise<NavResult | null>;
   locator(selector: string): Locator;
   getByRole(role: string, opts?: ByOptions): Locator;
-  getByText(text: string, opts?: ByOptions): Locator;
-  getByLabel(text: string, opts?: ByOptions): Locator;
-  getByPlaceholder(text: string, opts?: ByOptions): Locator;
+  getByText(text: string | RegExp, opts?: ByOptions): Locator;
+  getByLabel(text: string | RegExp, opts?: ByOptions): Locator;
+  getByPlaceholder(text: string | RegExp, opts?: ByOptions): Locator;
   getByTestId(testId: string): Locator;
-  getByAltText(text: string, opts?: ByOptions): Locator;
-  getByTitle(text: string, opts?: ByOptions): Locator;
+  getByAltText(text: string | RegExp, opts?: ByOptions): Locator;
+  getByTitle(text: string | RegExp, opts?: ByOptions): Locator;
   clickElement(el: object, opts?: FetchOptions): Promise<NavResult>;
   submitFromElement(el: object, opts?: FetchOptions): Promise<NavResult>;
   title(): string;
@@ -296,6 +310,7 @@ export declare class Page {
   html(): string;
   text(): string;
   accessibilityTree(): AxNode;
+  ariaSnapshot(): string;
   extract(schema: Schema): object;
   hydrationState(): HydrationState;
   evaluate(pageFunction: Function | string, ...args: unknown[]): unknown;

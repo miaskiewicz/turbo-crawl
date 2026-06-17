@@ -25,9 +25,9 @@ Start with [`../CLAUDE.md`](../CLAUDE.md) (working rules), [`../SPEC.md`](../SPE
 
 **Views & structured data**
 - [`markdown`](./modules/markdown.md) · [`ax`](./modules/ax.md) ·
-  [`text`](./modules/text.md) · [`schema`](./modules/schema.md) ·
-  [`query`](./modules/query.md) · [`xpath`](./modules/xpath.md) ·
-  [`hydration`](./modules/hydration.md)
+  [`aria-snapshot`](./modules/aria-snapshot.md) · [`text`](./modules/text.md) ·
+  [`schema`](./modules/schema.md) · [`query`](./modules/query.md) ·
+  [`xpath`](./modules/xpath.md) · [`hydration`](./modules/hydration.md)
 
 **JS-execution render tier (`src/render/`)**
 - [`render-index`](./modules/render-index.md) ·
@@ -40,7 +40,7 @@ Start with [`../CLAUDE.md`](../CLAUDE.md) (working rules), [`../SPEC.md`](../SPE
   [`render-isolate-polyfills`](./modules/render-isolate-polyfills.md)
 
 **Agent surfaces**
-- [`mcp`](./modules/mcp.md) — MCP server (53 tools, incl. `crawl`/`batch`,
+- [`mcp`](./modules/mcp.md) — MCP server (60 tools, incl. `crawl`/`batch`,
   `render`/`set_mode`, `eval_js`/`inject_js` + `latest_dom`/`dom_history`,
   cookies/headers, `snapshot`)
 - [`playwright-compat`](./modules/playwright-compat.md) — run Playwright scripts,

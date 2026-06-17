@@ -2,6 +2,8 @@
 // Pragmatic, no-layout heuristics — enough for getByRole/getByText resolution and
 // the agent view.
 
+import { textOf } from "./dom-ops.mjs";
+
 // Implicit ARIA role for common interactive/structural tags.
 const IMPLICIT_ROLE = {
   a: "link",
@@ -50,4 +52,31 @@ export function accessibleName(el) {
     () => el.getAttribute("value"),
     () => el.getAttribute("title"),
   ]);
+}
+
+// IDREF list of an attribute (e.g. aria-describedby="a b"), filtered to non-empty.
+function idList(el, attr) {
+  return (el.getAttribute(attr) ?? "").split(/\s+/).filter(Boolean);
+}
+
+// Concatenated trimmed text of the referenced elements, space-joined.
+function resolveIds(doc, ids) {
+  const els = ids.map((id) => doc.getElementById(id)).filter(Boolean);
+  return els
+    .map((e) => textOf(e))
+    .filter(Boolean)
+    .join(" ");
+}
+
+// Accessible description: aria-describedby targets, else the `title` attribute.
+export function accessibleDescription(el) {
+  const ids = idList(el, "aria-describedby");
+  if (ids.length) return resolveIds(el.ownerDocument, ids);
+  return (el.getAttribute("title") ?? "").trim();
+}
+
+// Accessible error message: aria-errormessage targets, only when aria-invalid.
+export function accessibleErrorMessage(el) {
+  if (el.getAttribute("aria-invalid") !== "true") return "";
+  return resolveIds(el.ownerDocument, idList(el, "aria-errormessage"));
 }

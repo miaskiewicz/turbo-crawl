@@ -7,7 +7,8 @@ launch the **same** turbo-crawl-backed pseudo-browser (there is no real browser)
 Genuinely pixel-only APIs throw a clear error pointing at the JS-execution tier.
 
 - `index.mjs` — browser/context/page shims + the three launcher aliases.
-- `expect.mjs` — a web-first assertions subset over a turbo-crawl Locator.
+- `expect.mjs` — a drop-in for `@playwright/test`'s `expect` over turbo-crawl
+  objects (see "`expect` assertions" below).
 - `net-events.mjs` — Playwright-shaped `PWRequest`/`PWResponse`/`PWConsoleMessage`
   + URL matchers built from the render tier's raw request/response records.
 - `storage.mjs` — `localStorage`/`sessionStorage` impl (Proxy over a Map) held at
@@ -26,7 +27,8 @@ Genuinely pixel-only APIs throw a clear error pointing at the JS-execution tier.
 ## Exports / API
 - `chromium`, `firefox`, `webkit` — all the same
   `browserType = { launch: async (opts) => new Browser(opts) }`.
-- `expect(locator) → LocatorAssertions` (re-exported from `expect.mjs`).
+- `expect(x)` — dispatches on `x` to locator/page/response/value assertions
+  (re-exported from `expect.mjs`; see below).
 - `PWPage`, `Browser`, `BrowserContext` (classes, for advanced use).
 
 ```js
@@ -71,6 +73,33 @@ const [resp] = await Promise.all([
 - No-op emulation: `emulateMedia`, `setViewportSize`, `bringToFront`,
   `waitForLoadState`/`waitForTimeout`/`waitForURL`.
 - Pixel-only → throw `jsTier`: `screenshot`, `pdf`, `hover`.
+
+### `expect` assertions (`expect.mjs`)
+A drop-in for `@playwright/test`'s `expect` — necessary because that `expect`
+brand-rejects a non-Playwright `Locator`. `expect(x)` dispatches by argument type:
+- **`Locator`** → `LocatorAssertions`: `toBeAttached`/`toBeVisible`/`toBeHidden`/
+  `toBeEnabled`/`toBeDisabled`/`toBeEditable`/`toBeChecked`/`toBeEmpty`/
+  `toBeFocused`/`toBeInViewport`, `toHaveText`/`toContainText`/`toHaveValue`/
+  `toHaveValues`/`toHaveCount`/`toHaveId`/`toHaveRole`/`toHaveClass`/
+  `toContainClass`/`toHaveCSS`/`toHaveAttribute`/`toHaveAccessibleName`/
+  `toHaveAccessibleDescription`/`toHaveAccessibleErrorMessage`/`toHaveJSProperty`/
+  `toMatchAriaSnapshot`.
+- **`PWPage`** (duck-typed `title()`+`url()`) → `PageAssertions`: `toHaveTitle`,
+  `toHaveURL` (string/RegExp/predicate), `toMatchAriaSnapshot`.
+- **`PWResponse`** → `APIResponseAssertions`: `toBeOK`.
+- **anything else** → generic jest-style value matchers (`toBe`, `toEqual`,
+  `toMatchObject`, `toThrow`, `.resolves`/`.rejects`, …).
+
+Every class supports `.not`; string/RegExp/array argument forms match Playwright.
+Matchers run **once** (no auto-retry — the static DOM doesn't change). Statics:
+`expect.extend`, `expect.poll`, `expect.configure`, `expect.soft` (no deferred
+aggregation without a runner — throws like `expect`).
+
+`toHaveCSS` reads turbo-dom's real computed-style cascade; `toBeInViewport` uses its
+(approximate) geometry; `toMatchAriaSnapshot` is a structural role/name *subset*
+match via `src/aria-snapshot.mjs`. **Only the pixel matchers throw** a pointed
+error: `toHaveScreenshot`/`toMatchSnapshot` (no rasterizing renderer — same reason
+`screenshot()`/`pdf()` throw).
 
 ### Shapes (`net-events.mjs`)
 - `PWRequest` — `url()`, `method()`, `headers()`, `postData()`, `resourceType()`.

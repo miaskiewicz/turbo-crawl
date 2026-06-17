@@ -11,8 +11,11 @@ runtime; no Playwright at runtime. See [SPEC.md](./SPEC.md) for the design and
   `extract(schema)`, `query(css|xpath)`, `hydrationState`, cascade visibility,
   `evaluate`/`$eval`/`$$eval`.
 - **Locators (Playwright-style)**: `locator(css)`, `getByRole/Text/Label/
-  Placeholder/TestId/AltText/Title`, `first/last/nth/filter/count`, accessors,
-  and actions (`click/fill/check/uncheck/selectOption/press/type`).
+  Placeholder/TestId/AltText/Title` (string **or RegExp** name/text — colon
+  `useId()` ids handled), `first/last/nth/filter/count`, accessors (incl.
+  `isEditable/isFocused/isEmpty/ariaRole/accessibleName/accessibleDescription/
+  selectedValues/jsProperty`), and actions (`click/fill/check/uncheck/
+  selectOption/press/type`).
 - **Interaction (no JS)**: link/form graph — GET + POST (urlencoded **and**
   multipart) form synthesis; JS-only handlers surfaced honestly (inert, throw).
 - **Networking**: `fetchHtml` over undici — redirects (auto + opt-in manual cap),
@@ -29,22 +32,31 @@ runtime; no Playwright at runtime. See [SPEC.md](./SPEC.md) for the design and
     scripts on turbo-dom and extracts from the rendered DOM. `secure` =
     isolated-vm + turbo-dom **WASM** (true V8 isolate; open-web/hostile-safe);
     `fast` = in-process `node:vm` + native parser (local/trusted).
-- **Agent surface**: MCP server, **33 tools** (navigation, views, locators by
-  selector/role/text, actions, accessors, `evaluate`, history, UA).
+- **Agent surface**: MCP server, **60 tools** (navigation, views incl.
+  `aria_snapshot`, locators by selector/role/text, actions, accessors incl.
+  `is_editable/is_focused/is_empty/aria_role/accessible_name/
+  accessible_description`, `evaluate`, history, UA).
 
 ## Playwright
 
 - **Runtime: not a dependency.** Compatibility façade
   (`@miaskiewicz/turbo-crawl/playwright`) runs existing Playwright scripts on the
-  no-JS engine — `chromium.launch()`→pseudo-browser, locators, actions, `expect`,
+  no-JS engine — `chromium.launch()`→pseudo-browser, locators, actions,
   `evaluate`/`$eval`/`$$eval`. Pixel/render-only APIs (`screenshot/pdf/route/
   hover`) throw a clear "no-JS engine" error.
+- **`expect(...)` is a drop-in** for `@playwright/test`'s `expect` (which
+  brand-rejects a foreign `Locator`): dispatches across Locator / Page /
+  APIResponse / generic-value assertions, full matcher surface, `.not`, RegExp +
+  array forms, `expect.extend/poll/configure/soft`. `toHaveCSS` reads the real
+  CSSOM cascade, `toBeInViewport` uses turbo-dom geometry, `toMatchAriaSnapshot`
+  is a structural subset match; only the pixel matchers
+  (`toHaveScreenshot`/`toMatchSnapshot`) throw (no rasterizer).
 - **Dev only**: real Playwright is a devDependency used solely by the differential
   test (`test/differential.test.mjs`, auto-skips without the browser).
 
 ## Quality gates
 
-- **~240 tests**, ~100% line coverage of `src/**` (the optional secure render
+- **~365 tests**, ~100% line coverage of `src/**` (the optional secure render
   backend has one unreachable isolate-boot guard line). `npm run check` =
   oxlint (0/0) + biome + cc-check (**cc < 6**) + tsgo + tests; same in pre-commit.
 - Benchmarks: full agent view ~2.5k pages/s, links ~18k/s, crawl ~14k pages/s.
