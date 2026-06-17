@@ -1,6 +1,6 @@
 {
   "name": "@miaskiewicz/turbo-crawl",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Native-speed, browserless web crawler for AI agents — fetch + parse + extract on turbo-dom, no headless browser. Indexed interactive elements, link graph, accessibility tree, markdown, structured extraction, and an MCP interface.",
   "license": "MIT",
   "type": "module",
