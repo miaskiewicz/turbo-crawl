@@ -93,6 +93,28 @@ npx turbo-crawl-mcp          # stdio MCP server: goto, interactive_elements, cli
 
 Or embed: `import { createServer } from "@miaskiewicz/turbo-crawl/mcp"`.
 
+## Run Playwright scripts (no browser)
+
+Drop-in compatibility layer so existing Playwright scripts run on the no-JS
+engine — **nothing loads playwright or chromium**:
+
+```js
+import { chromium, expect } from "@miaskiewicz/turbo-crawl/playwright";
+
+const browser = await chromium.launch();
+const page = await browser.newPage();
+await page.goto("https://example.com");
+await page.getByLabel("Search").fill("widgets");
+await page.getByRole("button", { name: "Go" }).click();
+await expect(page.getByText("Results")).toBeVisible();
+```
+
+Locators (`getByRole/Text/Label/Placeholder/TestId/AltText/Title`, `locator(css)`,
+`first/last/nth/filter/count`), actions (`click/fill/check/uncheck/selectOption/
+press/type`), accessors, history (`goBack/goForward/reload`), and `expect(...)`
+web-first assertions all work. JS-only APIs (`evaluate`, `screenshot`, `route`,
+`hover`, …) throw a clear "needs the JS-execution tier" error.
+
 ## JS-gated pages — no browser
 
 turbo-crawl ships **no browser**. For pages that need JavaScript:

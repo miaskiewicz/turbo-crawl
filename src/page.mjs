@@ -9,12 +9,20 @@ import { accessibilityTree } from "./ax.mjs";
 import { CookieJar } from "./cookies.mjs";
 import { interactiveElements, links } from "./extract.mjs";
 import { extractHydrationState } from "./hydration.mjs";
+import { byAttrText, byCss, byLabel, byRole, byText, Locator } from "./locator.mjs";
 import { markdown } from "./markdown.mjs";
 import { fetchHtml } from "./net.mjs";
 import { query } from "./query.mjs";
 import { extractSchema } from "./schema.mjs";
 import { text } from "./text.mjs";
 import { isHttpUrl, resolve } from "./url.mjs";
+
+// Resolved href of an <a> element against the current page, or null.
+function anchorHref(el, base) {
+  if (el.tagName.toLowerCase() !== "a") return null;
+  const raw = el.getAttribute("href");
+  return raw ? (resolve(base, raw) ?? raw) : null;
+}
 
 // A click activates a form submit when the element is a submit input or a
 // <button> that is not an explicit type="button".
@@ -40,6 +48,8 @@ export class Page {
   #url = null;
   #status = 0;
   #snapshot = null; // last interactiveElements() result: index → record (with .ref)
+  #history = []; // visited URLs for back/forward
+  #histIndex = -1;
 
   /**
    * @param {object} [opts]
@@ -123,7 +133,8 @@ export class Page {
   }
 
   // Apply a fetched response to the env. Shared by goto/follow/submit.
-  #load({ html, finalUrl, status }) {
+  // `mode`: "push" (normal nav) | "replace" (reload) | "none" (back/forward).
+  #load({ html, finalUrl, status }, mode = "push") {
     if (this.#env) this.#env.reset(html);
     else this.#env = createEnvironment(html);
     // Bridge the session jar into the DOM so page-side document.cookie reads are
@@ -134,7 +145,19 @@ export class Page {
     this.#url = finalUrl;
     this.#status = status;
     this.#snapshot = null;
+    this.#recordHistory(finalUrl, mode);
     return { status, url: finalUrl, title: this.title() };
+  }
+
+  #recordHistory(url, mode) {
+    if (mode === "none") return;
+    if (mode === "replace") {
+      this.#history[this.#histIndex] = url;
+      return;
+    }
+    this.#history = this.#history.slice(0, this.#histIndex + 1);
+    this.#history.push(url);
+    this.#histIndex = this.#history.length - 1;
   }
 
   /** Follow an (absolute or relative) href against the current page. */
@@ -142,6 +165,25 @@ export class Page {
     const abs = resolve(this.#url, href);
     if (!abs || !isHttpUrl(abs)) throw new Error(`turbo-crawl: not a navigable URL: ${href}`);
     return this.goto(abs, opts);
+  }
+
+  /** Re-fetch the current URL (replaces the history entry). */
+  async reload(opts = {}) {
+    return this.#load(await this.#fetch(this.#url, opts), "replace");
+  }
+
+  /** Navigate to the previous history entry, or null if at the start. */
+  async goBack(opts = {}) {
+    if (this.#histIndex <= 0) return null;
+    this.#histIndex--;
+    return this.#load(await this.#fetch(this.#history[this.#histIndex], opts), "none");
+  }
+
+  /** Navigate to the next history entry, or null if at the end. */
+  async goForward(opts = {}) {
+    if (this.#histIndex >= this.#history.length - 1) return null;
+    this.#histIndex++;
+    return this.#load(await this.#fetch(this.#history[this.#histIndex], opts), "none");
   }
 
   // --- queries --------------------------------------------------------------
@@ -166,9 +208,8 @@ export class Page {
   }
 
   /**
-   * Serialized HTML of the current DOM. In Lane A this is the fetched/parsed
-   * markup; behind the Playwright adapter (Lane B) it is the *rendered* DOM after
-   * the page's init JS has run — so an SPA shell comes back fully populated.
+   * Serialized HTML of the current DOM (the fetched/parsed markup; once the
+   * JS-execution tier lands, the rendered DOM after page scripts run).
    */
   html() {
     const root = this.document.documentElement;
@@ -215,6 +256,37 @@ export class Page {
     return query(this.document, selector, opts);
   }
 
+  // --- locators (Playwright-style addressing) -------------------------------
+
+  /** Locator for a CSS selector. */
+  locator(selector) {
+    return new Locator(this, byCss(selector));
+  }
+  /** Locator by ARIA role, optionally filtered by accessible name. */
+  getByRole(role, opts) {
+    return new Locator(this, byRole(role, opts));
+  }
+  /** Locator by (innermost) visible text. */
+  getByText(text, opts) {
+    return new Locator(this, byText(text, opts));
+  }
+  /** Locator for the control associated with a <label>. */
+  getByLabel(text, opts) {
+    return new Locator(this, byLabel(text, opts));
+  }
+  getByPlaceholder(text, opts) {
+    return new Locator(this, byAttrText("placeholder", text, opts));
+  }
+  getByTestId(testId) {
+    return new Locator(this, byCss(`[data-testid="${testId}"]`));
+  }
+  getByAltText(text, opts) {
+    return new Locator(this, byAttrText("alt", text, opts));
+  }
+  getByTitle(text, opts) {
+    return new Locator(this, byAttrText("title", text, opts));
+  }
+
   // --- interaction (SPEC §6) ------------------------------------------------
 
   #record(i) {
@@ -239,15 +311,27 @@ export class Page {
   async click(i, opts = {}) {
     const rec = this.#record(i);
     if (rec.href) return this.goto(rec.href, opts);
+    return this.clickElement(this.#node(rec), opts);
+  }
 
-    const el = this.#node(rec);
-    if (isSubmitControl(el)) {
-      const form = el.closest("form");
-      if (form) return this.#submitForm(form, el, opts);
-    }
-    throw new Error(
-      `turbo-crawl: element [${i}] is inert in Lane A (no native navigation; jsHandler=${rec.jsHandler})`,
-    );
+  /**
+   * Activate a DOM element (locator-backing): <a href> navigates, submit controls
+   * submit their owning form, anything else is inert in Lane A → throws.
+   */
+  async clickElement(el, opts = {}) {
+    const href = anchorHref(el, this.#url);
+    if (href) return this.goto(href, opts);
+    const form = isSubmitControl(el) ? el.closest("form") : null;
+    if (form) return this.#submitForm(form, el, opts);
+    throw new Error("turbo-crawl: element is inert in Lane A (no native navigation)");
+  }
+
+  /** Submit the form owning `el` (used by click + locator.press). */
+  async submitFromElement(el, opts = {}) {
+    const form = el.closest("form");
+    if (!form) throw new Error("turbo-crawl: element has no owning form");
+    const submitter = isSubmitControl(el) ? el : undefined;
+    return this.#submitForm(form, submitter, opts);
   }
 
   /** Set the value of form control `i` in the COW overlay (no navigation). */

@@ -5,6 +5,7 @@
 // Phase 0: interactiveElements() + links(). markdown() / accessibilityTree() and
 // cascade-based visibility land in Phase 1.
 
+import { accessibleName, implicitRole } from "./aria.mjs";
 import { isHttpUrl, resolve } from "./url.mjs";
 import { isVisible } from "./visible.mjs";
 
@@ -24,49 +25,6 @@ const INTERACTIVE_SELECTOR = [
   "[tabindex]",
   "[onclick]",
 ].join(",");
-
-// Implicit ARIA role for the common interactive tags (enough for Phase 0).
-const IMPLICIT_ROLE = {
-  a: "link",
-  button: "button",
-  select: "combobox",
-  textarea: "textbox",
-};
-
-// Implicit role for <input> keyed by its `type` (default → textbox).
-const INPUT_ROLE = {
-  checkbox: "checkbox",
-  radio: "radio",
-  button: "button",
-  submit: "button",
-  reset: "button",
-};
-
-function implicitRole(tag, type) {
-  if (tag === "input") return INPUT_ROLE[type] ?? "textbox";
-  return IMPLICIT_ROLE[tag] ?? "generic";
-}
-
-// First trimmed, non-empty string produced by one of the candidate getters.
-function firstNonEmpty(getters) {
-  for (const get of getters) {
-    const v = get();
-    const t = v == null ? "" : v.trim();
-    if (t) return t;
-  }
-  return "";
-}
-
-// Accessible name, cheap heuristic: aria-label > text > placeholder > value > title.
-function accessibleName(el) {
-  return firstNonEmpty([
-    () => el.getAttribute("aria-label"),
-    () => el.textContent,
-    () => el.getAttribute("placeholder"),
-    () => el.getAttribute("value"),
-    () => el.getAttribute("title"),
-  ]);
-}
 
 /**
  * Index the page's interactive elements into stable `[i]`-addressable records.

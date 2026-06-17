@@ -4,6 +4,33 @@
 // Each handler returns a plain JSON-able result; the SDK layer wraps it as tool
 // output. A handler throwing surfaces as an MCP tool error.
 
+import { textOf } from "../src/dom-ops.mjs";
+
+// getBy* resolvers exposed to agents by `kind`.
+const GET_BY = {
+  role: (page, v, name) => page.getByRole(v, { name }),
+  text: (page, v) => page.getByText(v),
+  label: (page, v) => page.getByLabel(v),
+  placeholder: (page, v) => page.getByPlaceholder(v),
+  testid: (page, v) => page.getByTestId(v),
+  alttext: (page, v) => page.getByAltText(v),
+  title: (page, v) => page.getByTitle(v),
+};
+
+function resolveBy(page, kind, value, name) {
+  const make = GET_BY[kind];
+  if (!make)
+    throw new Error(
+      `unknown get_by kind: ${kind} (role|text|label|placeholder|testid|alttext|title)`,
+    );
+  return make(page, value, name);
+}
+
+// JSON-safe summary of a matched element (no live node).
+function elementSummary(el) {
+  return { html: el.outerHTML ?? "", text: textOf(el) };
+}
+
 // Drop the live DOM `node` from query results — it isn't JSON-serializable.
 function stripNodes(result) {
   if (Array.isArray(result)) return result.map(stripNodes);
@@ -45,8 +72,7 @@ export function buildTools(page) {
     },
     {
       name: "html",
-      description:
-        "Return the page's serialized HTML (the rendered DOM behind the Playwright adapter).",
+      description: "Return the page's serialized HTML (the current DOM).",
       handler: () => page.html(),
     },
     {
@@ -93,6 +119,71 @@ export function buildTools(page) {
       description:
         "Query nodes by CSS selector or XPath; returns matched subtree(s) as { html, text } (node ref omitted over MCP). type: auto|css|xpath, first: boolean.",
       handler: ({ selector, type, first }) => stripNodes(page.query(selector, { type, first })),
+    },
+    {
+      name: "get_by",
+      description:
+        "Resolve elements Playwright-style by kind (role|text|label|placeholder|testid|alttext|title) + value (+ optional name for role). Returns matches as { html, text }.",
+      handler: ({ kind, value, name }) =>
+        resolveBy(page, kind, value, name).elements().map(elementSummary),
+    },
+    {
+      name: "click_selector",
+      description:
+        "Click the first element matching a CSS selector. Returns the new { status, url }.",
+      handler: ({ selector }) => page.locator(selector).first().click(),
+    },
+    {
+      name: "fill_selector",
+      description: "Fill the first form control matching a CSS selector. Returns an ack.",
+      handler: ({ selector, value }) => {
+        page.locator(selector).first().fill(value);
+        return { ok: true };
+      },
+    },
+    {
+      name: "select_option",
+      description: "Select an <option> (by value or label) of the <select> matching a selector.",
+      handler: ({ selector, value }) => {
+        page.locator(selector).first().selectOption(value);
+        return { ok: true };
+      },
+    },
+    {
+      name: "check",
+      description: "Check the checkbox/radio matching a selector.",
+      handler: ({ selector }) => {
+        page.locator(selector).first().check();
+        return { ok: true };
+      },
+    },
+    {
+      name: "uncheck",
+      description: "Uncheck the checkbox matching a selector.",
+      handler: ({ selector }) => {
+        page.locator(selector).first().uncheck();
+        return { ok: true };
+      },
+    },
+    {
+      name: "get_attribute",
+      description: "Get an attribute of the first element matching a selector.",
+      handler: ({ selector, name }) => page.locator(selector).first().getAttribute(name),
+    },
+    {
+      name: "go_back",
+      description: "Navigate back in history. Returns { status, url } or null at the start.",
+      handler: () => page.goBack(),
+    },
+    {
+      name: "go_forward",
+      description: "Navigate forward in history. Returns { status, url } or null at the end.",
+      handler: () => page.goForward(),
+    },
+    {
+      name: "reload",
+      description: "Reload the current page. Returns { status, url }.",
+      handler: () => page.reload(),
     },
   ];
 }

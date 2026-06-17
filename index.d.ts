@@ -139,6 +139,35 @@ export interface NavResult {
   url: string;
   title: string;
 }
+
+export interface ByOptions {
+  name?: string;
+  exact?: boolean;
+}
+export declare class Locator {
+  elements(): object[];
+  count(): number;
+  first(): Locator;
+  last(): Locator;
+  nth(n: number): Locator;
+  filter(opts?: { hasText?: string }): Locator;
+  locator(selector: string): Locator;
+  textContent(): string;
+  innerText(): string;
+  innerHTML(): string;
+  getAttribute(name: string): string | null;
+  inputValue(): string;
+  isVisible(): boolean;
+  isEnabled(): boolean;
+  isChecked(): boolean;
+  click(opts?: FetchOptions): Promise<NavResult>;
+  fill(value: unknown): this;
+  type(value: unknown): this;
+  check(): this;
+  uncheck(): this;
+  selectOption(value: string): this;
+  press(): Promise<NavResult>;
+}
 export interface NavigatorOverrides {
   userAgent?: string;
   platform?: string;
@@ -165,6 +194,19 @@ export declare class Page {
   setUserAgent(userAgent: string): this;
   goto(url: string, opts?: FetchOptions): Promise<NavResult>;
   follow(href: string, opts?: FetchOptions): Promise<NavResult>;
+  reload(opts?: FetchOptions): Promise<NavResult>;
+  goBack(opts?: FetchOptions): Promise<NavResult | null>;
+  goForward(opts?: FetchOptions): Promise<NavResult | null>;
+  locator(selector: string): Locator;
+  getByRole(role: string, opts?: ByOptions): Locator;
+  getByText(text: string, opts?: ByOptions): Locator;
+  getByLabel(text: string, opts?: ByOptions): Locator;
+  getByPlaceholder(text: string, opts?: ByOptions): Locator;
+  getByTestId(testId: string): Locator;
+  getByAltText(text: string, opts?: ByOptions): Locator;
+  getByTitle(text: string, opts?: ByOptions): Locator;
+  clickElement(el: object, opts?: FetchOptions): Promise<NavResult>;
+  submitFromElement(el: object, opts?: FetchOptions): Promise<NavResult>;
   title(): string;
   interactiveElements(): InteractiveElement[];
   links(): string[];

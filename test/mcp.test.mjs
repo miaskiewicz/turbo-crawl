@@ -36,9 +36,29 @@ describe("MCP handlers (Page API 1:1)", () => {
       "extract",
       "hydration_state",
       "query",
+      "get_by",
+      "click_selector",
+      "fill_selector",
+      "select_option",
+      "check",
+      "uncheck",
+      "get_attribute",
+      "go_back",
+      "go_forward",
+      "reload",
     ]) {
       assert.ok(map.has(name), `missing tool ${name}`);
     }
+  });
+
+  it("get_by + click_selector + get_attribute work over MCP", async () => {
+    const { call } = tools();
+    await call("goto", { url: HOME });
+    const byText = await call("get_by", { kind: "text", value: "Widget" });
+    assert.ok(byText.some((m) => m.text === "Widget" && m.html.includes("/p/1")));
+    assert.equal(await call("get_attribute", { selector: "a", name: "href" }), "/p/1");
+    const after = await call("click_selector", { selector: "a" });
+    assert.equal(after.url, PRODUCT);
   });
 
   it("drives goto → links → click → extract end to end", async () => {

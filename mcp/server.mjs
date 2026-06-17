@@ -40,6 +40,43 @@ const INPUT_SCHEMAS = {
     },
     required: ["selector"],
   },
+  get_by: {
+    type: "object",
+    properties: {
+      kind: {
+        type: "string",
+        enum: ["role", "text", "label", "placeholder", "testid", "alttext", "title"],
+      },
+      value: { type: "string" },
+      name: { type: "string" },
+    },
+    required: ["kind", "value"],
+  },
+  click_selector: {
+    type: "object",
+    properties: { selector: { type: "string" } },
+    required: ["selector"],
+  },
+  fill_selector: {
+    type: "object",
+    properties: { selector: { type: "string" }, value: { type: "string" } },
+    required: ["selector", "value"],
+  },
+  select_option: {
+    type: "object",
+    properties: { selector: { type: "string" }, value: { type: "string" } },
+    required: ["selector", "value"],
+  },
+  check: { type: "object", properties: { selector: { type: "string" } }, required: ["selector"] },
+  uncheck: { type: "object", properties: { selector: { type: "string" } }, required: ["selector"] },
+  get_attribute: {
+    type: "object",
+    properties: { selector: { type: "string" }, name: { type: "string" } },
+    required: ["selector", "name"],
+  },
+  go_back: { type: "object", properties: {} },
+  go_forward: { type: "object", properties: {} },
+  reload: { type: "object", properties: {} },
 };
 
 /**
