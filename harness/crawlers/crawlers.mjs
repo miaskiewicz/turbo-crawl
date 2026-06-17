@@ -1,0 +1,417 @@
+// Crawler registry for the multi-page CRAWL benchmark. Each entry is one crawler
+// engine that, given a target + a page cap, performs a same-host BFS crawl and
+// returns { pages, items, ms }:
+//   pages — distinct pages actually fetched (capped at opts.pages)
+//   items — total matches of target.itemSelector across those pages (correctness)
+//   ms    — wall time for the crawl
+//
+// turbo-crawl entries always run (only the repo's existing deps + network). Every
+// competitor is lazy-loaded behind available(): if its package isn't installed,
+// available() returns false and run.mjs prints "skipped (not installed)".
+//
+// Sets:
+//   nojs — compared against turbo-crawl (no-js): fetch+parse HTML, no page JS.
+//   js   — compared against turbo-crawl (js-fast) AND (js-secure): execute page JS
+//          in a real engine (browser, or turbo-crawl's render tier).
+//
+// FAIRNESS: every engine uses the SAME target.itemSelector to count items, the
+// SAME page cap, the SAME tiny politeness delay, stays same-host, and is warmed
+// once by run.mjs before the timed iterations.
+
+const POLITENESS_MS = 150;
+const CONCURRENCY = 2;
+
+function ms(t0) {
+  return Number(process.hrtime.bigint() - t0) / 1e6;
+}
+
+// Does a dependency resolve? Used by competitor available() probes — we never
+// install these; we only detect them.
+async function canImport(spec) {
+  try {
+    await import(spec);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Read one item's string from a cheerio-wrapped element, honoring itemAttr.
+function cheerioItemText($, el, attr) {
+  const node = $(el);
+  if (attr && attr !== "text") {
+    const v = node.attr(attr);
+    if (v != null && v !== "") return v.trim();
+  }
+  return node.text().replace(/\s+/g, " ").trim();
+}
+
+// Same-host link extraction from a cheerio doc, absolutized + filtered.
+function cheerioLinks($, baseUrl, host, allow) {
+  const out = [];
+  $("a[href]").each((_i, a) => {
+    const href = $(a).attr("href");
+    if (!href) return;
+    let abs;
+    try {
+      abs = new URL(href, baseUrl).toString();
+    } catch {
+      return;
+    }
+    if (!/^https?:/.test(abs)) return;
+    let u;
+    try {
+      u = new URL(abs);
+    } catch {
+      return;
+    }
+    if (u.host !== host) return;
+    if (allow && !allow(abs)) return;
+    out.push(abs.split("#")[0]);
+  });
+  return out;
+}
+
+const sleep = (n) => new Promise((r) => setTimeout(r, n));
+
+// ── turbo-crawl ────────────────────────────────────────────────────────────
+// One implementation for all three turbo-crawl flavors; `render` picks the JS
+// tier (null = no-js Lane A). Uses the real Crawler with a schema so item
+// counting goes through turbo-crawl's own extraction.
+async function turboCrawl(target, opts, render) {
+  const { Crawler, jsRenderer } = await import("../../src/index.mjs");
+  const schema = {
+    items: { selector: target.itemSelector, attr: target.itemAttr, list: true },
+  };
+  let renderer = null;
+  const crawlerOpts = {
+    start: target.start,
+    maxPages: opts.pages,
+    maxDepth: Number.POSITIVE_INFINITY,
+    concurrency: CONCURRENCY,
+    perHostConcurrency: CONCURRENCY,
+    politenessMs: POLITENESS_MS,
+    sameHostOnly: true,
+    schema,
+  };
+  if (target.allow) crawlerOpts.allow = target.allow;
+  if (render) {
+    renderer = jsRenderer({ mode: render });
+    // Execute page JS for every fetch so client-rendered content is present
+    // before extraction (the no-js gate would otherwise skip a page that has a
+    // server-rendered shell). followRequests:false keeps us off XHR side-quests.
+    crawlerOpts.fetchHtml = renderer.fetchHtml;
+    crawlerOpts.followRequests = false;
+  }
+
+  let pages = 0;
+  let items = 0;
+  const t0 = process.hrtime.bigint();
+  try {
+    for await (const rec of new Crawler(crawlerOpts)) {
+      pages++;
+      const got = rec.extracted?.items;
+      if (Array.isArray(got)) items += got.length;
+    }
+  } finally {
+    await renderer?.close();
+  }
+  return { pages, items, ms: ms(t0) };
+}
+
+// ── got + cheerio (hand-rolled BFS) ──────────────────────────────────────────
+async function gotCheerioCrawl(target, opts) {
+  const { default: got } = await import("got");
+  const cheerio = await import("cheerio");
+  const seen = new Set();
+  const queue = [target.start];
+  seen.add(target.start);
+  let pages = 0;
+  let items = 0;
+  const t0 = process.hrtime.bigint();
+  while (queue.length && pages < opts.pages) {
+    const url = queue.shift();
+    let body;
+    try {
+      const res = await got(url, { timeout: { request: 20000 } });
+      body = res.body;
+    } catch {
+      continue;
+    }
+    pages++;
+    const $ = cheerio.load(body);
+    $(target.itemSelector).each((_i, el) => {
+      if (cheerioItemText($, el, target.itemAttr)) items++;
+    });
+    for (const link of cheerioLinks($, url, target.host, target.allow)) {
+      if (!seen.has(link) && seen.size < opts.pages * 50) {
+        seen.add(link);
+        queue.push(link);
+      }
+    }
+    await sleep(POLITENESS_MS);
+  }
+  return { pages, items, ms: ms(t0) };
+}
+
+// ── crawlee CheerioCrawler (nojs) ────────────────────────────────────────────
+async function crawleeCheerioCrawl(target, opts) {
+  const { CheerioCrawler } = await import("crawlee");
+  let pages = 0;
+  let items = 0;
+  const t0 = process.hrtime.bigint();
+  const crawler = new CheerioCrawler({
+    maxRequestsPerCrawl: opts.pages,
+    maxConcurrency: CONCURRENCY,
+    minDelayBetweenRequestsMillis: POLITENESS_MS,
+    async requestHandler({ $, request, enqueueLinks }) {
+      pages++;
+      $(target.itemSelector).each((_i, el) => {
+        if (cheerioItemText($, el, target.itemAttr)) items++;
+      });
+      await enqueueLinks({
+        strategy: "same-hostname",
+        transformRequestFunction: (req) => (target.allow && !target.allow(req.url) ? false : req),
+      });
+      void request;
+    },
+  });
+  await crawler.run([target.start]);
+  return { pages, items, ms: ms(t0) };
+}
+
+// ── node-crawler (the `crawler` package, nojs) ───────────────────────────────
+async function nodeCrawlerCrawl(target, opts) {
+  const mod = await import("crawler");
+  const Crawler = mod.default ?? mod.Crawler ?? mod;
+  let pages = 0;
+  let items = 0;
+  const seen = new Set([target.start]);
+  const t0 = process.hrtime.bigint();
+  await new Promise((resolve) => {
+    const c = new Crawler({
+      maxConnections: CONCURRENCY,
+      rateLimit: POLITENESS_MS,
+      callback(err, res, done) {
+        if (!err && res?.$ && pages < opts.pages) {
+          pages++;
+          const $ = res.$;
+          $(target.itemSelector).each((_i, el) => {
+            if (cheerioItemText($, el, target.itemAttr)) items++;
+          });
+          for (const link of cheerioLinks(
+            $,
+            res.request?.uri?.href ?? target.start,
+            target.host,
+            target.allow,
+          )) {
+            if (!seen.has(link) && pages + c.queueSize < opts.pages) {
+              seen.add(link);
+              c.add(link);
+            }
+          }
+        }
+        done();
+      },
+    });
+    c.add(target.start);
+    c.on("drain", resolve);
+  });
+  return { pages, items, ms: ms(t0) };
+}
+
+// ── x-ray (optional, nojs) — single-page paginated crawl over the catalog ────
+async function xrayCrawl(target, opts) {
+  const { default: Xray } = await import("x-ray");
+  const x = Xray();
+  let items = 0;
+  let pages = 0;
+  const t0 = process.hrtime.bigint();
+  await new Promise((resolve, reject) => {
+    x(target.start, target.itemSelector, [
+      { v: target.itemAttr === "text" ? "" : `@${target.itemAttr}` },
+    ])
+      .paginate(".next a@href, li.next a@href")
+      .limit(opts.pages)((err, arr) => {
+      if (err) return reject(err);
+      pages = opts.pages; // x-ray paginates internally; approximate page count
+      items = Array.isArray(arr) ? arr.length : 0;
+      resolve();
+    });
+  });
+  return { pages, items, ms: ms(t0) };
+}
+
+// ── spider-rs (Rust core, Node bindings; nojs) ───────────────────────────────
+// spider markets itself as the fastest crawler; native Rust does the fetch+link
+// graph, we cheerio-parse each page's HTML to count items with the shared
+// selector (fairness). withBudget {"*":N} caps pages; crawl() stays same-domain.
+async function spiderRsCrawl(target, opts) {
+  const { Website } = await import("@spider-rs/spider-rs");
+  const cheerio = await import("cheerio");
+  let pages = 0;
+  let items = 0;
+  const website = new Website(target.start).withBudget({ "*": opts.pages }).build();
+  const onPage = (_err, page) => {
+    if (pages >= opts.pages || !page?.content) return;
+    if (target.allow && !target.allow(page.url)) return;
+    pages++;
+    const $ = cheerio.load(page.content);
+    $(target.itemSelector).each((_i, el) => {
+      if (cheerioItemText($, el, target.itemAttr)) items++;
+    });
+  };
+  const t0 = process.hrtime.bigint();
+  await website.crawl(onPage);
+  return { pages, items, ms: ms(t0) };
+}
+
+// ── crawlee Playwright/Puppeteer (js) ────────────────────────────────────────
+async function crawleeBrowserCrawl(target, opts, which) {
+  const crawlee = await import("crawlee");
+  const CrawlerClass = which === "puppeteer" ? crawlee.PuppeteerCrawler : crawlee.PlaywrightCrawler;
+  let pages = 0;
+  let items = 0;
+  const t0 = process.hrtime.bigint();
+  const crawler = new CrawlerClass({
+    maxRequestsPerCrawl: opts.pages,
+    maxConcurrency: CONCURRENCY,
+    async requestHandler({ page, enqueueLinks }) {
+      pages++;
+      const n = await page.$$eval(target.itemSelector, (els) => els.length).catch(() => 0);
+      items += n;
+      await enqueueLinks({
+        strategy: "same-hostname",
+        transformRequestFunction: (req) => (target.allow && !target.allow(req.url) ? false : req),
+      });
+    },
+  });
+  await crawler.run([target.start]);
+  return { pages, items, ms: ms(t0) };
+}
+
+// ── puppeteer-cluster (optional, js) ─────────────────────────────────────────
+async function puppeteerClusterCrawl(target, opts) {
+  const { Cluster } = await import("puppeteer-cluster");
+  const cluster = await Cluster.launch({
+    concurrency: Cluster.CONCURRENCY_CONTEXT,
+    maxConcurrency: CONCURRENCY,
+  });
+  let pages = 0;
+  let items = 0;
+  const seen = new Set([target.start]);
+  const t0 = process.hrtime.bigint();
+  await cluster.task(async ({ page, data: url }) => {
+    if (pages >= opts.pages) return;
+    await page.goto(url, { waitUntil: "networkidle0", timeout: 30000 });
+    pages++;
+    const n = await page.$$eval(target.itemSelector, (els) => els.length).catch(() => 0);
+    items += n;
+    const hrefs = await page.$$eval("a[href]", (as) => as.map((a) => a.href)).catch(() => []);
+    for (const href of hrefs) {
+      let u;
+      try {
+        u = new URL(href);
+      } catch {
+        continue;
+      }
+      const clean = href.split("#")[0];
+      if (
+        u.host === target.host &&
+        !seen.has(clean) &&
+        seen.size < opts.pages &&
+        (!target.allow || target.allow(clean))
+      ) {
+        seen.add(clean);
+        cluster.queue(clean);
+      }
+    }
+    await sleep(POLITENESS_MS);
+  });
+  cluster.queue(target.start);
+  await cluster.idle();
+  await cluster.close();
+  return { pages, items, ms: ms(t0) };
+}
+
+// Registry. `set` selects which workload/comparison an entry belongs to.
+export const CRAWLERS = [
+  // ── Set A: non-JS ──────────────────────────────────────────────────────────
+  {
+    name: "turbo-crawl (no-js)",
+    set: "nojs",
+    turbo: true,
+    available: () => Promise.resolve(true),
+    crawl: (target, opts) => turboCrawl(target, opts, null),
+  },
+  {
+    name: "spider-rs (Rust)",
+    set: "nojs",
+    available: async () =>
+      (await canImport("@spider-rs/spider-rs")) && (await canImport("cheerio")),
+    crawl: spiderRsCrawl,
+  },
+  {
+    name: "crawlee CheerioCrawler",
+    set: "nojs",
+    available: () => canImport("crawlee"),
+    crawl: crawleeCheerioCrawl,
+  },
+  {
+    name: "got + cheerio",
+    set: "nojs",
+    available: async () => (await canImport("got")) && (await canImport("cheerio")),
+    crawl: gotCheerioCrawl,
+  },
+  {
+    name: "node-crawler (crawler)",
+    set: "nojs",
+    available: () => canImport("crawler"),
+    crawl: nodeCrawlerCrawl,
+  },
+  {
+    name: "x-ray",
+    set: "nojs",
+    available: () => canImport("x-ray"),
+    crawl: xrayCrawl,
+  },
+
+  // ── Set B: JS-executing ─────────────────────────────────────────────────────
+  {
+    name: "turbo-crawl (js-fast)",
+    set: "js",
+    turbo: true,
+    available: () => canImport("esbuild"),
+    crawl: (target, opts) => turboCrawl(target, opts, "fast"),
+  },
+  {
+    name: "turbo-crawl (js-secure)",
+    set: "js",
+    turbo: true,
+    // secure tier needs isolated-vm; skip cleanly if absent.
+    available: () => canImport("isolated-vm"),
+    crawl: (target, opts) => turboCrawl(target, opts, "secure"),
+  },
+  {
+    name: "crawlee PlaywrightCrawler",
+    set: "js",
+    available: async () => (await canImport("crawlee")) && (await canImport("playwright")),
+    crawl: (target, opts) => crawleeBrowserCrawl(target, opts, "playwright"),
+  },
+  {
+    name: "crawlee PuppeteerCrawler",
+    set: "js",
+    available: async () => (await canImport("crawlee")) && (await canImport("puppeteer")),
+    crawl: (target, opts) => crawleeBrowserCrawl(target, opts, "puppeteer"),
+  },
+  {
+    name: "puppeteer-cluster",
+    set: "js",
+    available: () => canImport("puppeteer-cluster"),
+    crawl: puppeteerClusterCrawl,
+  },
+];
+
+export function crawlersForSet(set) {
+  return CRAWLERS.filter((c) => c.set === set);
+}

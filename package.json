@@ -51,7 +51,9 @@
     "harness": "node harness/competitive/run.mjs",
     "harness:js": "node harness/competitive/run.mjs js-quotes",
     "prepublishOnly": "npm run check",
-    "hotpath": "node harness/hotpath/run.mjs"
+    "hotpath": "node harness/hotpath/run.mjs",
+    "crawl-bench": "node harness/crawlers/run.mjs",
+    "crawl-bench:js": "node harness/crawlers/run.mjs --set=js"
   },
   "publishConfig": {
     "access": "public"
