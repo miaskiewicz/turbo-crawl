@@ -229,6 +229,30 @@ for (const mode of ["fast", "secure"]) {
   });
 }
 
+describe("render tier — script-loading edge cases (fast)", () => {
+  it("tolerates a malformed import map and a failing external script", async () => {
+    const shell = `<body><div id="root"></div>
+      <script type="importmap">{ this is not json</script>
+      <script src="/missing.js"></script>
+      <script src="/app.js"></script></body>`;
+    const app = `var a=document.createElement("a"); a.setAttribute("href","/ok"); document.getElementById("root").appendChild(a);`;
+    const { fetchHtml, close } = jsRenderer({
+      mode: "fast",
+      fetchHtml: async (u) => {
+        if (u.endsWith("/missing.js")) throw new Error("404");
+        if (u.endsWith("/app.js"))
+          return { html: app, finalUrl: u, status: 200, headers: new Headers() };
+        return { html: shell, finalUrl: u, status: 200, headers: new Headers() };
+      },
+    });
+    const page = new Page({ fetchHtml });
+    await page.goto("https://edge.test/");
+    // malformed importmap ignored, missing script skipped, app.js still ran
+    assert.ok(page.links().includes("https://edge.test/ok"));
+    await close();
+  });
+});
+
 describe("Crawler followRequests — discovered URLs reach the frontier", () => {
   it("enqueues page-fetched URLs when followRequests is set", async () => {
     const { Crawler } = await import("../src/crawl.mjs");

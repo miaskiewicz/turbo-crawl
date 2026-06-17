@@ -49,10 +49,15 @@ runtime; no Playwright at runtime. See [SPEC.md](./SPEC.md) for the design and
   oxlint (0/0) + biome + cc-check (**cc < 6**) + tsgo + tests; same in pre-commit.
 - Benchmarks: full agent view ~2.5k pages/s, links ~18k/s, crawl ~14k pages/s.
 
-## Optional dependencies
+## Dependencies for the JS-render tier
 
-- `isolated-vm` + `esbuild` — only for `jsRenderer({ mode: "secure" })`. The
-  `fast` backend uses Node's built-in `vm`; the rest of the library needs neither.
+- `esbuild` — a **dependency** (pure-Go prebuilt binary; bundles ESM module graphs
+  for both backends). No native build.
+- `isolated-vm` — **optional** (native; compiles on install). Needed only by the
+  `secure` backend. Missing → `mode:"secure"` throws an actionable error; we never
+  silently downgrade to the unsandboxed `fast` backend. `npm i isolated-vm` to
+  enable it. The `fast` backend uses Node's built-in `vm` (no extra dep).
+- The core library (fetch/parse/extract/crawl/Playwright-compat) needs neither.
 
 ## Render tier — coverage
 

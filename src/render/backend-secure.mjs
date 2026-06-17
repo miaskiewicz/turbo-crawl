@@ -1,7 +1,8 @@
 // "secure" render backend (v2): runs page scripts in a true V8 isolate
 // (isolated-vm) where turbo-dom runs on its WASM parser. Hostile-code safe — the
 // guest isolate cannot reach the host heap; only HTML strings cross the boundary.
-// For open-web crawling. isolated-vm + esbuild are optional deps (native build).
+// For open-web crawling. `esbuild` is a dependency; `isolated-vm` is an OPTIONAL
+// native dep — loadIvm() errors actionably if it's absent (never downgrades).
 
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -38,6 +39,21 @@ async function isolateBundle() {
     })();
   }
   return bundlePromise;
+}
+
+// isolated-vm is an optional (native) dependency. If it's missing, fail with an
+// actionable message — NEVER silently fall back to the unsandboxed "fast" backend
+// (that would run untrusted page JS in the host process).
+async function loadIvm() {
+  try {
+    return (await import("isolated-vm")).default;
+  } catch {
+    throw new Error(
+      'turbo-crawl: jsRenderer({ mode: "secure" }) needs the optional "isolated-vm" ' +
+        'dependency (a native module). Run `npm i isolated-vm`, or use mode:"fast" ' +
+        "for local/trusted targets only (no sandbox).",
+    );
+  }
 }
 
 async function bootIsolate(ivm, bundle, wasm, memoryLimit) {
@@ -80,7 +96,7 @@ export function createSecureBackend(opts = {}) {
   async function ensure() {
     if (!ready) {
       ready = (async () => {
-        const ivm = (await import("isolated-vm")).default;
+        const ivm = await loadIvm();
         const [bundle, wasm] = await Promise.all([isolateBundle(), wasmBytes()]);
         return bootIsolate(ivm, bundle, wasm, memoryLimit);
       })();
@@ -109,7 +125,7 @@ export function createSecureBackend(opts = {}) {
 
 async function runScripts(context, scripts) {
   for (const s of scripts) {
-    if (s.module || s.code == null) continue; // ESM modules unsupported in v1
+    if (s.module || s.code == null) continue; // modules are pre-bundled to classic by render/index
     try {
       await callGlobal(context, "__tcRun", [s.code]);
     } catch {

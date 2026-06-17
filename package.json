@@ -49,7 +49,11 @@
     "bench:crawl": "node bench/crawl.mjs",
     "prepare": "git config core.hooksPath .githooks || true",
     "harness": "node harness/competitive/run.mjs",
-    "harness:js": "node harness/competitive/run.mjs js-quotes"
+    "harness:js": "node harness/competitive/run.mjs js-quotes",
+    "prepublishOnly": "npm run check"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "keywords": [
     "crawler",
@@ -79,21 +83,17 @@
   "dependencies": {
     "@miaskiewicz/turbo-dom": "^0.2.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "undici": "^6.0.0"
+    "undici": "^6.0.0",
+    "esbuild": "^0.25.0 || ^0.28.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.0",
     "@typescript/native-preview": "^7.0.0-dev.20260616.1",
     "oxlint": "^0.11.0",
-    "patchright": "^1.60.2",
     "playwright": "^1.61.0",
-    "playwright-extra": "^4.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2",
-    "rebrowser-playwright": "^1.52.0",
     "typescript": "^5.9.3"
   },
   "optionalDependencies": {
-    "esbuild": "^0.25.0 || ^0.28.0",
     "isolated-vm": "^6.0.0"
   }
 }

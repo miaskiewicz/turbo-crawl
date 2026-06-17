@@ -153,8 +153,10 @@ Classic + **ESM-module** scripts run (modules bundled via esbuild, honoring
 **`XMLHttpRequest`** are bridged to the host net layer (cookies/UA), so
 client-only data loads render. URLs the page fetches are recorded — `page.requests()`,
 and `new Crawler({ fallback, followRequests: true })` feeds them into the frontier.
-`isolated-vm` is **optional** (only `mode:"secure"`); `esbuild` is **optional**
-(`mode:"secure"` and ESM-module execution). See
+`esbuild` ships as a dependency (pure-Go prebuilt, no native build). The `secure`
+backend additionally needs the **optional** native `isolated-vm` — `npm i
+isolated-vm`; without it `mode:"secure"` throws an actionable error (it never
+silently downgrades to the unsandboxed `fast` backend). See
 [docs/js-execution-tier.md](./docs/js-execution-tier.md).
 
 `detectJsRequired(document)` flags shell-only pages, and `Crawler` accepts a

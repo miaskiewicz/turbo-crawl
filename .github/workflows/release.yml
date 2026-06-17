@@ -1,0 +1,48 @@
+# Release workflow — tag-gated npm publish for turbo-crawl.
+#
+# turbo-crawl is pure ESM JavaScript: nothing to compile, no native binaries,
+# no per-platform matrix (unlike turbo-test / turbo-dom / turbo-html2pdf, which
+# ship napi/wasm artifacts). So this is a single job: gate, then publish.
+#
+# Fires on a `v*` tag (e.g. `v0.1.0`) or a manual run. Requires the repo secret
+# NPM_TOKEN (a token allowed to publish @miaskiewicz/turbo-crawl). The existing
+# ci.yml (lint/test on PR/push) is separate and untouched.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch: # manual fallback / dry-run trigger
+
+permissions:
+  contents: read
+  id-token: write # required for npm provenance
+
+jobs:
+  publish:
+    name: publish to npm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      # Quality gate (lint + format + cc + tsgo + test). Mirrors ci.yml's checks
+      # so a bad tree never gets published.
+      - name: Gate
+        run: npm run check
+
+      # `npm publish` re-runs prepublishOnly (npm run check) by default; the gate
+      # above already ran it, but we keep that hook for local publishes too.
+      # --provenance attaches a signed build attestation (needs id-token: write).
+      - name: Publish
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
