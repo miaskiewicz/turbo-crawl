@@ -27,13 +27,45 @@ export function createFastBackend() {
         sandbox.fetch = makePageFetch(opts.hostFetch, opts.url, state);
         sandbox.XMLHttpRequest = makeXHR(opts.hostFetch, opts.url, state);
       }
+      shimDocWrite(sandbox.document);
       runScripts(sandbox, scripts, opts.timeoutMs ?? 2000);
+      fireReady(sandbox.document, sandbox.window); // readystatechange/DOMContentLoaded/load
       await settle(state, opts);
       const root = sandbox.document?.documentElement;
       return root ? `<!DOCTYPE html>\n${root.outerHTML}` : "";
     },
     async close() {},
   };
+}
+
+// Make `document.write`/`writeln` append to the body (legacy builders that emit
+// markup at script time — turbo-dom no-ops write post-parse).
+function shimDocWrite(doc) {
+  const sink = (s) => {
+    const t = doc.body || doc.documentElement;
+    if (t) t.insertAdjacentHTML("beforeend", String(s));
+  };
+  doc.write = sink;
+  doc.writeln = (s) => sink(`${s}\n`);
+}
+
+function dispatchEv(target, Ev, type) {
+  try {
+    target.dispatchEvent(new Ev(type));
+  } catch {
+    // a listener throwing must not abort the render
+  }
+}
+
+// Fire the page-render lifecycle so jQuery `$(ready)` / onload builders run.
+// readystatechange + DOMContentLoaded on document; load + pageshow on window.
+function fireReady(doc, win) {
+  const Ev = win.Event;
+  if (!Ev) return;
+  dispatchEv(doc, Ev, "readystatechange");
+  dispatchEv(doc, Ev, "DOMContentLoaded");
+  dispatchEv(win, Ev, "load");
+  dispatchEv(win, Ev, "pageshow");
 }
 
 function runScripts(sandbox, scripts, timeoutMs) {

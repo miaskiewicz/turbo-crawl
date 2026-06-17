@@ -166,6 +166,24 @@ generic `{ fallback: fetchHtml }` to route them to whatever renderer you plug in
 > (Goal: *API* compatibility so Playwright-style scripts can run on this engine —
 > not running Playwright itself.)
 
+## Competitive benchmark
+
+`harness/competitive/` runs the **same Playwright script** on turbo-crawl and real
+browsers, scoring output **parity** against a Chromium oracle and timing each.
+`npm run harness`. Sample (median over runs, live network):
+
+| routine | turbo no-JS | turbo js-fast | turbo js-secure | Chromium (oracle) | parity |
+|---|---|---|---|---|---|
+| wikipedia (3-page click-through + back) | **149 ms** | 327 ms | 297 ms | 889 ms | 4/4 ✓ |
+| form (fill + submit + read echo) | 326 ms | **235 ms** | 223 ms | 625 ms | 4/4 ✓ |
+| js-quotes (client-rendered, `document.write` + jQuery) | — (no-JS skips) | 239 ms | **236 ms** | 809 ms | 2/2 ✓ |
+
+Every turbo-crawl mode produces the **same observations as Chromium** while
+running ~2.5–6× faster. The harness auto-detects installed engines (also
+`firefox`/`webkit`, and stealth browsers like `playwright-extra`/`patchright`/
+`rebrowser`) — see [harness/competitive/README.md](./harness/competitive/README.md).
+(Numbers are network-bound and machine/run dependent.)
+
 ## Development
 
 ```sh

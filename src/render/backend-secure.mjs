@@ -96,6 +96,7 @@ export function createSecureBackend(opts = {}) {
       }
       await callGlobal(context, "__tcSetup", [html, renderOpts.url ?? null]);
       await runScripts(context, scripts);
+      await callGlobal(context, "__tcFireReady", []);
       await drainTimers(context, renderOpts.settleRounds ?? 5);
       return callGlobal(context, "__tcSnapshot", []);
     },

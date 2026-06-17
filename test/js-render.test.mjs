@@ -90,6 +90,27 @@ for (const mode of ["fast", "secure"]) {
       await close();
     });
 
+    it("supports document.write builders + the DOMContentLoaded lifecycle", async () => {
+      const shell = `<body><div id="anchor"></div><script src="/app.js"></script></body>`;
+      const app = `document.write("<a href='/written'>w</a>");
+        document.addEventListener("DOMContentLoaded", function(){
+          var a = document.createElement("a"); a.setAttribute("href","/ready"); document.body.appendChild(a);
+        });`;
+      const { fetchHtml, close } = jsRenderer({
+        mode,
+        fetchHtml: async (u) =>
+          u.endsWith("/app.js")
+            ? { html: app, finalUrl: u, status: 200, headers: new Headers() }
+            : { html: shell, finalUrl: u, status: 200, headers: new Headers() },
+      });
+      const page = new Page({ fetchHtml });
+      await page.goto("https://dw.test/");
+      const hrefs = page.links();
+      assert.ok(hrefs.includes("https://dw.test/written"), "document.write output");
+      assert.ok(hrefs.includes("https://dw.test/ready"), "DOMContentLoaded handler ran");
+      await close();
+    });
+
     it("executes ESM-module scripts (bundled import graph)", { skip: !esbuildOk }, async () => {
       const shell = `<body><div id="root"></div><script type="module" src="/main.js"></script></body>`;
       const main = `import { render } from "/render.js"; render(document.getElementById("root"));`;

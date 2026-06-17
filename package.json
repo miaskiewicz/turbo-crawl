@@ -47,7 +47,9 @@
     "bench": "node bench/extract.mjs && node bench/crawl.mjs",
     "bench:extract": "node bench/extract.mjs",
     "bench:crawl": "node bench/crawl.mjs",
-    "prepare": "git config core.hooksPath .githooks || true"
+    "prepare": "git config core.hooksPath .githooks || true",
+    "harness": "node harness/competitive/run.mjs",
+    "harness:js": "node harness/competitive/run.mjs js-quotes"
   },
   "keywords": [
     "crawler",

@@ -59,11 +59,22 @@ globalThis.__tcSetup = (html, url) => {
   globalThis.clearTimeout = () => {};
   globalThis.setInterval = () => 0; // intervals would never settle; no-op
   globalThis.clearInterval = () => {};
+  shimDocWrite(globalThis.document);
   if (globalThis.__tcHostFetch) {
     globalThis.fetch = isolateFetch;
     globalThis.XMLHttpRequest = makeIsolateXHR();
   }
 };
+
+// document.write/writeln → append to body (legacy markup-at-script-time builders).
+function shimDocWrite(doc) {
+  const sink = (s) => {
+    const t = doc.body || doc.documentElement;
+    if (t) t.insertAdjacentHTML("beforeend", String(s));
+  };
+  doc.write = sink;
+  doc.writeln = (s) => sink(`${s}\n`);
+}
 
 // Host-net-backed XMLHttpRequest inside the isolate (synchronous bridge via
 // applySyncPromise; completion callbacks fire on a microtask).
@@ -109,6 +120,23 @@ function finishXhr(xhr) {
 globalThis.__tcRun = (src) => {
   // biome-ignore lint: indirect eval runs page JS against the installed globals.
   (0, eval)(src);
+};
+
+function dispatchEv(target, type) {
+  try {
+    target.dispatchEvent(new globalThis.Event(type));
+  } catch {
+    /* a listener throwing must not abort the render */
+  }
+}
+
+// Fire the page-render lifecycle so jQuery `$(ready)`/`onload` builders run.
+globalThis.__tcFireReady = () => {
+  if (!globalThis.Event) return;
+  dispatchEv(globalThis.document, "readystatechange");
+  dispatchEv(globalThis.document, "DOMContentLoaded");
+  dispatchEv(globalThis, "load");
+  dispatchEv(globalThis, "pageshow");
 };
 
 // Run all currently-queued timer callbacks (one round); returns how many were
