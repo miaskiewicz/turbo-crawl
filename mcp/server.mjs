@@ -154,7 +154,7 @@ export function createServer(opts = {}) {
   const byName = new Map(tools.map((t) => [t.name, t]));
 
   const server = new Server(
-    { name: "turbo-crawl", version: "0.1.2" },
+    { name: "turbo-crawl", version: "0.1.3" },
     { capabilities: { tools: {} } },
   );
 

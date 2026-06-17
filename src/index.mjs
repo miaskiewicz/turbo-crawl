@@ -2,7 +2,7 @@
 // Native-speed, browserless crawler for AI agents, built on turbo-dom.
 // See SPEC.md for the full design and phase plan (§12).
 
-export const version = "0.1.2";
+export const version = "0.1.3";
 
 export { Page } from "./page.mjs";
 export { fetchHtml, HttpError } from "./net.mjs";
