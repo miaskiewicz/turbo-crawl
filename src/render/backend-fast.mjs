@@ -8,20 +8,23 @@ import vm from "node:vm";
 import { installGlobals } from "@miaskiewicz/turbo-dom/install";
 
 import { makePageFetch, makeXHR } from "./page-fetch.mjs";
+import { drainRound, installVirtualClock } from "./virtual-clock.mjs";
 
 export function createFastBackend() {
   return {
     /**
      * @param {string} html
      * @param {Array<{code?:string, module:boolean}>} scripts
-     * @param {{ url?:string, hostFetch?:Function, timeoutMs?:number, settleMs?:number,
-     *   settleRounds?:number, renderDeadlineMs?:number }} [opts]
+     * @param {{ url?:string, hostFetch?:Function, timeoutMs?:number,
+     *   renderDeadlineMs?:number, maxFrames?:number }} [opts]
      * @returns {Promise<string>} rendered outerHTML
      */
     async render(html, scripts, opts = {}) {
       const sandbox = {};
       installGlobals(sandbox, { html, url: opts.url });
       vm.createContext(sandbox);
+      // Own time + scheduling BEFORE any page script runs (React/MUI read them).
+      const ctl = installVirtualClock(sandbox, vm);
       const state = { pending: 0 };
       if (opts.hostFetch) {
         sandbox.fetch = makePageFetch(opts.hostFetch, opts.url, state);
@@ -30,7 +33,7 @@ export function createFastBackend() {
       shimDocWrite(sandbox.document);
       runScripts(sandbox, scripts, opts.timeoutMs ?? 2000);
       fireReady(sandbox.document, sandbox.window); // readystatechange/DOMContentLoaded/load
-      await settle(state, opts);
+      await settle(ctl, state, opts);
       const root = sandbox.document?.documentElement;
       return root ? `<!DOCTYPE html>\n${root.outerHTML}` : "";
     },
@@ -129,29 +132,30 @@ function fireLoad(win, el) {
   }
 }
 
-function settleCfg(opts) {
-  return {
-    min: opts.settleRounds ?? 5,
-    ms: opts.settleMs ?? 1,
-    deadlineMs: opts.renderDeadlineMs ?? 5000,
-  };
+// Real (host) macrotask tick — lets in-flight host fetch/XHR promises resolve
+// between virtual drain rounds. NOTE: `setTimeout` here is the host's (this module
+// runs outside the sandbox); the page's setTimeout is the virtual one.
+function realTick() {
+  return new Promise((r) => setTimeout(r, 0));
 }
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
+// Keep pumping while the page has queued work (timers/frames) or in-flight
+// fetches, bounded by a frame cap (cuts infinite animations — spinners/pulse) and
+// a wall-clock deadline (the ultimate backstop).
+function keepPumping(timers, state, frames, max, deadline) {
+  return (timers.length > 0 || state.pending > 0) && frames < max && Date.now() < deadline;
 }
 
-// Let microtasks + host-backed timers run, and wait for in-flight page fetches to
-// settle (state.pending). Bounded by a wall-clock DEADLINE so a busy hydration
-// (React effects re-rendering on host timers) can't stall the render forever —
-// on the deadline we snapshot whatever rendered. NOTE: a purely synchronous
-// infinite loop inside a timer callback blocks the event loop and can't be cut
-// here; turbo-dom's geometry realism is what prevents that loop forming.
-async function settle(state, opts) {
-  const cfg = settleCfg(opts);
-  const deadline = Date.now() + cfg.deadlineMs;
-  for (let i = 0; i < cfg.min || state.pending > 0; i++) {
-    if (Date.now() > deadline) break;
-    await sleep(cfg.ms);
+// Drive the page's own scheduler (setTimeout/rAF/MessageChannel → our queue) in
+// virtual time until it quiesces, interleaving real ticks so host fetches settle.
+// Pull-based: an infinite-animation rAF storm can't starve us — we stop at the
+// frame cap. (A purely SYNCHRONOUS infinite loop inside one callback still can't
+// be cut from JS; turbo-dom geometry realism is what prevents those forming.)
+async function settle(ctl, state, opts) {
+  const deadline = Date.now() + (opts.renderDeadlineMs ?? 5000);
+  const max = opts.maxFrames ?? 2000;
+  for (let frames = 0; keepPumping(ctl.timers, state, frames, max, deadline); frames++) {
+    drainRound(ctl.timers, ctl.clock);
+    await realTick();
   }
 }
