@@ -126,11 +126,15 @@ export function createSecureBackend(opts = {}) {
 async function runScripts(context, scripts) {
   for (const s of scripts) {
     if (s.module || s.code == null) continue; // modules are pre-bundled to classic by render/index
-    try {
-      await callGlobal(context, "__tcRun", [s.code]);
-    } catch {
-      // a page script throwing must not abort the render (browser semantics)
-    }
+    await runOne(context, s);
+  }
+}
+
+async function runOne(context, s) {
+  try {
+    await callGlobal(context, "__tcRun", [s.code, s.url || null]);
+  } catch {
+    // a page script throwing must not abort the render (browser semantics)
   }
 }
 

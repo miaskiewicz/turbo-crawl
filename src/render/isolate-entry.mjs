@@ -117,10 +117,37 @@ function finishXhr(xhr) {
 }
 
 // Execute one page script source in the isolate's global scope (sees document).
-globalThis.__tcRun = (src) => {
-  // biome-ignore lint: indirect eval runs page JS against the installed globals.
-  (0, eval)(src);
+// url drives document.currentScript so bundler runtimes (Turbopack/webpack/Vite)
+// can read currentScript.src for their chunk base URL.
+globalThis.__tcRun = (src, url) => {
+  setCurrentScript(url || null);
+  try {
+    // biome-ignore lint: indirect eval runs page JS against the installed globals.
+    (0, eval)(src);
+  } finally {
+    setCurrentScript(null);
+  }
 };
+
+function scriptEl(url) {
+  return {
+    nodeName: "SCRIPT",
+    tagName: "SCRIPT",
+    src: url,
+    getAttribute: (name) => (name === "src" ? url : null),
+  };
+}
+
+function setCurrentScript(url) {
+  try {
+    Object.defineProperty(globalThis.document, "currentScript", {
+      value: url ? scriptEl(url) : null,
+      configurable: true,
+    });
+  } catch {
+    /* read-only DOM impl — best effort */
+  }
+}
 
 function dispatchEv(target, type) {
   try {

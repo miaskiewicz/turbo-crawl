@@ -72,6 +72,30 @@ for (const mode of ["fast", "secure"]) {
       await close();
     });
 
+    it("exposes document.currentScript to external scripts (bundler runtimes)", async () => {
+      const shell = `<body><div id="root"></div><script src="/runtime.js"></script></body>`;
+      // Turbopack/webpack/Vite runtimes read currentScript.getAttribute('src') on
+      // their first line; if it's undefined the whole runtime throws.
+      const runtime = `var src = document.currentScript.getAttribute("src");
+        var a = document.createElement("a"); a.setAttribute("href", "/seen?src=" + src);
+        document.getElementById("root").appendChild(a);`;
+      const { fetchHtml, close } = jsRenderer({
+        mode,
+        fetchHtml: async (u) =>
+          u.endsWith("/runtime.js")
+            ? { html: runtime, finalUrl: u, status: 200, headers: new Headers() }
+            : { html: shell, finalUrl: u, status: 200, headers: new Headers() },
+      });
+      const page = new Page({ fetchHtml });
+      await page.goto("https://rt.test/");
+      // resolved currentScript src is the absolute chunk URL
+      assert.ok(
+        page.links().some((h) => h.includes("/seen?src=") && h.includes("runtime.js")),
+        "currentScript.getAttribute('src') returned the chunk URL",
+      );
+      await close();
+    });
+
     it("a throwing page script does not abort the render", async () => {
       const html = `<body><div id="root"></div><script src="/a.js"></script></body>`;
       const broken = `throw new Error("boom"); root.innerHTML = "never";`;

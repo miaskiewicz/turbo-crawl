@@ -69,13 +69,45 @@ function fireReady(doc, win) {
 }
 
 function runScripts(sandbox, scripts, timeoutMs) {
+  const doc = sandbox.document;
   for (const s of scripts) {
     if (s.module || s.code == null) continue; // ESM modules unsupported in v1
-    try {
-      vm.runInContext(s.code, sandbox, { timeout: timeoutMs });
-    } catch {
-      // a page script throwing must not abort the render
-    }
+    runOne(sandbox, doc, s, timeoutMs);
+  }
+}
+
+function runOne(sandbox, doc, s, timeoutMs) {
+  setCurrentScript(doc, s.url || null);
+  try {
+    vm.runInContext(s.code, sandbox, { timeout: timeoutMs });
+  } catch {
+    // a page script throwing must not abort the render
+  } finally {
+    setCurrentScript(doc, null);
+  }
+}
+
+// Browsers set document.currentScript to the executing <script> during its sync
+// run; bundler runtimes (Turbopack/webpack/Vite) read currentScript.src /
+// .getAttribute('src') to compute their chunk base URL. turbo-dom leaves it
+// undefined, so those runtimes throw on line 1. Set a minimal stand-in per script.
+function scriptEl(url) {
+  return {
+    nodeName: "SCRIPT",
+    tagName: "SCRIPT",
+    src: url,
+    getAttribute: (name) => (name === "src" ? url : null),
+  };
+}
+
+function setCurrentScript(doc, url) {
+  try {
+    Object.defineProperty(doc, "currentScript", {
+      value: url ? scriptEl(url) : null,
+      configurable: true,
+    });
+  } catch {
+    // read-only DOM impl — best effort
   }
 }
 
