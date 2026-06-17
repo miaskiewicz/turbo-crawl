@@ -30,6 +30,7 @@ const INPUT_SCHEMAS = {
   },
   submit: { type: "object", properties: { i: { type: "number" } } },
   extract: { type: "object", properties: { schema: { type: "object" } }, required: ["schema"] },
+  hydration_state: { type: "object", properties: {} },
   query: {
     type: "object",
     properties: {

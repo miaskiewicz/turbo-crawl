@@ -34,6 +34,7 @@ describe("MCP handlers (Page API 1:1)", () => {
       "fill",
       "submit",
       "extract",
+      "hydration_state",
       "query",
     ]) {
       assert.ok(map.has(name), `missing tool ${name}`);

@@ -83,6 +83,12 @@ export function buildTools(page) {
       handler: ({ schema }) => page.extract(schema),
     },
     {
+      name: "hydration_state",
+      description:
+        "Mine server-embedded hydration data (Next/Nuxt/Apollo/JSON-LD/typed JSON) from inline scripts — no JS executed. Recovers most SPA data.",
+      handler: () => page.hydrationState(),
+    },
+    {
       name: "query",
       description:
         "Query nodes by CSS selector or XPath; returns matched subtree(s) as { html, text } (node ref omitted over MCP). type: auto|css|xpath, first: boolean.",

@@ -54,6 +54,10 @@ page.fill(q.i, "widgets");
 await page.submit();
 await page.click(page.interactiveElements().find((e) => e.tag === "a").i);
 
+// recover SPA data with NO browser: mine server-embedded hydration state
+page.hydrationState(); // { next, jsonLd, json, states } from __NEXT_DATA__,
+                       // JSON-LD, __APOLLO_STATE__/__INITIAL_STATE__, etc.
+
 // query nodes by CSS or XPath → { node, html, text }
 page.query(".product .price");                 // CSS
 page.query("//a[@href]/@href");                // XPath (subset) → attribute values

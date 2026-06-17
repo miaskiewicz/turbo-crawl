@@ -8,6 +8,7 @@ import { buildSubmission, fillValue } from "./actions.mjs";
 import { accessibilityTree } from "./ax.mjs";
 import { CookieJar } from "./cookies.mjs";
 import { interactiveElements, links } from "./extract.mjs";
+import { extractHydrationState } from "./hydration.mjs";
 import { markdown } from "./markdown.mjs";
 import { fetchHtml } from "./net.mjs";
 import { query } from "./query.mjs";
@@ -194,6 +195,14 @@ export class Page {
   /** Structured extraction against a selector-bound schema (SPEC §7.4). */
   extract(schema) {
     return extractSchema(this.document, schema, this.#url);
+  }
+
+  /**
+   * Mine server-embedded hydration state (Next/Nuxt/Apollo/JSON-LD/…) without
+   * executing any JS — recovers most "SPA" data straight from inline scripts.
+   */
+  hydrationState() {
+    return extractHydrationState(this.document);
   }
 
   /**

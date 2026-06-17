@@ -105,6 +105,14 @@ export interface FieldSpec {
 export type Schema = Record<string, FieldSpec> | { fields: Record<string, FieldSpec> };
 export declare function extractSchema(document: object, schema: Schema, baseUrl?: string): object;
 
+export interface HydrationState {
+  next: object | null;
+  jsonLd: object[];
+  json: Record<string, object>;
+  states: Record<string, object>;
+}
+export declare function extractHydrationState(document: object): HydrationState;
+
 // --- actions -----------------------------------------------------------------
 export declare function fillValue(el: object, value: unknown): void;
 export declare function serializeForm(form: object, submitter?: object): [string, string][];
@@ -165,6 +173,7 @@ export declare class Page {
   text(): string;
   accessibilityTree(): AxNode;
   extract(schema: Schema): object;
+  hydrationState(): HydrationState;
   query(selector: string, opts?: QueryOptions): QueryResult[] | QueryResult | null;
   click(i: number, opts?: FetchOptions): Promise<NavResult>;
   fill(i: number, value: unknown): { ok: true };

@@ -21,3 +21,4 @@ export { extractSchema } from "./schema.mjs";
 export { detectJsRequired } from "./detect.mjs";
 export { query } from "./query.mjs";
 export { evaluateXPath } from "./xpath.mjs";
+export { extractHydrationState } from "./hydration.mjs";
