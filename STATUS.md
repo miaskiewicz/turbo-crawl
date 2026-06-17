@@ -35,7 +35,7 @@ runtime; no Playwright at runtime. See [SPEC.md](./SPEC.md) for the design and
 ## Playwright
 
 - **Runtime: not a dependency.** Compatibility façade
-  (`turbo-crawl/playwright`) runs existing Playwright scripts on the
+  (`@miaskiewicz/turbo-crawl/playwright`) runs existing Playwright scripts on the
   no-JS engine — `chromium.launch()`→pseudo-browser, locators, actions, `expect`,
   `evaluate`/`$eval`/`$$eval`. Pixel/render-only APIs (`screenshot/pdf/route/
   hover`) throw a clear "no-JS engine" error.

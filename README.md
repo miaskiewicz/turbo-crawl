@@ -26,7 +26,7 @@ test (SPEC §14) bounds representation drift when Chromium is installed (dev-onl
 ## Install
 
 ```sh
-npm install turbo-crawl
+npm install @miaskiewicz/turbo-crawl
 ```
 
 Pure ESM, Node ≥ 20.
@@ -34,7 +34,7 @@ Pure ESM, Node ≥ 20.
 ## Drive a page (no browser)
 
 ```js
-import { Page } from "turbo-crawl";
+import { Page } from "@miaskiewicz/turbo-crawl";
 
 // configure the pseudo-browser's navigator + HTTP User-Agent
 const page = new Page({
@@ -77,7 +77,7 @@ const data = page.extract({
 ## Crawl a site
 
 ```js
-import { Crawler } from "turbo-crawl";
+import { Crawler } from "@miaskiewicz/turbo-crawl";
 
 for await (const rec of new Crawler({ start, maxPages: 500, concurrency: 8 })) {
   // rec.url, rec.status, rec.view.interactiveElements, rec.extracted
@@ -98,7 +98,7 @@ npx turbo-crawl-mcp          # stdio MCP server (33 tools), e.g.:
 # count, evaluate, set_user_agent, go_back, go_forward, reload
 ```
 
-Or embed: `import { createServer } from "turbo-crawl/mcp"`.
+Or embed: `import { createServer } from "@miaskiewicz/turbo-crawl/mcp"`.
 
 ## Run Playwright scripts (no browser)
 
@@ -106,7 +106,7 @@ Drop-in compatibility layer so existing Playwright scripts run on the no-JS
 engine — **nothing loads playwright or chromium**:
 
 ```js
-import { chromium, expect } from "turbo-crawl/playwright";
+import { chromium, expect } from "@miaskiewicz/turbo-crawl/playwright";
 
 const browser = await chromium.launch();
 const page = await browser.newPage();
@@ -134,7 +134,7 @@ turbo-crawl ships **no browser**. For pages that need JavaScript:
    — and extract from the *rendered* DOM. Two backends:
 
 ```js
-import { jsRenderer, Page, Crawler } from "turbo-crawl";
+import { jsRenderer, Page, Crawler } from "@miaskiewicz/turbo-crawl";
 
 // "secure" (default): true V8 isolate (isolated-vm) on turbo-dom's WASM parser.
 // Safe for open-web/hostile pages. "fast": in-process vm + native parser, for

@@ -1,4 +1,4 @@
-# Publishing `turbo-crawl`
+# Publishing `@miaskiewicz/turbo-crawl`
 
 turbo-crawl is **pure ESM JavaScript** — there is nothing to compile, no native
 binaries, and no per-platform build matrix. Publishing is therefore a single
