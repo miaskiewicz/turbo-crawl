@@ -34,7 +34,15 @@ function scriptItem(el, baseUrl) {
   // rawSrc preserves the attribute exactly as authored: bundler runtimes read
   // currentScript.getAttribute('src') and expect the raw (often root-relative)
   // value, not the resolved absolute URL.
-  if (src) return { url: resolve(baseUrl, src) ?? src, rawSrc: src, module };
+  if (src) {
+    return {
+      url: resolve(baseUrl, src) ?? src,
+      rawSrc: src,
+      module,
+      async: el.hasAttribute("async"),
+      defer: el.hasAttribute("defer"),
+    };
+  }
   return { code: el.textContent ?? "", module };
 }
 
@@ -53,7 +61,15 @@ function scriptItemFromAttrs(attrs, body, baseUrl) {
   if (!CLASSIC_TYPES.has(type)) return null;
   const module = type === "module";
   const src = attrValue(attrs, "src");
-  if (src) return { url: resolve(baseUrl, src) ?? src, rawSrc: src, module };
+  if (src) {
+    return {
+      url: resolve(baseUrl, src) ?? src,
+      rawSrc: src,
+      module,
+      async: /\basync\b/i.test(attrs),
+      defer: /\bdefer\b/i.test(attrs),
+    };
+  }
   return { code: body, module };
 }
 

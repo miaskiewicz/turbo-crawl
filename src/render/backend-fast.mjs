@@ -32,8 +32,8 @@ export function createFastBackend() {
       }
       shimDocWrite(sandbox.document);
       try {
-        runScripts(sandbox, scripts, opts.timeoutMs ?? 2000);
-        fireReady(sandbox.document, sandbox.window); // readystatechange/DOMContentLoaded/load
+        // sync → defer → DOMContentLoaded → async → load (browser order)
+        runLifecycle(sandbox, scripts, opts.timeoutMs ?? 2000);
         await settle(ctl, state, opts);
       } finally {
         resetClock(); // restore turbo-dom's real clock for any other consumer
@@ -64,21 +64,42 @@ function dispatchEv(target, Ev, type) {
   }
 }
 
-// Fire the page-render lifecycle so jQuery `$(ready)` / onload builders run.
-// readystatechange + DOMContentLoaded on document; load + pageshow on window.
-function fireReady(doc, win) {
+function fireDomContentLoaded(doc, win) {
   const Ev = win.Event;
   if (!Ev) return;
   dispatchEv(doc, Ev, "readystatechange");
   dispatchEv(doc, Ev, "DOMContentLoaded");
+}
+
+function fireWindowLoad(win) {
+  const Ev = win.Event;
+  if (!Ev) return;
   dispatchEv(win, Ev, "load");
   dispatchEv(win, Ev, "pageshow");
 }
 
-function runScripts(sandbox, scripts, timeoutMs) {
+const isAsync = (s) => s.async === true;
+const isDefer = (s) => s.defer === true && s.async !== true;
+const isSync = (s) => s.async !== true && s.defer !== true;
+
+// Execute scripts in BROWSER order, not DOM order: classic sync scripts first
+// ("during parse"), then deferred (defer + bundled modules), then
+// DOMContentLoaded, then async, then load. Critical for App Router — the async
+// `_R_` RSC bootstrap must run AFTER every inline `__next_f.push` flight row has
+// buffered, so it replays the whole stream and closes it on load. Running it at
+// its DOM position (mid-stream) leaves the RSC stream unterminated → no commit.
+function runLifecycle(sandbox, scripts, timeoutMs) {
+  runPhase(sandbox, scripts.filter(isSync), timeoutMs);
+  runPhase(sandbox, scripts.filter(isDefer), timeoutMs);
+  fireDomContentLoaded(sandbox.document, sandbox.window);
+  runPhase(sandbox, scripts.filter(isAsync), timeoutMs);
+  fireWindowLoad(sandbox.window);
+}
+
+function runPhase(sandbox, scripts, timeoutMs) {
   const doc = sandbox.document;
   for (const s of scripts) {
-    if (s.module || s.code == null) continue; // ESM modules unsupported in v1
+    if (s.code == null) continue; // external fetch failed (modules are pre-bundled)
     runOne(sandbox, doc, s, timeoutMs);
   }
 }

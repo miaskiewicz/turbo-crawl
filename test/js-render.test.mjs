@@ -274,6 +274,31 @@ for (const mode of ["fast", "secure"]) {
 }
 
 describe("render tier — script-loading edge cases (fast)", () => {
+  it("runs async scripts AFTER inline/sync ones (browser order, not DOM order)", async () => {
+    // Mirrors App Router: an async bootstrap (<script async>) must run after every
+    // inline `__next_f.push` row has buffered, even though it appears first in the
+    // DOM. In DOM order the bootstrap would see an empty buffer.
+    const shell = `<body><div id="root"></div>
+      <script async src="/boot.js"></script>
+      <script>globalThis.__rows = (globalThis.__rows || []); globalThis.__rows.push("a");</script>
+      <script>globalThis.__rows.push("b");</script></body>`;
+    const boot = `var seen = (globalThis.__rows || []).join(",");
+      var el = document.createElement("a"); el.setAttribute("href", "/seen/" + seen);
+      document.getElementById("root").appendChild(el);`;
+    const { fetchHtml, close } = jsRenderer({
+      mode: "fast",
+      fetchHtml: async (u) =>
+        u.endsWith("/boot.js")
+          ? { html: boot, finalUrl: u, status: 200, headers: new Headers() }
+          : { html: shell, finalUrl: u, status: 200, headers: new Headers() },
+    });
+    const page = new Page({ fetchHtml });
+    await page.goto("https://order.test/");
+    // async boot saw both inline rows buffered → ran after them
+    assert.ok(page.links().includes("https://order.test/seen/a,b"), "async ran after inline");
+    await close();
+  });
+
   it("tolerates a malformed import map and a failing external script", async () => {
     const shell = `<body><div id="root"></div>
       <script type="importmap">{ this is not json</script>
