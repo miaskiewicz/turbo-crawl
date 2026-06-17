@@ -42,6 +42,8 @@ competitor is lazy-loaded; if its package isn't installed the row reads
 |---|---|---|
 | `turbo-crawl (no-js)` | nojs | always |
 | `spider-rs (Rust)` | nojs | `@spider-rs/spider-rs` + `cheerio` |
+| `Scrapy (Python)` | nojs | `scrapy` on PATH (CLI subprocess) |
+| `Colly (Go)` | nojs | `go` on PATH (CLI subprocess) |
 | `crawlee CheerioCrawler` | nojs | `crawlee` |
 | `got + cheerio` (hand-rolled BFS) | nojs | `got` + `cheerio` |
 | `node-crawler (crawler)` | nojs | `crawler` |
@@ -57,7 +59,7 @@ competitor is lazy-loaded; if its package isn't installed the row reads
 We deliberately do **not** vendor these — install what you want to race against:
 
 ```sh
-# non-JS crawlers (incl. spider-rs — the Rust "fastest crawler" claimant)
+# non-JS Node crawlers (incl. spider-rs — the Rust "fastest crawler" claimant)
 npm i -D @spider-rs/spider-rs crawlee cheerio got crawler x-ray
 
 # JS crawlers (also need a browser binary)
@@ -65,10 +67,27 @@ npm i -D crawlee playwright puppeteer puppeteer-cluster
 npx playwright install chromium
 ```
 
-The two other crawlers commonly cited as the absolute fastest — **Scrapy**
-(Python) and **Colly** (Go) — are cross-language and can't be `import`ed into a
-Node harness, so they're out of scope here. `spider-rs` (Rust core + N-API
-bindings) represents that native-speed class while staying a `node` dependency.
+### Cross-language speed kings (CLI subprocess)
+
+The two crawlers most often cited as the absolute fastest — **Scrapy** (Python)
+and **Colly** (Go) — aren't `import`able into Node, so the harness shells out to
+them via a thin CLI wrapper (`scrapy_spider.py`, `colly_crawler.go`). Each runs
+the SAME same-host BFS, counts the SAME CSS selector, and prints `{pages,items}`
+on stdout; the harness times the wall-clock and detects them by probing the tool
+on `PATH` (skipped if absent).
+
+```sh
+# Scrapy — isolated CLI on PATH (pipx keeps it off the system Python)
+brew install pipx && pipx install scrapy
+
+# Colly — Go toolchain; first run downloads colly into the module cache
+brew install go
+( cd harness/crawlers && go mod tidy )   # one-time: fetch colly + write go.sum
+```
+
+> Subprocess engines pay a fixed per-invocation startup (Python import / Go
+> link) that dominates at small page caps — read their **pages/s at higher
+> `--pages`**, not the raw ms on a 4-page run.
 
 turbo-crawl's `js-secure` row needs the optional `isolated-vm`; if it's absent
 that one row is skipped and `js-fast` still runs.

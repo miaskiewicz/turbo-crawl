@@ -18,11 +18,54 @@
 // SAME page cap, the SAME tiny politeness delay, stays same-host, and is warmed
 // once by run.mjs before the timed iterations.
 
+import { spawn } from "node:child_process";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
 const POLITENESS_MS = 150;
 const CONCURRENCY = 2;
+const HERE = dirname(fileURLToPath(import.meta.url));
 
 function ms(t0) {
   return Number(process.hrtime.bigint() - t0) / 1e6;
+}
+
+// Is a CLI tool on PATH? Probe by running it with a harmless flag; non-zero exit
+// or spawn error → not available (the harness prints "skipped (not installed)").
+function commandExists(cmd, probeArgs) {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, probeArgs, { stdio: "ignore" });
+    child.on("error", () => resolve(false));
+    child.on("close", (code) => resolve(code === 0));
+  });
+}
+
+// Parse the final JSON line {pages, items} a subprocess crawler prints (logs go
+// to stderr; only the result is on stdout).
+function parseResult(out, code) {
+  const line = out.trim().split("\n").filter(Boolean).pop();
+  const { pages, items } = JSON.parse(line ?? "");
+  if (typeof pages !== "number") throw new Error(`bad output (code ${code})`);
+  return { pages, items };
+}
+
+// Spawn a subprocess crawler in HERE, collect stdout, resolve {pages, items}.
+function runSubprocess(cmd, cmdArgs) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, cmdArgs, { cwd: HERE, env: process.env });
+    let out = "";
+    child.stdout.on("data", (d) => {
+      out += d;
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      try {
+        resolve(parseResult(out, code));
+      } catch (err) {
+        reject(new Error(`${cmd}: ${err.message}\n${out.slice(0, 300)}`));
+      }
+    });
+  });
 }
 
 // Does a dependency resolve? Used by competitor available() probes — we never
@@ -266,6 +309,53 @@ async function spiderRsCrawl(target, opts) {
   return { pages, items, ms: ms(t0) };
 }
 
+// ── Scrapy (Python, CLI subprocess; nojs) ────────────────────────────────────
+// Runs the spider via Scrapy's own CLI (pipx/venv install on PATH) so it executes
+// in Scrapy's environment; we pass the shared selector/host/cap and parse its
+// printed {pages, items}.
+async function scrapyCrawl(target, opts) {
+  const args = [
+    "runspider",
+    "scrapy_spider.py",
+    "-a",
+    `start=${target.start}`,
+    "-a",
+    `selector=${target.itemSelector}`,
+    "-a",
+    `pages=${opts.pages}`,
+    "-a",
+    `host=${target.host}`,
+    "-s",
+    "LOG_ENABLED=False",
+    "-s",
+    `CONCURRENT_REQUESTS=${CONCURRENCY}`,
+    "-s",
+    `DOWNLOAD_DELAY=${POLITENESS_MS / 1000}`,
+    "-s",
+    "ROBOTSTXT_OBEY=False",
+  ];
+  const t0 = process.hrtime.bigint();
+  const { pages, items } = await runSubprocess("scrapy", args);
+  return { pages, items, ms: ms(t0) };
+}
+
+// ── Colly (Go, CLI subprocess; nojs) ─────────────────────────────────────────
+// `go run .` builds + runs colly_crawler.go (module deps cached after the first,
+// untimed warmup run). Same selector/host/cap; parses its printed {pages, items}.
+async function collyCrawl(target, opts) {
+  const args = [
+    "run",
+    ".",
+    `-start=${target.start}`,
+    `-selector=${target.itemSelector}`,
+    `-pages=${opts.pages}`,
+    `-host=${target.host}`,
+  ];
+  const t0 = process.hrtime.bigint();
+  const { pages, items } = await runSubprocess("go", args);
+  return { pages, items, ms: ms(t0) };
+}
+
 // ── crawlee Playwright/Puppeteer (js) ────────────────────────────────────────
 async function crawleeBrowserCrawl(target, opts, which) {
   const crawlee = await import("crawlee");
@@ -350,6 +440,18 @@ export const CRAWLERS = [
     available: async () =>
       (await canImport("@spider-rs/spider-rs")) && (await canImport("cheerio")),
     crawl: spiderRsCrawl,
+  },
+  {
+    name: "Scrapy (Python)",
+    set: "nojs",
+    available: () => commandExists("scrapy", ["version"]),
+    crawl: scrapyCrawl,
+  },
+  {
+    name: "Colly (Go)",
+    set: "nojs",
+    available: () => commandExists("go", ["version"]),
+    crawl: collyCrawl,
   },
   {
     name: "crawlee CheerioCrawler",
