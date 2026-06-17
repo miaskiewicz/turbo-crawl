@@ -1,7 +1,11 @@
-// Networking (SPEC §8). fetchHtml over Node's global fetch (undici under the
-// hood — redirects + gzip/br/deflate decode for free), plus the hardening the
-// spec calls for: charset sniffing, max body size, content-type gate, and an
-// optional CookieJar round-trip.
+// Networking (SPEC §8). fetchHtml over undici's fetch (redirects + gzip/br/deflate
+// decode for free), plus the hardening the spec calls for: charset sniffing, max
+// body size, content-type gate, and an optional CookieJar round-trip. We use the
+// undici package's own fetch (not Node's global) so it pairs with the undici
+// Agent we pass as a `dispatcher` for HTTP/2 — mixing the two undici builds
+// throws "invalid onRequestStart method".
+
+import { fetch as undiciFetch } from "undici";
 
 const DEFAULT_UA = "turbo-crawl/0.0 (+https://github.com/miaskiewicz/turbo-crawl)";
 const DEFAULT_MAX_BYTES = 8 * 1024 * 1024; // 8 MiB
@@ -91,6 +95,8 @@ function decode(bytes, charset) {
  * @param {string} [opts.body]
  * @param {AbortSignal} [opts.signal]
  * @param {import('./cookies.mjs').CookieJar} [opts.jar]  request/response cookie round-trip
+ * @param {object} [opts.cache]      ResponseCache for conditional (304) revalidation
+ * @param {object} [opts.dispatcher] undici Agent (HTTP/2 + DNS cache) as the fetch dispatcher
  * @param {number} [opts.maxBytes]
  * @param {boolean} [opts.allowNonHtml]  skip the content-type gate
  * @param {typeof fetch} [opts.fetch]    injectable for tests / Lane B
@@ -165,6 +171,7 @@ async function redirectHop(doFetch, state, opts, redirects, maxRedirects) {
     redirect: "manual",
     signal: opts.signal,
     headers,
+    dispatcher: opts.dispatcher,
   });
   ingestSetCookie(opts, res, res.url || state.current);
   const loc = redirectLocation(res);
@@ -194,6 +201,7 @@ async function followAuto(doFetch, url, opts) {
     redirect: "follow",
     signal: opts.signal,
     headers: buildHeaders(url, opts),
+    dispatcher: opts.dispatcher,
   });
   const finalUrl = res.url || url;
   ingestSetCookie(opts, res, finalUrl);
@@ -223,7 +231,7 @@ async function finishFetch(res, finalUrl, redirected, opts, maxBytes) {
 }
 
 export async function fetchHtml(url, opts = {}) {
-  const doFetch = opts.fetch ?? fetch;
+  const doFetch = opts.fetch ?? undiciFetch;
   const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES;
 
   const { res, finalUrl, redirected } =

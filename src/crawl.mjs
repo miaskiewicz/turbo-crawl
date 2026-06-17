@@ -4,6 +4,7 @@
 // A pool of warm Pages is reused across the frontier (env reset per hop).
 
 import { detectJsRequired } from "./detect.mjs";
+import { createDispatcher } from "./dispatcher.mjs";
 import { extractSchema } from "./schema.mjs";
 import { Frontier } from "./frontier.mjs";
 import { Page } from "./page.mjs";
@@ -301,6 +302,15 @@ function seedFrontier(st) {
   for (const s of starts) st.frontier.add(s, 0);
 }
 
+// Pick the fetch dispatcher: a caller-supplied undici Agent (we don't own it),
+// `false` to opt out (use Node's global dispatcher), or a fresh HTTP/2 + DNS-cache
+// Agent we create and must close when the crawl ends.
+function resolveDispatcher(o) {
+  if (o.dispatcher === false) return { dispatcher: undefined, owned: false };
+  if (o.dispatcher) return { dispatcher: o.dispatcher, owned: false };
+  return { dispatcher: createDispatcher(), owned: true };
+}
+
 export class Crawler {
   constructor(options = {}) {
     this.options = { ...DEFAULTS, ...options };
@@ -313,6 +323,7 @@ export class Crawler {
   async *[Symbol.asyncIterator]() {
     const st = makeState(this);
     seedFrontier(st);
+    const { dispatcher, owned } = resolveDispatcher(st.o);
 
     const pool = Array.from(
       { length: st.o.concurrency },
@@ -321,6 +332,7 @@ export class Crawler {
           fetchHtml: st.o.fetchHtml,
           jar: st.o.jar,
           cache: st.o.cache,
+          dispatcher,
           userAgent: st.o.httpUserAgent,
           navigator: st.o.navigator,
         }),
@@ -328,7 +340,10 @@ export class Crawler {
 
     Promise.all(pool.map((p) => worker(st, p)))
       .catch((err) => st.channel.push({ error: String(err) }))
-      .finally(() => st.channel.close());
+      .finally(async () => {
+        if (owned) await dispatcher.close();
+        st.channel.close();
+      });
 
     while (true) {
       const { value, done } = await st.channel.next();

@@ -21,6 +21,8 @@ export interface FetchOptions {
   signal?: AbortSignal;
   jar?: CookieJar;
   cache?: ResponseCache;
+  /** undici Agent (HTTP/2 + DNS cache) used as the fetch dispatcher. */
+  dispatcher?: unknown;
   maxBytes?: number;
   maxRedirects?: number;
   allowNonHtml?: boolean;
@@ -38,6 +40,15 @@ export declare class ResponseCache {
   body(url: string): string;
   readonly size: number;
 }
+
+/** A dns.lookup-compatible function with a per-host TTL cache. */
+export declare function cachedLookup(opts?: {
+  ttlMs?: number;
+  now?: () => number;
+  base?: (...args: unknown[]) => void;
+}): (hostname: string, options: unknown, callback: (...args: unknown[]) => void) => void;
+/** An undici Agent with HTTP/2 + a DNS cache, for use as a fetch `dispatcher`. */
+export declare function createDispatcher(opts?: { allowH2?: boolean; dnsTtlMs?: number }): unknown;
 
 // --- cookies / robots --------------------------------------------------------
 export declare class CookieJar {
@@ -207,6 +218,7 @@ export interface PageOptions {
   fetchHtml?: typeof fetchHtml;
   jar?: CookieJar;
   cache?: ResponseCache;
+  dispatcher?: unknown;
   userAgent?: string;
   navigator?: NavigatorOverrides;
 }
@@ -299,6 +311,8 @@ export interface CrawlerOptions {
   followRequests?: boolean;
   jar?: CookieJar;
   cache?: ResponseCache;
+  /** undici Agent for fetch, or `false` to use Node's global dispatcher. Default: a fresh HTTP/2 + DNS-cache Agent. */
+  dispatcher?: unknown;
   signal?: AbortSignal;
 }
 export declare class Crawler {

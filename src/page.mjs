@@ -47,6 +47,7 @@ export class Page {
   #fetchHtml;
   #jar;
   #cache; // optional ResponseCache for conditional (304) revalidation
+  #dispatcher; // optional undici Agent (HTTP/2 + DNS cache) for fetch
   #nav; // navigator property overrides (also drives the HTTP User-Agent), or null
   #url = null;
   #status = 0;
@@ -62,11 +63,13 @@ export class Page {
    * @param {string} [opts.userAgent]            UA for both navigator.userAgent and the HTTP header
    * @param {object} [opts.navigator]            navigator property overrides (platform, language, …)
    * @param {object} [opts.cache]                ResponseCache for conditional (304) revalidation
+   * @param {object} [opts.dispatcher]           undici Agent (HTTP/2 + DNS cache) for fetch
    */
   constructor(opts = {}) {
     this.#fetchHtml = opts.fetchHtml ?? fetchHtml;
     this.#jar = opts.jar ?? new CookieJar();
     this.#cache = opts.cache;
+    this.#dispatcher = opts.dispatcher;
     this.#nav = normalizeNavigator(opts);
   }
 
@@ -102,7 +105,13 @@ export class Page {
   // Fetch with the session jar + cache + configured User-Agent; per-call headers win.
   #fetch(url, opts = {}) {
     const headers = { ...this.#uaHeader(), ...opts.headers };
-    return this.#fetchHtml(url, { jar: this.#jar, cache: this.#cache, ...opts, headers });
+    return this.#fetchHtml(url, {
+      jar: this.#jar,
+      cache: this.#cache,
+      dispatcher: this.#dispatcher,
+      ...opts,
+      headers,
+    });
   }
 
   /** Absolute URL of the currently-loaded page (after redirects), or null. */

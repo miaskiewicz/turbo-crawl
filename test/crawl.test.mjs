@@ -118,6 +118,26 @@ describe("Crawler", () => {
     assert.ok(rec.view.interactiveElements.every((e) => e.visible === true));
   });
 
+  it("creates a default HTTP/2 dispatcher and threads it to fetch", async () => {
+    const { c, fetchHtml } = crawler({ maxPages: 1 });
+    await collect(c);
+    const disp = fetchHtml.calls[0][1].dispatcher;
+    assert.equal(typeof disp.close, "function"); // a real undici Agent
+  });
+
+  it("dispatcher:false uses Node's global dispatcher (none threaded)", async () => {
+    const { c, fetchHtml } = crawler({ maxPages: 1, dispatcher: false });
+    await collect(c);
+    assert.equal(fetchHtml.calls[0][1].dispatcher, undefined);
+  });
+
+  it("threads a caller-supplied dispatcher through unchanged", async () => {
+    const mine = { close: async () => {} };
+    const { c, fetchHtml } = crawler({ maxPages: 1, dispatcher: mine });
+    await collect(c);
+    assert.equal(fetchHtml.calls[0][1].dispatcher, mine);
+  });
+
   it("enforces per-host politeness ordering via the clock", async () => {
     // With politeness and a single host, nextAt gating must not deadlock.
     let t = 0;
