@@ -46,6 +46,7 @@ export class Page {
   #env = null;
   #fetchHtml;
   #jar;
+  #cache; // optional ResponseCache for conditional (304) revalidation
   #nav; // navigator property overrides (also drives the HTTP User-Agent), or null
   #url = null;
   #status = 0;
@@ -60,10 +61,12 @@ export class Page {
    * @param {CookieJar} [opts.jar]               shared cookie jar (default: fresh)
    * @param {string} [opts.userAgent]            UA for both navigator.userAgent and the HTTP header
    * @param {object} [opts.navigator]            navigator property overrides (platform, language, …)
+   * @param {object} [opts.cache]                ResponseCache for conditional (304) revalidation
    */
   constructor(opts = {}) {
     this.#fetchHtml = opts.fetchHtml ?? fetchHtml;
     this.#jar = opts.jar ?? new CookieJar();
+    this.#cache = opts.cache;
     this.#nav = normalizeNavigator(opts);
   }
 
@@ -96,10 +99,10 @@ export class Page {
     return this.#nav?.userAgent ? { "user-agent": this.#nav.userAgent } : {};
   }
 
-  // Fetch with the session jar + configured User-Agent; per-call headers win.
+  // Fetch with the session jar + cache + configured User-Agent; per-call headers win.
   #fetch(url, opts = {}) {
     const headers = { ...this.#uaHeader(), ...opts.headers };
-    return this.#fetchHtml(url, { jar: this.#jar, ...opts, headers });
+    return this.#fetchHtml(url, { jar: this.#jar, cache: this.#cache, ...opts, headers });
   }
 
   /** Absolute URL of the currently-loaded page (after redirects), or null. */

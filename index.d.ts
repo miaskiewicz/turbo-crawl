@@ -11,6 +11,8 @@ export interface FetchResult {
   headers: Headers;
   redirected: boolean;
   discovered?: string[];
+  /** true when the server answered 304 and the cached body was reused. */
+  notModified?: boolean;
 }
 export interface FetchOptions {
   headers?: Record<string, string>;
@@ -18,6 +20,7 @@ export interface FetchOptions {
   body?: string;
   signal?: AbortSignal;
   jar?: CookieJar;
+  cache?: ResponseCache;
   maxBytes?: number;
   maxRedirects?: number;
   allowNonHtml?: boolean;
@@ -26,6 +29,14 @@ export interface FetchOptions {
 export declare function fetchHtml(url: string, opts?: FetchOptions): Promise<FetchResult>;
 export declare class HttpError extends Error {
   code: string;
+}
+
+/** Conditional-request cache: stores ETag/Last-Modified + body for 304 revalidation. */
+export declare class ResponseCache {
+  validators(url: string): Record<string, string>;
+  store(url: string, headers: Headers, html: string, status: number): void;
+  body(url: string): string;
+  readonly size: number;
 }
 
 // --- cookies / robots --------------------------------------------------------
@@ -195,6 +206,7 @@ export interface NavigatorOverrides {
 export interface PageOptions {
   fetchHtml?: typeof fetchHtml;
   jar?: CookieJar;
+  cache?: ResponseCache;
   userAgent?: string;
   navigator?: NavigatorOverrides;
 }
@@ -286,6 +298,7 @@ export interface CrawlerOptions {
   fallback?: typeof fetchHtml;
   followRequests?: boolean;
   jar?: CookieJar;
+  cache?: ResponseCache;
   signal?: AbortSignal;
 }
 export declare class Crawler {

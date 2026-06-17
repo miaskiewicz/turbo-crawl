@@ -6,6 +6,7 @@ export const version = "0.1.0";
 
 export { Page } from "./page.mjs";
 export { fetchHtml, HttpError } from "./net.mjs";
+export { ResponseCache } from "./cache.mjs";
 export { CookieJar } from "./cookies.mjs";
 export { RobotsCache, parseRobots } from "./robots.mjs";
 export { interactiveElements, links } from "./extract.mjs";

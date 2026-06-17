@@ -320,6 +320,7 @@ export class Crawler {
         new Page({
           fetchHtml: st.o.fetchHtml,
           jar: st.o.jar,
+          cache: st.o.cache,
           userAgent: st.o.httpUserAgent,
           navigator: st.o.navigator,
         }),

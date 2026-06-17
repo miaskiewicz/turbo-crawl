@@ -96,7 +96,8 @@ function decode(bytes, charset) {
  * @param {typeof fetch} [opts.fetch]    injectable for tests / Lane B
  * @returns {Promise<{ html:string, finalUrl:string, status:number, headers:Headers }>}
  */
-// Build the request headers: UA/accept defaults, caller overrides, then jar cookie.
+// Build the request headers: UA/accept defaults, caller overrides, jar cookie,
+// and conditional-request validators (If-None-Match / If-Modified-Since).
 function buildHeaders(url, opts) {
   const headers = {
     "user-agent": DEFAULT_UA,
@@ -107,6 +108,7 @@ function buildHeaders(url, opts) {
     const cookie = opts.jar.cookieHeader(url);
     if (cookie) headers.cookie = cookie;
   }
+  if (opts.cache) Object.assign(headers, opts.cache.validators(url));
   return headers;
 }
 
@@ -198,6 +200,28 @@ async function followAuto(doFetch, url, opts) {
   return { res, finalUrl, redirected: !!res.redirected };
 }
 
+// 304 Not Modified → reuse the cached body (the server sent no body).
+function notModified(res, finalUrl, redirected, opts) {
+  return {
+    html: opts.cache.body(finalUrl),
+    finalUrl,
+    status: 304,
+    headers: res.headers,
+    redirected,
+    notModified: true,
+  };
+}
+
+// Turn a settled response into the FetchResult: short-circuit 304s, else gate +
+// decode and (when caching) record the validators/body for next time.
+async function finishFetch(res, finalUrl, redirected, opts, maxBytes) {
+  if (opts.cache && res.status === 304) return notModified(res, finalUrl, redirected, opts);
+  gateHtmlType(opts, res);
+  const html = await decodeBody(res, maxBytes);
+  if (opts.cache) opts.cache.store(finalUrl, res.headers, html, res.status);
+  return { html, finalUrl, status: res.status, headers: res.headers, redirected };
+}
+
 export async function fetchHtml(url, opts = {}) {
   const doFetch = opts.fetch ?? fetch;
   const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES;
@@ -207,7 +231,5 @@ export async function fetchHtml(url, opts = {}) {
       ? await followManually(doFetch, url, opts, opts.maxRedirects)
       : await followAuto(doFetch, url, opts);
 
-  gateHtmlType(opts, res);
-  const html = await decodeBody(res, maxBytes);
-  return { html, finalUrl, status: res.status, headers: res.headers, redirected };
+  return finishFetch(res, finalUrl, redirected, opts, maxBytes);
 }
