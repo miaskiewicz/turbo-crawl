@@ -159,6 +159,41 @@ fn document_current_script_is_present_for_webpack() {
     );
 }
 
+// The React Server Components client reads the flight payload as a ReadableStream,
+// and fetch/abortable work needs AbortController. deno_core ships neither.
+#[tokio::test]
+async fn readable_stream_and_abort_controller_present() {
+    let html = render_page(
+        "<body><div id='root'></div></body>",
+        "about:blank",
+        r#"
+        (async () => {
+          const rs = new ReadableStream({
+            start(c) { c.enqueue("alpha"); c.enqueue("beta"); c.close(); },
+          });
+          const reader = rs.getReader();
+          let parts = [];
+          for (;;) { const { value, done } = await reader.read(); if (done) break; parts.push(value); }
+          const ac = new AbortController();
+          const aborted0 = ac.signal.aborted;
+          ac.abort();
+          document.getElementById('root').setAttribute('data-parts', parts.join(','));
+          document.getElementById('root').setAttribute('data-abort', String(aborted0) + '->' + String(ac.signal.aborted));
+        })();
+        "#,
+    )
+    .await
+    .unwrap();
+    assert!(
+        html.contains(r#"data-parts="alpha,beta""#),
+        "ReadableStream reader must yield chunks: {html}"
+    );
+    assert!(
+        html.contains(r#"data-abort="false->true""#),
+        "AbortController.abort must flip signal: {html}"
+    );
+}
+
 // Web globals deno_core lacks but app bundles use (TextEncoder/Decoder round-trip,
 // crypto.getRandomValues, btoa/atob). A bundle touching any of these mid-hydration
 // would otherwise crash with "X is not defined".

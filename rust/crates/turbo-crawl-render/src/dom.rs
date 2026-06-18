@@ -288,6 +288,76 @@ if (typeof globalThis.btoa === "undefined") {
     return out;
   };
 }
+// AbortController/AbortSignal — fetch + many async libs take a signal. deno_core
+// ships a STUB AbortController whose `.signal` is undefined, so override it outright.
+{
+  globalThis.AbortSignal = class AbortSignal {
+    constructor() { this.aborted = false; this.reason = undefined; this.onabort = null; this._l = []; }
+    addEventListener(t, fn) { if (t === "abort") this._l.push(fn); }
+    removeEventListener(t, fn) { this._l = this._l.filter((f) => f !== fn); }
+    dispatchEvent() { return true; }
+    throwIfAborted() { if (this.aborted) throw this.reason || new Error("Aborted"); }
+  };
+  globalThis.AbortSignal.timeout = () => new globalThis.AbortSignal();
+  globalThis.AbortSignal.abort = (r) => { const s = new globalThis.AbortSignal(); s.aborted = true; s.reason = r; return s; };
+  globalThis.AbortController = class AbortController {
+    constructor() { this.signal = new globalThis.AbortSignal(); }
+    abort(reason) {
+      if (this.signal.aborted) return;
+      this.signal.aborted = true;
+      this.signal.reason = reason;
+      const ev = { type: "abort", target: this.signal };
+      try { if (typeof this.signal.onabort === "function") this.signal.onabort(ev); } catch (_e) {}
+      for (const fn of this.signal._l) { try { fn(ev); } catch (_e) {} }
+    }
+  };
+}
+// ReadableStream — the RSC client reads the flight payload as a stream. A queue-backed
+// impl supporting start/pull/cancel + getReader().read() {value,done}; enough for the
+// "wrap a buffer/array and read it" use the hydration path needs.
+if (typeof globalThis.ReadableStream === "undefined") {
+  globalThis.ReadableStream = class ReadableStream {
+    constructor(source = {}, _strategy) {
+      this._q = [];
+      this._closed = false;
+      this._err = null;
+      this._source = source || {};
+      this._locked = false;
+      const c = {
+        enqueue: (chunk) => this._q.push(chunk),
+        close: () => { this._closed = true; },
+        error: (e) => { this._err = e; this._closed = true; },
+        get desiredSize() { return 1; },
+      };
+      this._ctrl = c;
+      try { if (typeof this._source.start === "function") this._source.start(c); } catch (e) { this._err = e; }
+    }
+    get locked() { return this._locked; }
+    getReader() {
+      const self = this;
+      self._locked = true;
+      const pump = async () => {
+        if (!self._q.length && !self._closed && typeof self._source.pull === "function") {
+          await self._source.pull(self._ctrl);
+        }
+      };
+      return {
+        async read() {
+          await pump();
+          if (self._q.length) return { value: self._q.shift(), done: false };
+          if (self._err) throw self._err;
+          return { value: undefined, done: true };
+        },
+        releaseLock() { self._locked = false; },
+        async cancel(r) { self._closed = true; if (typeof self._source.cancel === "function") await self._source.cancel(r); },
+      };
+    }
+    async cancel(r) { this._closed = true; if (typeof this._source.cancel === "function") await this._source.cancel(r); }
+    pipeThrough(t) { return t && t.readable ? t.readable : this; }
+    pipeTo() { return Promise.resolve(); }
+    tee() { return [this, this]; }
+  };
+}
 // History API (single virtual entry; updates location.href).
 globalThis.history = {
   state: null,
@@ -452,14 +522,19 @@ globalThis.__execScriptEl = async function (el) {
 };
 // Run every not-yet-run <script> in DOM order, drain timers, repeat while new
 // scripts appear or timers keep firing. Bounded by maxRounds (+ the render budget).
-globalThis.__hydrate = async function (maxRounds = 300) {
-  for (let round = 0; round < maxRounds; round++) {
+globalThis.__hydrate = async function (maxRounds = 300, timerBudget = 200000) {
+  let timersLeft = timerBudget; // total timer-callback budget across rounds — an app
+  // whose scheduler never reaches idle (e.g. React polling a backend that never
+  // answers) would otherwise spin until the render budget; cap it and return the
+  // best-effort DOM rendered so far.
+  for (let round = 0; round < maxRounds && timersLeft > 0; round++) {
     let ranScript = false;
     for (const el of Array.prototype.slice.call(document.querySelectorAll("script"))) {
       if (!el.__tcDone) { ranScript = true; await globalThis.__execScriptEl(el); }
     }
-    const ranTimers = globalThis.__runTimers(100000) > 0;
-    if (!ranScript && !ranTimers) break;
+    const fired = globalThis.__runTimers(Math.min(timersLeft, 5000));
+    timersLeft -= fired;
+    if (!ranScript && fired === 0) break;
   }
 };
 })();"##;
