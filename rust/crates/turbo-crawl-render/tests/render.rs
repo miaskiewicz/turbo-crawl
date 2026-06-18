@@ -159,6 +159,30 @@ fn document_current_script_is_present_for_webpack() {
     );
 }
 
+// Embeddable widgets (PropelAuth's login) render into a Shadow DOM via
+// host.attachShadow(). rtdom has no shadow tree, so we fall back to the light DOM —
+// attachShadow returns the host, content lands in the serialized document. Without
+// it, hydration crashed with "attachShadow is not a function".
+#[test]
+fn attach_shadow_falls_back_to_light_dom() {
+    let html = render_html(
+        "<body><div id='host'></div></body>",
+        r#"
+        const host = document.createElement('div'); // React creates the shadow host
+        document.getElementById('host').appendChild(host);
+        const root = host.attachShadow({ mode: 'open' });
+        const input = document.createElement('input');
+        input.setAttribute('data-testid', 'shadow-input');
+        root.appendChild(input);
+        "#,
+    )
+    .unwrap();
+    assert!(
+        html.contains(r#"data-testid="shadow-input""#),
+        "content rendered into a shadow root must reach the serialized light DOM: {html}"
+    );
+}
+
 // The React Server Components client reads the flight payload as a ReadableStream,
 // and fetch/abortable work needs AbortController. deno_core ships neither.
 #[tokio::test]

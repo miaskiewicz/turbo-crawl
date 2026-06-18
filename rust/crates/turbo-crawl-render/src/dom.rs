@@ -537,6 +537,32 @@ globalThis.__hydrate = async function (maxRounds = 300, timerBudget = 200000) {
     if (!ranScript && fired === 0) break;
   }
 };
+// Pending-work signal for the Rust pump loop: "1" while timers are queued or a
+// <script> hasn't run (more to do after the next async drain), else "0".
+globalThis.__pendingWork = () =>
+  __timers.length > 0 || Array.prototype.some.call(document.querySelectorAll("script"), (s) => !s.__tcDone) ? "1" : "0";
+
+// Shadow DOM light-DOM fallback: embeddable widgets (PropelAuth's login) call
+// host.attachShadow() and render into the returned root. rtdom has no shadow tree,
+// so the root IS the host — rendered content lands in the serialized light DOM and
+// stays queryable. Stamped as an OWN property (the binding's interceptor returns real
+// own props) on every created element + the existing roots. Not true encapsulation,
+// but enough to let a shadow-rendering widget mount into the document.
+(function () {
+  const addShadow = (el) => {
+    if (el && typeof el.attachShadow !== "function") {
+      el.attachShadow = function () {
+        try { this.shadowRoot = this; } catch (_e) {}
+        return this;
+      };
+    }
+    return el;
+  };
+  const origCreate = document.createElement.bind(document);
+  document.createElement = (tag) => addShadow(origCreate(tag));
+  if (document.body) addShadow(document.body);
+  if (document.documentElement) addShadow(document.documentElement);
+})();
 })();"##;
 
 fn make_runtime(base: &str) -> JsRuntime {
@@ -762,14 +788,24 @@ pub async fn render_hydrate_with_budget(
 
 async fn run_hydrate(rt: &mut JsRuntime, html: &str, base: &str) -> Result<String, String> {
     install_dom(rt, html, base)?;
-    // __hydrate() returns a promise that resolves once scripts + timers quiesce;
-    // the event loop pumps the chunk fetches it awaits.
-    rt.execute_script("<hydrate>", "globalThis.__tcHydrate = __hydrate();")
-        .map_err(|e| e.to_string())?;
-    drain_event_loop(rt).await?;
-    rt.execute_script("<timers>", "__runTimers()")
-        .map_err(|e| e.to_string())?;
-    drain_event_loop(rt).await?;
+    // Unified event-loop pump. A single "run scripts+timers, then drain" pass isn't
+    // enough for a real SPA: React kicks a fetch, yields, the fetch resolves, React
+    // schedules MORE work (a timer via its MessageChannel), which schedules another
+    // fetch… So loop — run the hydration pump, drain async ops (microtasks + fetches +
+    // injected-script loads), check whether JS still has queued work — until it
+    // quiesces. The watchdog bounds wall time; MAX_PUMPS bounds a pathological spin.
+    const MAX_PUMPS: usize = 500;
+    for _ in 0..MAX_PUMPS {
+        rt.execute_script("<hydrate>", "globalThis.__tcHydrate = __hydrate();")
+            .map_err(|e| e.to_string())?;
+        drain_event_loop(rt).await?;
+        let pending = rt
+            .execute_script("<pending>", "__pendingWork()")
+            .map_err(|e| e.to_string())?;
+        if read_string(rt, pending)? != "1" {
+            break;
+        }
+    }
     Ok(crate::browser_env::document_html())
 }
 
