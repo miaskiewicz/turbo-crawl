@@ -94,9 +94,12 @@ place, and the render returns the hydrated HTML (the Lane B contract).
 `turbo-crawl-napi` is the `.node` addon: a stateless functional surface (markdown /
 text / links / extract / getBy / accessors / actions / evaluate / render / transform)
 plus async `fetchHtml` / `request` / `crawl` and a stateful `Session` (retained tree,
-worker thread). The `rust/playwright-shim/` package is the `@playwright/test` drop-in
-backed by it (Page / Locator / expect / `chromium`, plus a `--import register` resolve
-redirect so vanilla specs run on the no-browser Rust engine, unedited).
+worker thread), plus `nodeSnapshot` (a one-crossing batch of a node's state reads).
+The `rust/playwright-shim/` package is the `@playwright/test` drop-in backed by it
+(Page / Locator / expect's five assertion classes / BrowserContext / fixtures /
+`chromium`, plus a `--import register` resolve redirect so vanilla specs run on the
+no-browser Rust engine, unedited). Coverage map:
+[`playwright-shim/LIMITATIONS.md`](./playwright-shim/LIMITATIONS.md).
 
 ## Build / test
 

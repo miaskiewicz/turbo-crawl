@@ -22,7 +22,10 @@ docs [`rust/README.md`](./rust/README.md) + [`rust/HEADLESS-HYDRATION.md`](./rus
   the vendored `browser_env` rtdom↔V8 DOM binding), `turbo-crawl-transform` (swc),
   `turbo-crawl-napi` (dev/harness in-process addon), `turbo-crawl-mcp` (the stdio
   MCP **binary** the launcher spawns).
-- **JS surface:** `cli.js` + `index.js` (the launcher), `harness/` (benchmarks).
+- **JS surface:** `cli.js` + `index.js` (the launcher), `harness/` (benchmarks),
+  `rust/playwright-shim/` (a drop-in `@playwright/test` façade over the
+  `turbo-crawl-napi` addon — Page/Locator/expect/context/fixtures, no browser;
+  see its [`LIMITATIONS.md`](./rust/playwright-shim/LIMITATIONS.md)).
 - **Vendored, never hand-edit:** `rust/crates/turbo-crawl-render/src/browser_env{.rs,_upstream.rs,.js}`
   — re-vendor from turbo-test's committed HEAD via
   `rust/crates/turbo-crawl-render/scripts/vendor-browser-env.sh`.
@@ -33,8 +36,9 @@ The engine gate is **Rust** (`cd rust`): `cargo test --workspace`, `cargo clippy
 --workspace --all-targets` (0 warnings), `cargo fmt --check`. The pre-commit hook
 (`.githooks/pre-commit`, wired by `npm run prepare`) lints/formats staged JS
 (oxlint + biome over the launcher/harness; the vendored `browser_env.js` is
-skipped). `npm run check` runs the JS lint/format + the Rust gate. Never bypass
-with `--no-verify`.
+skipped). `npm run check` runs the JS lint/format + the Rust gate + the Playwright
+shim tests (`test:playwright` = `build:addon` then `test:shim` + `test:e2e`). Never
+bypass with `--no-verify`.
 
 ## Testing rules
 
@@ -46,6 +50,10 @@ with `--no-verify`.
   the live network. New code must be covered.
 - Live-network checks (the competitive + crawler harnesses) live in `harness/` and
   auto-skip when their deps/browsers are absent.
+- Playwright shim: `rust/playwright-shim/{test,surface}.test.mjs` (offline unit) +
+  `e2e/*.spec.mjs` run through `register.mjs` (drop-in, localhost server, no
+  Chromium). They skip cleanly if the napi addon isn't built. New shim surface must
+  be covered there; run via `npm run test:playwright`.
 
 ## Code standards
 
@@ -100,3 +108,5 @@ to ship/publish/release.
   [`PUBLISHING.md`](./PUBLISHING.md).
 - **Harness:** [`harness/competitive/README.md`](./harness/competitive/README.md),
   [`harness/crawlers/README.md`](./harness/crawlers/README.md).
+- **Playwright drop-in:** [`rust/playwright-shim/LIMITATIONS.md`](./rust/playwright-shim/LIMITATIONS.md)
+  (per-method coverage map).

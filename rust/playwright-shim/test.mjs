@@ -13,7 +13,7 @@ try {
   console.log("shim: native addon not built, skipping —", e.message);
   process.exit(0);
 }
-const { chromium, expect, newPage } = shim;
+const { chromium, expect, newPage, test: pwTest } = shim;
 
 const PAGE = `<html><head><title>Shop</title></head><body>
   <main><h1>Widget</h1><p class="d">A nice widget</p></main>
@@ -164,10 +164,10 @@ test("locator-scoped actions (G3)", async () => {
 test("honest-throws for pixel APIs (G5)", async () => {
   const page = newPage();
   await page.setContent("<button>x</button>");
-  await assert.rejects(() => page.screenshot(), /no-JS render engine/);
-  await assert.rejects(() => page.pdf(), /no-JS render engine/);
-  await assert.rejects(() => page.locator("button").screenshot(), /no-JS render engine/);
-  await assert.rejects(() => page.locator("button").boundingBox(), /no-JS render engine/);
+  await assert.rejects(() => page.screenshot(), /unavailable/);
+  await assert.rejects(() => page.pdf(), /unavailable/);
+  await assert.rejects(() => page.locator("button").screenshot(), /unavailable/);
+  await assert.rejects(() => page.locator("button").boundingBox(), /unavailable/);
 });
 
 test("mock SPA hydrates through the shim (G15)", async () => {
@@ -209,8 +209,139 @@ test("cookies persist across navigations (G10)", async () => {
   await page.goto(`http://127.0.0.1:${port}/login`); // receives Set-Cookie
   await page.goto(`http://127.0.0.1:${port}/me`); // must send it back
   assert.match(await page.innerText(), /cookie:sid=secret/);
-  assert.equal(page.storageState().length, 1);
+  assert.equal(page.storageState().cookies.length, 1);
   server.close();
+});
+
+test("getByTestId resolves the configured attribute", async () => {
+  const page = newPage();
+  await page.setContent("<button data-testid='submit'>Go</button><span data-testid='x'>1</span>");
+  assert.equal(await page.getByTestId("submit").count(), 1);
+  assert.equal(await page.getByTestId("submit").textContent(), "Go");
+  await expect(page.getByTestId("x")).toHaveText("1");
+});
+
+test("locator composition (last/filter/and/or) is pure JS", async () => {
+  const page = newPage();
+  await page.setContent("<ul><li>apple</li><li>banana</li><li>cherry</li></ul><li>loose</li>");
+  assert.equal(await page.locator("ul li").count(), 3);
+  assert.equal(await page.locator("ul li").last().textContent(), "cherry");
+  assert.equal(await page.locator("li").filter({ hasText: "ban" }).count(), 1);
+  assert.equal(await page.locator("li").filter({ hasNotText: "loose" }).count(), 3);
+});
+
+test("nested locator scopes via CSS concat", async () => {
+  const page = newPage();
+  await page.setContent("<div class='card'><button>buy</button></div><button>other</button>");
+  assert.equal(await page.locator(".card").locator("button").count(), 1);
+  assert.equal(await page.locator(".card").locator("button").textContent(), "buy");
+});
+
+test("function-form page.evaluate with an argument", async () => {
+  const page = newPage();
+  await page.setContent("<div id='n'>40</div>");
+  const r = await page.evaluate((sel) => Number(document.querySelector(sel).textContent) + 2, "#n");
+  assert.equal(Number(r), 42);
+});
+
+test("node_snapshot batches expect(locator) chain in one crossing", async () => {
+  const page = newPage();
+  await page.setContent("<button>Go</button><input disabled>");
+  const snap = page.locator("button")._snapshot();
+  assert.equal(snap.visible, true);
+  assert.equal(snap.enabled, true);
+  assert.equal(snap.text, "Go");
+  await expect(page.locator("button")).toBeVisible();
+  await expect(page.locator("button")).toBeEnabled();
+  await expect(page.locator("input")).toBeDisabled();
+});
+
+test("generic-value expect matchers (no DOM, pure JS)", async () => {
+  expect(2 + 2).toBe(4);
+  expect([1, 2, 3]).toContain(2);
+  expect([1, 2, 3]).toHaveLength(3);
+  expect("hello world").toMatch(/world/);
+  expect(null).toBeNull();
+  expect(0).toBeFalsy();
+  expect(5).toBeGreaterThan(3);
+  expect({ a: 1, b: 2 }).toMatchObject({ a: 1 });
+  expect({ a: 1 }).toEqual({ a: 1 });
+  expect(() => {
+    throw new Error("boom");
+  }).toThrow("boom");
+  expect(3).not.toBe(4);
+});
+
+test("page expect: toHaveURL / toHaveTitle", async () => {
+  const body = "<html><head><title>Home</title></head><body>hi</body></html>";
+  const server = createServer((_q, res) => {
+    res.writeHead(200, { "content-type": "text/html" });
+    res.end(body);
+  });
+  await new Promise((r) => server.listen(0, r));
+  const port = server.address().port;
+  const page = newPage();
+  await page.goto(`http://127.0.0.1:${port}/`);
+  await expect(page).toHaveURL(new RegExp(`127.0.0.1:${port}`));
+  await expect(page).toHaveTitle("Home");
+  server.close();
+});
+
+test("waiters resolve on the static DOM", async () => {
+  const page = newPage();
+  await page.setContent("<main><h1>x</h1></main>");
+  await page.waitForLoadState("networkidle");
+  await page.waitForTimeout(1);
+  assert.ok(await page.waitForSelector("h1"));
+  assert.equal(await page.waitForSelector("nope", { state: "hidden" }), null);
+});
+
+test("baseURL + history (goBack)", async () => {
+  const server = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/html" });
+    res.end(`<title>${req.url}</title>`);
+  });
+  await new Promise((r) => server.listen(0, r));
+  const port = server.address().port;
+  const { newContext } = {
+    newContext: () => new shim.BrowserContext({ baseURL: `http://127.0.0.1:${port}` }),
+  };
+  const ctx = newContext();
+  const page = await ctx.newPage();
+  await page.goto("/a"); // relative → resolved against baseURL
+  await page.goto("/b");
+  assert.equal(await page.title(), "/b");
+  await page.goBack();
+  assert.equal(await page.title(), "/a");
+  server.close();
+});
+
+test("event registry: on('load') fires", async () => {
+  const page = newPage();
+  let fired = 0;
+  page.on("load", () => fired++);
+  await page.setContent("<p>x</p>");
+  assert.equal(fired, 1);
+});
+
+test("honest throws for network/input/pixel", async () => {
+  const page = newPage();
+  await page.setContent("<a>x</a>");
+  await assert.rejects(() => page.route("**"), /interception/);
+  await assert.rejects(() => page.mouse.click(0, 0), /input/);
+  await assert.rejects(() => page.keyboard.press("a"), /input/);
+  await assert.rejects(() => page.locator("a").hover(), /input/);
+});
+
+pwTest("@playwright/test fixture: { page } is injected", async ({ page }) => {
+  await page.setContent("<h1>fixture</h1>");
+  await expect(page.locator("h1")).toHaveText("fixture");
+});
+
+pwTest.describe("describe groups", () => {
+  pwTest("nested test runs", async ({ page }) => {
+    assert.ok(page);
+  });
 });
 
 test("goto over localhost via chromium.launch", async () => {

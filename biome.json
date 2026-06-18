@@ -22,6 +22,7 @@
       "**/dist/**",
       "**/node_modules/**",
       "**/coverage/**",
+      "**/target/**",
       "test/fixtures/**",
       "**/storage/**",
       "**/browser_env.js"

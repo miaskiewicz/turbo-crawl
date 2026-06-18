@@ -73,7 +73,21 @@ npx -y turbo-crawl-mcp
 ```
 
 Node ≥ 20 to launch; the engine is a prebuilt per-platform native binary (no Node
-runtime hosts it). The Rust crates are also published to crates.io for embedding.
+runtime hosts it).
+
+### What ships where
+
+turbo-crawl publishes from **one `v*` git tag** to two registries (see
+[PUBLISHING.md](./PUBLISHING.md)):
+
+| Artifact | Registry | What it is | For |
+|---|---|---|---|
+| [`@miaskiewicz/turbo-crawl`](https://www.npmjs.com/package/@miaskiewicz/turbo-crawl) | **npm** | A thin launcher (`cli.js`/`index.js`) **+ prebuilt `turbo-crawl-mcp` binaries** for each platform in `bin/` (darwin x64/arm64, linux x64/arm64-gnu, win x64). `npx` resolves the right one and spawns it. | Running the **MCP server** / CLI. No Rust toolchain, no Chromium, no Node hosting Rust. |
+| `turbo-crawl-core`, `-view`, `-page`, `-render`, `-mcp` | **crates.io** | The Rust crates, in dependency order. | **Embedding** the engine in a Rust program. |
+
+The `turbo-crawl-napi` cdylib and `turbo-crawl-transform` crate are **not**
+published — napi is for the dev harness + the Playwright shim only. The Playwright
+shim (`rust/playwright-shim/`) is a dev/in-repo tool, not an npm artifact.
 
 ## MCP server (agents)
 
@@ -100,35 +114,102 @@ the native DOM); then `eval_js` and `inject_js` run against the **live render he
 (page globals, handlers) and each mutation appends to a DOM-history trail readable
 via `latest_dom`/`dom_history`.
 
-### Set it up in Claude Code
+### Set it up in Claude Code (step by step)
 
-Register the stdio server once and every Claude Code session gets the tools:
+Never set up an MCP server before? This is the whole thing — three commands.
+
+**1. Check the prerequisites.** You need [Node ≥ 20](https://nodejs.org)
+(`node -v`) and the [Claude Code CLI](https://docs.claude.com/en/docs/claude-code)
+(`claude --version`). That's it — **no Rust, no Chromium, no build step**. `npx`
+downloads a small launcher plus the prebuilt native binary for your OS the first
+time you run it.
+
+**2. Register the server.** Run this once (the `--` separates Claude's flags from
+the command Claude will spawn):
 
 ```sh
 claude mcp add turbo-crawl -- npx -y turbo-crawl-mcp
 ```
 
-`npx -y turbo-crawl-mcp` resolves + spawns the native binary — one process, no Node
-hosting it, no Chromium. From a checkout, point at a local build instead:
+That writes the server into your Claude Code config. `npx -y turbo-crawl-mcp`
+resolves + spawns the native binary over stdio — one process, no Node hosting it,
+no browser.
+
+**3. Verify it's connected.** List your servers (look for `turbo-crawl` →
+`✓ connected`):
+
+```sh
+claude mcp list
+```
+
+Now start (or restart) Claude Code and ask it to, e.g., *"use turbo-crawl to fetch
+the markdown of example.com"* — the 60 tools above are available. Remove it later
+with `claude mcp remove turbo-crawl`.
+
+**Scope (where the server is registered).** By default it's registered for your
+user. To share it with a repo instead, add `--scope project` — that writes a
+`.mcp.json` you can commit:
+
+```jsonc
+// .mcp.json — committed; teammates get the server automatically
+{
+  "mcpServers": {
+    "turbo-crawl": { "command": "npx", "args": ["-y", "turbo-crawl-mcp"] }
+  }
+}
+```
+
+**Running from a checkout** (contributors) — point at a local build instead of npm:
 
 ```sh
 cargo build --release -p turbo-crawl-mcp --manifest-path rust/Cargo.toml
 claude mcp add turbo-crawl -- "$PWD/rust/target/release/turbo-crawl-mcp"
 ```
 
-Verify with `claude mcp list`. Scope to one project with `--scope project` (writes
-`.mcp.json`), or commit a `.mcp.json`:
+**Troubleshooting.** `command not found: claude` → install the Claude Code CLI.
+`npx` hangs the first run → it's downloading the binary; let it finish (or pre-warm
+with `npx -y turbo-crawl-mcp` in a terminal, then Ctrl-C). Shows `✗ failed` in
+`claude mcp list` → run the command directly to see the error; on an unsupported
+platform there's no prebuilt binary (build from a checkout as above).
 
-```json
-{
-  "mcpServers": {
-    "turbo-crawl": { "command": "rust/target/release/turbo-crawl-mcp", "args": [] }
-  }
-}
+**Other MCP clients** (Claude Desktop, Cursor, …) — point their MCP config's
+`command` at `npx` with args `["-y", "turbo-crawl-mcp"]`, or at the binary path.
+
+## Playwright drop-in (run your e2e specs with no browser)
+
+turbo-crawl's page API is Playwright-shaped, and `rust/playwright-shim/` is a
+**drop-in `@playwright/test` replacement** backed by the native engine — **no
+Chromium**. A `register.mjs` module-resolution hook rewrites every
+`import … from "@playwright/test"` (and `playwright` / `playwright-core`) to the
+shim, so existing specs run **unchanged** on `node:test`:
+
+```sh
+node --import ./rust/playwright-shim/register.mjs --test 'e2e/**/*.spec.mjs'
 ```
 
-(For other MCP clients — Claude Desktop, Cursor — point their MCP config's `command`
-at the same binary or `npx -y turbo-crawl-mcp`.)
+It implements **Page**, **Locator**, **expect** (all five assertion classes),
+**BrowserContext**, **APIRequestContext**, and **test + fixtures** over the engine:
+navigation, every `getBy*` locator, locator composition/filtering, DOM actions
+(`click`/`fill`/`check`/`selectOption`/…), `evaluate`/`render` in the V8 tier,
+cookies + real `setExtraHTTPHeaders`, and the full matcher set. Most of the surface
+is pure JS and never crosses into Rust; only genuine DOM/render semantics do (and
+an `expect(locator)` chain is batched into one crossing).
+
+What a no-browser engine **physically can't do fails honestly** (it throws or
+no-ops — never a silent pass):
+
+| Bucket | Examples | Behavior |
+|---|---|---|
+| Pixels / layout | `screenshot`, `pdf`, `boundingBox`, `toHaveScreenshot`, `toMatchSnapshot` | **throws** |
+| Input hardware | `hover`, `dragTo`, `mouse`/`keyboard`/`touchscreen` | **throws** |
+| Network interception | `route`, `routeFromHAR`, `unroute` | **throws** |
+| JS↔host bindings | `exposeFunction`, `exposeBinding` | **throws** |
+| Truly-async/time | `waitFor*`, live `console`/`request` events, timer-driven mutation | resolve/no-op on the static DOM |
+| Layout-only state | `viewportSize`, `emulateMedia`, frames | stored / collapse to self |
+
+Full per-method coverage map: [`rust/playwright-shim/LIMITATIONS.md`](./rust/playwright-shim/LIMITATIONS.md).
+Best fit: **server-rendered and hydration-on-navigation** apps. A client-only SPA
+that paints entirely from JS after load (and never re-fetches) needs a real browser.
 
 ## Competitive benchmark
 
@@ -261,9 +342,11 @@ cargo build --release -p turbo-crawl-mcp    # the MCP binary the launcher spawns
 cargo bench -p turbo-crawl-view             # Rust microbench (parse / views)
 ```
 
-From the repo root: `npm run check` lints/formats the launcher JS + runs the Rust
-gate; `npm run harness` / `crawl-bench` / `hotpath` run the benchmarks (install
-`playwright` + `crawlee` ad-hoc for the competitor engines).
+From the repo root: `npm run check` lints/formats the launcher JS, runs the Rust
+gate, and runs the **Playwright shim** suites (`npm run test:playwright` =
+`build:addon` → `test:shim` offline unit tests → `test:e2e` drop-in specs through
+`register.mjs`, no Chromium). `npm run harness` / `crawl-bench` / `hotpath` run the
+benchmarks (install `playwright` + `crawlee` ad-hoc for the competitor engines).
 
 ## License
 

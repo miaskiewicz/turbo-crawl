@@ -7,6 +7,7 @@
 
 const { existsSync, copyFileSync, statSync } = require("node:fs");
 const { join } = require("node:path");
+const { execFileSync } = require("node:child_process");
 
 // node platform/arch → napi-rs binary suffix
 const SUFFIX = {
@@ -40,7 +41,20 @@ function devCandidates() {
 function requireDev(dev) {
   const node = join(__dirname, "turbo-crawl.dev.node");
   const stale = !existsSync(node) || statSync(dev).mtimeMs > statSync(node).mtimeMs;
-  if (stale) copyFileSync(dev, node);
+  if (stale) {
+    copyFileSync(dev, node);
+    // macOS kills (SIGKILL) a Mach-O whose code signature doesn't match its
+    // bytes; copying a freshly-built dylib invalidates it. Re-sign ad-hoc so the
+    // dev addon loads. (CI ships a per-platform `.node` directly — no copy, no
+    // re-sign needed.) Best-effort: skip if `codesign` is unavailable.
+    if (process.platform === "darwin") {
+      try {
+        execFileSync("codesign", ["--force", "-s", "-", node], { stdio: "ignore" });
+      } catch {
+        /* codesign absent or failed — let require surface the real error */
+      }
+    }
+  }
   return require(node);
 }
 

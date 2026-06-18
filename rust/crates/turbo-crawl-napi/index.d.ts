@@ -19,17 +19,25 @@ export function render(html: string, baseUrl: string, script: string): string;
 /** Transform TS/JSX source → classic JS (swc). */
 export function transform(src: string, ts: boolean, jsx: boolean): string;
 /** Transform a TS/JSX bundle then render it → hydrated HTML. */
-export function renderTs(html: string, baseUrl: string, src: string, ts: boolean, jsx: boolean): string;
+export function renderTs(
+  html: string,
+  baseUrl: string,
+  src: string,
+  ts: boolean,
+  jsx: boolean,
+): string;
 
 /** Fetch with an explicit method/body (POST form submit). */
 export function request(url: string, method: string, body?: string): Promise<string>;
 
-/** Fetch carrying storageState cookies in, updated state out (persistence). */
+/** Fetch carrying storageState cookies in, updated state out (persistence).
+ * `headers` is a JSON object of extra request headers (setExtraHTTPHeaders). */
 export function fetchWithCookies(
   url: string,
   cookies: string,
   method?: string,
   body?: string,
+  headers?: string,
 ): Promise<string>;
 
 // Actions by selector — mutate the DOM and return the new HTML.
@@ -59,6 +67,9 @@ export function accessibleDescriptionOf(html: string, node: number): string;
 export function selectedValuesOf(html: string, node: number): string[];
 export function cssValueOf(html: string, node: number, name: string): string;
 export function matchesAriaSnapshot(html: string, node: number, expected: string): boolean;
+/** One-crossing batch read of a node's state — JSON
+ * `{visible,checked,enabled,editable,empty,text,value,role,name,description}`. */
+export function nodeSnapshot(html: string, node: number): string;
 
 export function markdown(html: string, baseUrl: string): string;
 export function text(html: string): string;

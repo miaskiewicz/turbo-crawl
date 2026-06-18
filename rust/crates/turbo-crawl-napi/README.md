@@ -1,38 +1,50 @@
-# @miaskiewicz/turbo-crawl-native
+# turbo-crawl-napi
 
-The native (Rust) engine for turbo-crawl, exposed to Node as a napi-rs addon —
-the in-process bridge from the Rust core to JavaScript. The thin
-`@playwright/test` shim and the npm package consume this.
+The turbo-crawl Rust engine exposed to Node as a napi-rs addon — the in-process
+bridge from the Rust core to JavaScript.
+
+**Not published.** This is a **dev/harness-only** crate. The shipped npm package
+(`@miaskiewicz/turbo-crawl`) is a thin launcher that spawns the standalone
+`turbo-crawl-mcp` **binary** — it does not host Rust in Node. This addon exists so
+the JS code that genuinely needs an in-process DOM can run:
+
+- the **Playwright shim** (`rust/playwright-shim/`) — Page/Locator/expect over the
+  engine, and
+- the **benchmark harnesses** (`harness/`) — driving the engine from Node.
 
 ## Surface
 
-`require('@miaskiewicz/turbo-crawl-native')` → (see `index.d.ts`):
+`require('./index.js')` loads the addon; the full typed surface is in
+[`index.d.ts`](./index.d.ts). Grouped:
 
-- `fetchHtml(url)` / `crawl(optsJson)` — async (net + crawl scheduler)
-- `markdown` · `text` · `html` · `links` · `interactiveElements` ·
-  `accessibilityTree` · `ariaSnapshot` · `hydrationState` · `detect` ·
-  `query` · `extract` — synchronous view/extract passes over an HTML string
+- **async net/crawl:** `fetchHtml`, `request`, `fetchWithCookies` (cookies +
+  extra headers in, updated cookies out), `crawl`.
+- **view passes** (HTML string in): `markdown`, `text`, `html`, `links`,
+  `interactiveElements`, `accessibilityTree`, `ariaSnapshot`, `hydrationState`,
+  `detect`, `query`, `getBy`, `extract`.
+- **per-node accessors** (by handle): `attrOf`, `inputValueOf`, `is{Visible,
+  Checked,Enabled,Editable,Empty}`, `ariaRoleOf`, `accessibleNameOf`,
+  `accessibleDescriptionOf`, `selectedValuesOf`, `cssValueOf`,
+  `matchesAriaSnapshot`, and `nodeSnapshot` (one-crossing batch of the boolean/
+  text/role reads — backs `expect(locator)` chains).
+- **actions:** `fill`/`setChecked`/`selectOption`/`click` (by selector) and the
+  `*Node` variants (by handle).
+- **JS tier:** `evaluate`, `render`, `transform`.
 
 Stateless by design: Node passes the HTML, each call parses with turbo-dom and
-runs the Rust pass. The shim caches the fetched HTML so `goto` + many reads stay
-cheap, and nothing holds a (non-`Send`) DOM tree across the FFI boundary.
+runs the Rust pass. The most recent parse is cached per thread (`PARSE_CACHE`), so a
+same-HTML follow-up is a string-compare + `Rc` clone, not a re-parse; mutating
+actions own their own tree. Nothing holds a (non-`Send`) DOM tree across the FFI.
 
 ## Build
 
-```
-# dev (one cdylib for the host; index.js copies it to a .node and loads it)
-cargo build -p turbo-crawl-napi
-node __test__/smoke.cjs        # loads the addon in Node and exercises it
-
-# packaged prebuilt (.node per platform, via napi-rs)
-npm install && npx napi build --platform --release
+```sh
+cargo build --release -p turbo-crawl-napi
 ```
 
-## Distribution
-
-`.github/workflows/rust-napi-prebuild.yml` builds `turbo-crawl.<triple>.node`
-for macOS (arm64/x64), Linux (x64 + **native** arm64), and Windows (x64), then
-on a `v*` tag publishes this package with all prebuilt binaries. `index.js`
-resolves the right binary at load (with a local-cargo-build fallback for dev).
-
-aarch64-linux builds on `ubuntu-24.04-arm` (native), not an x86 cross-compile.
+`index.js` resolves a packaged `turbo-crawl.<triple>.node` if present, else falls
+back to the locally-built cdylib (`target/{release,debug}/libturbo_crawl_napi.*`):
+it copies the cdylib to a sibling `.node` and `require`s it. On macOS the copy
+invalidates the Mach-O code signature (→ `SIGKILL` on load), so the loader re-signs
+it ad-hoc (`codesign --force -s -`) after copying. The Playwright shim + harnesses
+auto-skip if no addon is built.

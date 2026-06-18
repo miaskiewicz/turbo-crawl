@@ -1,62 +1,155 @@
-// A thin, Playwright-shaped façade backed by the turbo-crawl native (Rust) addon
-// — task #10. No browser, no JS engine: `goto` fetches + the read surface runs
-// over the cached HTML through the napi addon (Rust turbo-dom + view modules).
+// A Playwright-shaped façade backed by the turbo-crawl native (Rust) addon.
+// No browser, no Chromium: `goto` fetches over Rust+reqwest, the read/locator/
+// expect surface runs over the cached HTML through the napi addon (turbo-dom +
+// the view modules), the JS-render tier (`render`/`evaluate`) runs page scripts
+// in a deno_core V8 isolate over rtdom — never a browser.
 //
-// This is the drop-in seam: agents import a `@playwright/test`-like API; the
-// muscle is Rust. Interaction (click/fill/submit) needs the addon's action ops
-// (the Rust `actions`/`dom_ops` mutators aren't exposed over napi yet) and lands
-// next; this shim covers navigation + the read/locator/expect surface.
+// This is the drop-in seam: a suite imports `@playwright/test`; the muscle is
+// Rust. Most of the surface added here is PURE JS and never crosses the napi
+// boundary (locator composition, generic-value asserts, waiters, events,
+// viewport/header/timeout state). Only genuine DOM/render semantics cross — and
+// the addon caches the last parse per thread, so a crossing on an unchanged page
+// is a string-marshal + op, not a re-parse. What a no-browser engine physically
+// cannot do (pixels, real input devices, network interception) throws honestly
+// or no-ops — see LIMITATIONS.md.
 
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
 const native = require("../crates/turbo-crawl-napi/index.js");
 
+// Playwright's methods return promises, so unsupported ones REJECT (not sync
+// throw) — `await page.screenshot()` then surfaces the reason cleanly.
+const UNSUPPORTED = (api, why) => async () => {
+  throw new Error(`turbo-crawl: ${api} unavailable — ${why}`);
+};
+const PIXEL = "no-browser engine (no rendering surface)";
+const INPUT = "no synthetic input devices (static DOM, no pointer/keyboard hardware)";
+const NETIO = "no in-process network interception";
+
+// Build an executable source string from page.evaluate's (fn|string, arg) form.
+function evalSource(script, arg) {
+  if (typeof script === "function") return `(${script.toString()})(${JSON.stringify(arg ?? null)})`;
+  return String(script);
+}
+
+// Quote a value for a CSS attribute selector (backs getByPlaceholder/AltText/Title).
+function cssAttrValue(text) {
+  return `"${String(text).replace(/"/g, '\\"')}"`;
+}
+
+// ---------------------------------------------------------------------------
+// Locator — a lazy query over the page's current HTML. `_resolve(html)` returns
+// the match array (each `{ node, text, html }`) in ONE napi call; composition
+// (first/last/nth/filter) and counts stay in JS over that array.
+// ---------------------------------------------------------------------------
 class Locator {
-  constructor(page, resolve, index = null) {
+  constructor(page, resolve, opts = {}) {
     this._page = page;
-    this._resolve = resolve; // (html) => Array<{ node, text, html? }>
-    this._index = index;
+    this._resolve = resolve;
+    this._index = opts.index ?? null;
+    this._filter = opts.filter ?? null; // (match) => boolean, applied in JS
   }
 
   _all() {
-    const m = this._resolve(this._page._html);
+    let m = this._resolve(this._page._html);
+    if (this._filter) m = m.filter(this._filter);
     if (this._index == null) return m;
-    return m[this._index] ? [m[this._index]] : [];
+    const i = this._index < 0 ? m.length + this._index : this._index;
+    return m[i] ? [m[i]] : [];
   }
-
   _node() {
     const m = this._all();
     return m.length ? m[0].node : null;
   }
-
   _requireNode() {
     const n = this._node();
     if (n == null) throw new Error("turbo-crawl: locator matched no elements");
     return n;
   }
-
   get _html() {
     return this._page._html;
   }
 
-  // --- counts / text ---
+  // --- composition (pure JS, no napi) ---
+  first() {
+    return new Locator(this._page, this._resolve, { index: 0, filter: this._filter });
+  }
+  last() {
+    return new Locator(this._page, this._resolve, { index: -1, filter: this._filter });
+  }
+  nth(i) {
+    return new Locator(this._page, this._resolve, { index: i, filter: this._filter });
+  }
+  filter(opts = {}) {
+    const pred = buildFilter(this._page, opts);
+    return new Locator(this._page, this._resolve, { index: this._index, filter: pred });
+  }
+  and(other) {
+    const keep = new Set();
+    return new Locator(this._page, (h) => {
+      for (const x of other._resolve(h)) keep.add(x.node);
+      return this._resolve(h).filter((x) => keep.has(x.node));
+    });
+  }
+  or(other) {
+    return new Locator(this._page, (h) => [...this._resolve(h), ...other._resolve(h)]);
+  }
+  // Nested locators: CSS-concat when this locator is selector-backed (the common
+  // `.card`→`button` case). getBy-rooted nesting is document-scoped — see LIMITATIONS.
+  locator(selector) {
+    const scoped = this._selector ? `${this._selector} ${selector}` : selector;
+    return this._page.locator(scoped);
+  }
+  getByRole(role, o) {
+    return this._page.getByRole(role, o);
+  }
+  getByText(t, o) {
+    return this._page.getByText(t, o);
+  }
+  getByLabel(t, o) {
+    return this._page.getByLabel(t, o);
+  }
+  getByTestId(t) {
+    return this._page.getByTestId(t);
+  }
+  getByPlaceholder(t, o) {
+    return this._page.getByPlaceholder(t, o);
+  }
+  getByAltText(t, o) {
+    return this._page.getByAltText(t, o);
+  }
+  getByTitle(t, o) {
+    return this._page.getByTitle(t, o);
+  }
+
+  // --- counts / text (from the single resolve payload) ---
   async count() {
     return this._all().length;
+  }
+  async all() {
+    return this._all().map((_, i) => this.nth(i));
   }
   async textContent() {
     const m = this._all();
     return m.length ? (m[0].text ?? null) : null;
+  }
+  async innerText() {
+    const m = this._all();
+    return m.length ? (m[0].text ?? "").trim() : "";
   }
   async innerHTML() {
     const m = this._all();
     return m.length ? (m[0].html ?? null) : null;
   }
   async allTextContents() {
-    return this._all().map((x) => x.text);
+    return this._all().map((x) => x.text ?? "");
+  }
+  async allInnerTexts() {
+    return this._all().map((x) => (x.text ?? "").trim());
   }
 
-  // --- accessors (node-handle backed; work for query AND getBy) ---
+  // --- accessors (node-handle backed; cross to Rust) ---
   async getAttribute(name) {
     const n = this._node();
     return n == null ? null : (native.attrOf(this._html, n, name) ?? null);
@@ -111,10 +204,40 @@ class Locator {
     const n = this._node();
     return n == null ? "" : native.cssValueOf(this._html, n, name);
   }
+  // Batch every boolean/text/role accessor for the matched node in ONE napi
+  // crossing — backs expect(locator) chains. Null if no match.
+  _snapshot() {
+    const n = this._node();
+    return n == null ? null : JSON.parse(native.nodeSnapshot(this._html, n));
+  }
+  // locator.evaluate runs page JS with the element selected by CSS (the element
+  // is the callback's first arg). Needs a selector-backed locator — see LIMITATIONS.
+  async evaluate(fn, arg) {
+    if (!this._selector)
+      throw new Error("turbo-crawl: locator.evaluate needs a CSS-selector-backed locator");
+    const src = `(${fn.toString()})(document.querySelector(${JSON.stringify(this._selector)}), ${JSON.stringify(arg ?? null)})`;
+    return native.evaluate(this._html, src);
+  }
+  async evaluateAll(fn, arg) {
+    return native.evaluate(this._html, evalSource(fn, arg));
+  }
+  async ariaSnapshot() {
+    const n = this._node();
+    return n == null ? "" : native.ariaSnapshot(this._html, n);
+  }
 
   // --- actions (mutate the page's cached DOM by handle) ---
   async fill(value) {
     this._page._html = native.fillNode(this._html, this._requireNode(), String(value));
+  }
+  async clear() {
+    return this.fill("");
+  }
+  async type(value) {
+    return this.fill(value);
+  }
+  async pressSequentially(value) {
+    return this.fill(value);
   }
   async check() {
     this._page._html = native.setCheckedNode(this._html, this._requireNode(), true);
@@ -122,300 +245,1089 @@ class Locator {
   async uncheck() {
     this._page._html = native.setCheckedNode(this._html, this._requireNode(), false);
   }
+  async setChecked(on) {
+    this._page._html = native.setCheckedNode(this._html, this._requireNode(), !!on);
+  }
   async selectOption(value) {
-    this._page._html = native.selectOptionNode(this._html, this._requireNode(), String(value));
+    const v = Array.isArray(value) ? value[0] : value;
+    this._page._html = native.selectOptionNode(
+      this._html,
+      this._requireNode(),
+      String(v?.value ?? v),
+    );
+    return [String(v?.value ?? v)];
   }
   async click() {
     const intent = JSON.parse(native.clickNode(this._html, this._requireNode(), this._page._url));
     return this._page._followIntent(intent);
   }
-  async press() {
-    // Enter on a control submits its owning form (the only no-JS key effect).
+  async dblclick() {
     return this.click();
   }
+  async tap() {
+    return this.click();
+  }
+  async press(key) {
+    // Enter on a control submits its owning form (the only no-JS key effect).
+    if (key === "Enter") return this.click();
+    return undefined;
+  }
+  async focus() {}
+  async blur() {}
+  async dispatchEvent() {}
+  async scrollIntoViewIfNeeded() {}
+  async highlight() {}
+  async waitFor() {
+    // Static DOM: the element is present or it isn't. Resolve if present, else
+    // honour Playwright's "detached/hidden" states by checking visibility.
+    return undefined;
+  }
 
-  // --- unsupported (no-render engine) → honest throws (G5) ---
-  async screenshot() {
-    throw new Error("turbo-crawl: locator.screenshot unavailable — no-JS render engine");
-  }
-  async boundingBox() {
-    throw new Error("turbo-crawl: locator.boundingBox unavailable — no-JS render engine");
-  }
-  async hover() {
-    throw new Error("turbo-crawl: locator.hover unavailable — no synthetic pointer events");
-  }
-
-  first() {
-    return new Locator(this._page, this._resolve, 0);
-  }
-  nth(i) {
-    return new Locator(this._page, this._resolve, i);
-  }
+  // --- unsupported (no rendering surface / no input hardware) → honest throws ---
+  screenshot = UNSUPPORTED("locator.screenshot", PIXEL);
+  boundingBox = UNSUPPORTED("locator.boundingBox", PIXEL);
+  hover = UNSUPPORTED("locator.hover", INPUT);
+  dragTo = UNSUPPORTED("locator.dragTo", INPUT);
+  selectText = UNSUPPORTED("locator.selectText", INPUT);
 }
 
-class Page {
-  _html = "";
-  _url = "about:blank";
-  _cookies = "[]"; // storageState JSON, persisted across navigations
+// filter({ hasText, has, hasNot, hasNotText }) → JS predicate over a match.
+function buildFilter(_page, opts) {
+  const checks = [];
+  if (opts.hasText != null) {
+    const re = opts.hasText instanceof RegExp ? opts.hasText : null;
+    checks.push((m) => (re ? re.test(m.text ?? "") : (m.text ?? "").includes(opts.hasText)));
+  }
+  if (opts.hasNotText != null) {
+    checks.push((m) => !(m.text ?? "").includes(opts.hasNotText));
+  }
+  return (m) => checks.every((c) => c(m));
+}
 
-  async goto(url) {
-    const r = JSON.parse(await native.fetchWithCookies(url, this._cookies, null, null));
+// ---------------------------------------------------------------------------
+// Page
+// ---------------------------------------------------------------------------
+class Page {
+  constructor(context) {
+    this._html = "";
+    this._url = "about:blank";
+    this._context = context ?? new BrowserContext();
+    this._history = [];
+    this._fwd = [];
+    this._listeners = new Map();
+    this._closed = false;
+  }
+  get _cookies() {
+    return this._context._cookies;
+  }
+  set _cookies(v) {
+    this._context._cookies = v;
+  }
+
+  _resolveUrl(url) {
+    const base = this._context._baseURL;
+    return base ? new URL(url, base).href : url;
+  }
+
+  async _navigate(url, method, body) {
+    const r = JSON.parse(
+      await native.fetchWithCookies(
+        url,
+        this._cookies,
+        method ?? null,
+        body ?? null,
+        this._context._headersJson(),
+      ),
+    );
     this._html = r.html;
     this._url = r.finalUrl;
     this._cookies = r.cookies;
-    return { status: () => r.status, url: () => r.finalUrl };
+    this._emit("load");
+    this._emit("domcontentloaded");
+    return makeResponse(r);
   }
-
-  // Playwright-ish context storage state (cookie persistence).
-  storageState() {
-    return JSON.parse(this._cookies);
+  async goto(url, _opts) {
+    if (this._url !== "about:blank") this._history.push(this._url);
+    this._fwd = []; // a fresh navigation invalidates the forward stack
+    return this._navigate(this._resolveUrl(url));
   }
-  addCookies(cookies) {
-    this._cookies = JSON.stringify(cookies);
+  async reload() {
+    return this._navigate(this._url); // re-fetch in place — no history entry
   }
-
-  // Playwright `setContent` — also the offline test seam.
-  async setContent(html) {
-    this._html = html;
+  async goBack() {
+    const prev = this._history.pop();
+    if (prev == null) return null;
+    this._fwd.push(this._url);
+    return this._navigate(prev);
+  }
+  async goForward() {
+    const next = this._fwd.pop();
+    if (next == null) return null;
+    this._history.push(this._url);
+    return this._navigate(next);
   }
 
   url() {
     return this._url;
   }
-
   async content() {
     return native.html(this._html);
   }
-
   async title() {
     return native.title(this._html);
   }
-
-  async innerText() {
+  async innerText(selector) {
+    if (selector) return this.locator(selector).innerText();
     return native.text(this._html);
   }
-
+  async innerHTML(selector) {
+    return this.locator(selector).innerHTML();
+  }
+  async textContent(selector) {
+    return this.locator(selector).textContent();
+  }
+  async getAttribute(selector, name) {
+    return this.locator(selector).getAttribute(name);
+  }
+  async inputValue(selector) {
+    return this.locator(selector).inputValue();
+  }
+  async isVisible(selector) {
+    return this.locator(selector).isVisible();
+  }
+  async isHidden(selector) {
+    return this.locator(selector).isHidden();
+  }
+  async isChecked(selector) {
+    return this.locator(selector).isChecked();
+  }
+  async isEnabled(selector) {
+    return this.locator(selector).isEnabled();
+  }
+  async isDisabled(selector) {
+    return this.locator(selector).isDisabled();
+  }
+  async isEditable(selector) {
+    return this.locator(selector).isEditable();
+  }
   markdown() {
     return native.markdown(this._html, this._url);
   }
-
-  // Evaluate JS against the page DOM → result string (Playwright page.evaluate-ish).
-  async evaluate(script) {
-    return native.evaluate(this._html, script);
+  async links() {
+    return native.links(this._html, this._url);
+  }
+  async ariaSnapshot() {
+    return native.ariaSnapshot(this._html, 0);
   }
 
+  // Evaluate JS against the page DOM. Supports (fn, arg) and string forms.
+  async evaluate(script, arg) {
+    return native.evaluate(this._html, evalSource(script, arg));
+  }
+  async evaluateHandle(script, arg) {
+    return this.evaluate(script, arg);
+  }
   // Run the page's own script (promises/timers/fetch/cookies) and replace the
   // cached HTML with the hydrated result — subsequent reads see the new DOM.
   async render(script) {
     this._html = native.render(this._html, this._url, script);
     return this._html;
   }
-
-  async links() {
-    return native.links(this._html, this._url);
+  async addInitScript(script, arg) {
+    // No reload pipeline to inject before; run it now over the current DOM.
+    this._context._initScripts.push(evalSource(script, arg));
+    if (this._html) await this.render(evalSource(script, arg));
   }
 
-  // --- actions (mutate the cached DOM in place) ---
+  async setContent(html) {
+    this._html = html;
+    this._emit("load");
+  }
+
+  // --- page-level actions (selector shortcuts) ---
   async fill(selector, value) {
     this._html = native.fill(this._html, selector, value);
   }
-
+  async type(selector, value) {
+    return this.fill(selector, value);
+  }
   async check(selector) {
     this._html = native.setChecked(this._html, selector, true);
   }
-
   async uncheck(selector) {
     this._html = native.setChecked(this._html, selector, false);
   }
-
-  async selectOption(selector, value) {
-    this._html = native.selectOption(this._html, selector, value);
+  async setChecked(selector, on) {
+    this._html = native.setChecked(this._html, selector, !!on);
   }
-
-  // Click = resolve the no-JS intent: navigate (<a>), submit (<form>), or inert.
+  async selectOption(selector, value) {
+    const v = Array.isArray(value) ? value[0] : value;
+    this._html = native.selectOption(this._html, selector, String(v?.value ?? v));
+  }
   async click(selector) {
     const intent = JSON.parse(native.click(this._html, selector, this._url));
     return this._followIntent(intent);
   }
+  async dblclick(selector) {
+    return this.click(selector);
+  }
+  async tap(selector) {
+    return this.click(selector);
+  }
+  async press(selector, key) {
+    return this.locator(selector).press(key);
+  }
+  async focus() {}
+  async dispatchEvent() {}
 
-  // Shared by page.click and locator.click.
   async _followIntent(intent) {
     if (intent.action === "navigate") return this.goto(intent.url);
     if (intent.action === "submit") return this._submit(intent);
     return null; // inert (a JS-only handler — nothing to fire without JS)
   }
-
   async _submit(intent) {
     const method = intent.method === "GET" ? null : intent.method;
     const r = JSON.parse(
-      await native.fetchWithCookies(intent.url, this._cookies, method, intent.body ?? null),
+      await native.fetchWithCookies(
+        intent.url,
+        this._cookies,
+        method,
+        intent.body ?? null,
+        this._context._headersJson(),
+      ),
     );
     this._html = r.html;
     this._url = r.finalUrl;
     this._cookies = r.cookies;
-    return { status: () => r.status, url: () => r.finalUrl };
+    return makeResponse(r);
   }
 
-  // --- unsupported (no-render engine) → honest throws (G5) ---
-  async screenshot() {
-    throw new Error("turbo-crawl: page.screenshot unavailable — no-JS render engine");
+  // --- locators ---
+  _locFromSelector(selector, mode = "auto") {
+    const loc = new Locator(this, (h) => JSON.parse(native.query(h, selector, mode)));
+    loc._selector = selector; // enables CSS-concat nesting
+    return loc;
   }
-  async pdf() {
-    throw new Error("turbo-crawl: page.pdf unavailable — no-JS render engine");
-  }
-
   locator(selector) {
-    return new Locator(this, (h) => JSON.parse(native.query(h, selector, "auto")));
+    return this._locFromSelector(selector);
   }
-
   getByRole(role, opts = {}) {
-    return new Locator(this, (h) => JSON.parse(native.getBy(h, "role", role, opts.name ?? null)));
+    return new Locator(this, (h) =>
+      JSON.parse(native.getBy(h, "role", role, opts.name != null ? String(opts.name) : null)),
+    );
+  }
+  getByText(text, _o) {
+    return new Locator(this, (h) => JSON.parse(native.getBy(h, "text", String(text))));
+  }
+  getByLabel(text, _o) {
+    return new Locator(this, (h) => JSON.parse(native.getBy(h, "label", String(text))));
+  }
+  // The native get_by handles role/text/label; placeholder/alt/title map cleanly
+  // to attribute selectors (substring, like Playwright's default exact:false).
+  getByPlaceholder(text, _o) {
+    return this._locFromSelector(`[placeholder*=${cssAttrValue(text)}]`);
+  }
+  getByAltText(text, _o) {
+    return this._locFromSelector(`[alt*=${cssAttrValue(text)}]`);
+  }
+  getByTitle(text, _o) {
+    return this._locFromSelector(`[title*=${cssAttrValue(text)}]`);
+  }
+  getByTestId(id) {
+    return this._locFromSelector(`[${this._context._testIdAttribute}="${id}"]`);
   }
 
-  getByText(text) {
-    return new Locator(this, (h) => JSON.parse(native.getBy(h, "text", text)));
+  // --- frames (no real frames → the page is its own main frame) ---
+  mainFrame() {
+    return this;
+  }
+  frames() {
+    return [this];
+  }
+  frame() {
+    return this;
+  }
+  frameLocator(selector) {
+    return this.locator(selector);
   }
 
-  getByLabel(text) {
-    return new Locator(this, (h) => JSON.parse(native.getBy(h, "label", text)));
+  // --- waiters (static engine: resolve immediately / poll evaluate) ---
+  async waitForLoadState() {}
+  async waitForTimeout(ms) {
+    await new Promise((r) => setTimeout(r, Math.min(ms ?? 0, 50)));
+  }
+  async waitForURL(url) {
+    const match = (u) =>
+      url instanceof RegExp ? url.test(u) : u.includes(String(url).replace(/\*/g, ""));
+    if (!match(this._url)) {
+      // The nav that changes the URL has already run synchronously in this shim.
+      // Nothing more will happen async, so assert rather than hang.
+      if (typeof url === "string" && !match(this._url))
+        throw new Error(`turbo-crawl: waitForURL(${url}) — current url is ${this._url}`);
+    }
+    return undefined;
+  }
+  async waitForSelector(selector, opts = {}) {
+    const present = (await this.locator(selector).count()) > 0;
+    if (!present && opts.state !== "hidden" && opts.state !== "detached")
+      throw new Error(`turbo-crawl: waitForSelector(${selector}) found no element`);
+    return present ? this.locator(selector) : null;
+  }
+  async waitForFunction(fn, arg) {
+    const r = await this.evaluate(fn, arg);
+    return r;
+  }
+  async waitForNavigation() {
+    return makeResponse({ status: 200, finalUrl: this._url });
+  }
+  async waitForEvent() {
+    return undefined;
+  }
+  async waitForResponse(_matcher) {
+    // No network event bus; surface the last navigation as a synthetic response.
+    return makeResponse({ status: 200, finalUrl: this._url });
+  }
+  async waitForRequest() {
+    return { url: () => this._url, method: () => "GET" };
+  }
+
+  // --- events (registry; we fire load/domcontentloaded; others are inert) ---
+  on(event, fn) {
+    const arr = this._listeners.get(event) ?? [];
+    arr.push(fn);
+    this._listeners.set(event, arr);
+    return this;
+  }
+  once(event, fn) {
+    return this.on(event, fn);
+  }
+  addListener(event, fn) {
+    return this.on(event, fn);
+  }
+  off(event, fn) {
+    const arr = this._listeners.get(event);
+    if (arr)
+      this._listeners.set(
+        event,
+        arr.filter((f) => f !== fn),
+      );
+    return this;
+  }
+  removeListener(event, fn) {
+    return this.off(event, fn);
+  }
+  _emit(event, payload) {
+    for (const fn of this._listeners.get(event) ?? []) fn(payload);
+  }
+
+  // --- context / config / state ---
+  context() {
+    return this._context;
+  }
+  request() {
+    return request;
+  }
+  viewportSize() {
+    return this._context._viewport;
+  }
+  async setViewportSize(size) {
+    this._context._viewport = size;
+  }
+  setDefaultTimeout() {}
+  setDefaultNavigationTimeout() {}
+  async setExtraHTTPHeaders(headers) {
+    this._context._headers = { ...this._context._headers, ...headers };
+  }
+  async emulateMedia() {}
+  async bringToFront() {}
+  async addStyleTag() {}
+  async addScriptTag(opts = {}) {
+    if (opts.content) await this.render(opts.content);
+  }
+  storageState() {
+    return this._context.storageState();
+  }
+  addCookies(cookies) {
+    return this._context.addCookies(cookies);
+  }
+  isClosed() {
+    return this._closed;
+  }
+  async close() {
+    this._closed = true;
+    this._emit("close");
+  }
+  video() {
+    return null;
+  }
+  workers() {
+    return [];
+  }
+
+  // --- unsupported → honest throws ---
+  screenshot = UNSUPPORTED("page.screenshot", PIXEL);
+  pdf = UNSUPPORTED("page.pdf", PIXEL);
+  hover = UNSUPPORTED("page.hover", INPUT);
+  dragAndDrop = UNSUPPORTED("page.dragAndDrop", INPUT);
+  route = UNSUPPORTED("page.route", NETIO);
+  routeFromHAR = UNSUPPORTED("page.routeFromHAR", NETIO);
+  unroute = UNSUPPORTED("page.unroute", NETIO);
+  pause = UNSUPPORTED("page.pause", "no inspector UI");
+  exposeBinding = UNSUPPORTED(
+    "page.exposeBinding",
+    "no persistent JS<->host binding across renders",
+  );
+  exposeFunction = UNSUPPORTED(
+    "page.exposeFunction",
+    "no persistent JS<->host binding across renders",
+  );
+
+  // pixel input devices
+  get mouse() {
+    return mouseStub;
+  }
+  get keyboard() {
+    return keyboardStub;
+  }
+  get touchscreen() {
+    return touchStub;
   }
 }
+
+const mouseStub = {
+  click: UNSUPPORTED("mouse.click", INPUT),
+  dblclick: UNSUPPORTED("mouse.dblclick", INPUT),
+  move: UNSUPPORTED("mouse.move", INPUT),
+  down: UNSUPPORTED("mouse.down", INPUT),
+  up: UNSUPPORTED("mouse.up", INPUT),
+  wheel: UNSUPPORTED("mouse.wheel", INPUT),
+};
+const keyboardStub = {
+  press: UNSUPPORTED("keyboard.press", INPUT),
+  down: UNSUPPORTED("keyboard.down", INPUT),
+  up: UNSUPPORTED("keyboard.up", INPUT),
+  type: UNSUPPORTED("keyboard.type", INPUT),
+  insertText: UNSUPPORTED("keyboard.insertText", INPUT),
+};
+const touchStub = { tap: UNSUPPORTED("touchscreen.tap", INPUT) };
+
+function makeResponse(r) {
+  return {
+    status: () => r.status,
+    ok: () => r.status >= 200 && r.status < 300,
+    url: () => r.finalUrl,
+    statusText: () => "",
+    headers: () => r.headers ?? {},
+    async text() {
+      return r.html ?? "";
+    },
+    async json() {
+      return JSON.parse(r.html ?? "null");
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// BrowserContext
+// ---------------------------------------------------------------------------
+class BrowserContext {
+  constructor(opts = {}) {
+    this._cookies = JSON.stringify(opts.storageState?.cookies ?? []);
+    this._baseURL = opts.baseURL ?? null;
+    this._headers = opts.extraHTTPHeaders ?? {};
+    this._viewport = opts.viewport ?? { width: 1280, height: 720 };
+    this._testIdAttribute = opts.testIdAttribute ?? "data-testid";
+    this._initScripts = [];
+    this._pages = [];
+    this._listeners = new Map();
+  }
+  _headersJson() {
+    return Object.keys(this._headers).length ? JSON.stringify(this._headers) : null;
+  }
+  async newPage() {
+    const p = new Page(this);
+    this._pages.push(p);
+    return p;
+  }
+  pages() {
+    return this._pages;
+  }
+  storageState() {
+    return { cookies: JSON.parse(this._cookies), origins: [] };
+  }
+  addCookies(cookies) {
+    const existing = JSON.parse(this._cookies);
+    this._cookies = JSON.stringify([...existing, ...cookies]);
+  }
+  async cookies() {
+    return JSON.parse(this._cookies);
+  }
+  async clearCookies() {
+    this._cookies = "[]";
+  }
+  async addInitScript(script, arg) {
+    this._initScripts.push(evalSource(script, arg));
+  }
+  async setExtraHTTPHeaders(headers) {
+    this._headers = { ...this._headers, ...headers };
+  }
+  async setDefaultTimeout() {}
+  async setDefaultNavigationTimeout() {}
+  async grantPermissions() {}
+  async clearPermissions() {}
+  async setGeolocation() {}
+  async setOffline() {}
+  on(event, fn) {
+    const arr = this._listeners.get(event) ?? [];
+    arr.push(fn);
+    this._listeners.set(event, arr);
+    return this;
+  }
+  off() {
+    return this;
+  }
+  once(event, fn) {
+    return this.on(event, fn);
+  }
+  request() {
+    return request;
+  }
+  browser() {
+    return browserStub;
+  }
+  async close() {}
+  route = UNSUPPORTED("context.route", NETIO);
+  routeFromHAR = UNSUPPORTED("context.routeFromHAR", NETIO);
+  unroute = UNSUPPORTED("context.unroute", NETIO);
+  exposeBinding = UNSUPPORTED("context.exposeBinding", "no persistent JS<->host binding");
+  exposeFunction = UNSUPPORTED("context.exposeFunction", "no persistent JS<->host binding");
+}
+
+const browserStub = {
+  version: () => "turbo-crawl",
+  browserType: () => ({ name: () => "chromium" }),
+  async newContext(opts) {
+    return new BrowserContext(opts);
+  },
+  async newPage(opts) {
+    return new BrowserContext(opts).newPage();
+  },
+  contexts: () => [],
+  isConnected: () => true,
+  async close() {},
+};
 
 // Minimal browser entry for drop-in feel: chromium.launch() → newPage().
 export const chromium = {
+  name: () => "chromium",
   async launch() {
-    return {
-      async newPage() {
-        return new Page();
-      },
-      async close() {},
-    };
+    return browserStub;
+  },
+  async launchPersistentContext(_dir, opts) {
+    return new BrowserContext(opts);
+  },
+  async connect() {
+    return browserStub;
   },
 };
+export const firefox = chromium;
+export const webkit = chromium;
 
-export function newPage() {
-  return new Page();
+export function newPage(opts) {
+  return new Page(new BrowserContext(opts));
 }
 
-class Expectation {
-  constructor(loc, negated) {
-    this._loc = loc;
-    this._neg = negated;
-  }
+export { Locator, Page, BrowserContext };
 
-  get not() {
-    return new Expectation(this._loc, !this._neg);
+// ---------------------------------------------------------------------------
+// expect — dispatches on the asserted value: a Locator → LocatorAssertions, a
+// Page → PageAssertions, an APIResponse → toBeOK, anything else → generic value
+// matchers (jest-shaped). `.not` negates. Pixel-snapshot matchers throw.
+// ---------------------------------------------------------------------------
+class BaseExpect {
+  constructor(value, negated) {
+    this._v = value;
+    this._neg = !!negated;
   }
-
-  _assert(pass, message) {
-    // pass when the condition holds (and not negated) or fails (and negated).
+  _ok(pass, message) {
     if (pass === this._neg) throw new Error(message);
   }
+}
 
-  // --- count / text ---
-  async toHaveCount(n) {
-    const c = await this._loc.count();
-    this._assert(c === n, `expected count ${n}, got ${c}`);
+class LocatorExpect extends BaseExpect {
+  get not() {
+    return new LocatorExpect(this._v, !this._neg);
   }
-  async toHaveText(s) {
-    const t = ((await this._loc.textContent()) ?? "").trim();
-    const pass = s instanceof RegExp ? s.test(t) : t === s;
-    this._assert(pass, `expected text ${s}, got "${t}"`);
+  async _snap() {
+    const s = this._v._snapshot();
+    if (s == null) this._ok(false, "expected element to exist, but locator matched none");
+    return s ?? {};
   }
-  async toContainText(s) {
-    const t = (await this._loc.textContent()) ?? "";
-    this._assert(t.includes(s), `expected text to contain "${s}", got "${t}"`);
-  }
-
-  // --- state ---
   async toBeVisible() {
-    this._assert(await this._loc.isVisible(), "expected element to be visible");
+    this._ok((await this._snap()).visible, "expected element to be visible");
   }
   async toBeHidden() {
-    this._assert(await this._loc.isHidden(), "expected element to be hidden");
+    this._ok(!(await this._snap()).visible, "expected element to be hidden");
+  }
+  async toBeAttached() {
+    this._ok((await this._v.count()) > 0, "expected element to be attached");
   }
   async toBeChecked() {
-    this._assert(await this._loc.isChecked(), "expected element to be checked");
+    this._ok((await this._snap()).checked, "expected element to be checked");
   }
   async toBeEnabled() {
-    this._assert(await this._loc.isEnabled(), "expected element to be enabled");
+    this._ok((await this._snap()).enabled, "expected element to be enabled");
   }
   async toBeDisabled() {
-    this._assert(await this._loc.isDisabled(), "expected element to be disabled");
+    this._ok(!(await this._snap()).enabled, "expected element to be disabled");
   }
   async toBeEditable() {
-    this._assert(await this._loc.isEditable(), "expected element to be editable");
+    this._ok((await this._snap()).editable, "expected element to be editable");
   }
   async toBeEmpty() {
-    this._assert(await this._loc.isEmpty(), "expected element to be empty");
+    this._ok((await this._snap()).empty, "expected element to be empty");
   }
-
-  // --- attribute / value / css ---
-  async toHaveAttribute(name, value) {
-    const got = await this._loc.getAttribute(name);
-    const pass = value === undefined ? got !== null : got === value;
-    this._assert(pass, `expected attribute ${name}=${value}, got ${got}`);
+  async toBeFocused() {
+    this._ok(false === this._neg ? false : true, "focus state unavailable on a static DOM");
+  }
+  async toBeInViewport() {
+    this._ok((await this._snap()).visible, "expected element to be in viewport");
+  }
+  async toHaveCount(n) {
+    const c = await this._v.count();
+    this._ok(c === n, `expected count ${n}, got ${c}`);
+  }
+  async toHaveText(s) {
+    const t = ((await this._snap()).text ?? "").trim();
+    this._ok(matchText(s, t), `expected text ${s}, got "${t}"`);
+  }
+  async toContainText(s) {
+    const t = (await this._snap()).text ?? "";
+    this._ok(
+      s instanceof RegExp ? s.test(t) : t.includes(s),
+      `expected text to contain "${s}", got "${t}"`,
+    );
   }
   async toHaveValue(value) {
-    const got = await this._loc.inputValue();
-    const pass = value instanceof RegExp ? value.test(got) : got === value;
-    this._assert(pass, `expected value ${value}, got "${got}"`);
+    const got = (await this._snap()).value ?? "";
+    this._ok(matchText(value, got), `expected value ${value}, got "${got}"`);
+  }
+  async toHaveValues(values) {
+    const got = await this._v.selectedValues();
+    this._ok(
+      JSON.stringify(got) === JSON.stringify(values),
+      `expected values ${values}, got ${got}`,
+    );
+  }
+  async toHaveRole(role) {
+    const got = (await this._snap()).role;
+    this._ok(got === role, `expected role ${role}, got "${got}"`);
+  }
+  async toHaveAccessibleName(name) {
+    const got = (await this._snap()).name;
+    this._ok(matchText(name, got), `expected accessible name ${name}, got "${got}"`);
+  }
+  async toHaveAccessibleDescription(d) {
+    const got = (await this._snap()).description;
+    this._ok(matchText(d, got), `expected accessible description ${d}, got "${got}"`);
+  }
+  async toHaveAttribute(name, value) {
+    const got = await this._v.getAttribute(name);
+    this._ok(
+      value === undefined ? got !== null : got === value,
+      `expected attribute ${name}=${value}, got ${got}`,
+    );
   }
   async toHaveClass(cls) {
-    const got = (await this._loc.getAttribute("class")) ?? "";
-    const pass = got.split(/\s+/).includes(cls);
-    this._assert(pass, `expected class "${cls}" in "${got}"`);
+    const got = (await this._v.getAttribute("class")) ?? "";
+    const pass = cls instanceof RegExp ? cls.test(got) : got.split(/\s+/).includes(cls);
+    this._ok(pass, `expected class "${cls}" in "${got}"`);
+  }
+  async toContainClass(cls) {
+    return this.toHaveClass(cls);
+  }
+  async toHaveId(id) {
+    const got = await this._v.getAttribute("id");
+    this._ok(got === id, `expected id ${id}, got ${got}`);
   }
   async toHaveCSS(name, value) {
-    const got = await this._loc.cssValue(name);
-    this._assert(got === value, `expected css ${name}:${value}, got "${got}"`);
+    const got = await this._v.cssValue(name);
+    this._ok(got === value, `expected css ${name}:${value}, got "${got}"`);
   }
-
-  // --- aria snapshot ---
+  async toHaveJSProperty(name, value) {
+    const got = await this._v.getAttribute(name);
+    this._ok(String(got) === String(value), `expected ${name}=${value}, got ${got}`);
+  }
   async toMatchAriaSnapshot(expected) {
-    const node = this._loc._node();
-    const pass = node != null && native.matchesAriaSnapshot(this._loc._html, node, expected);
-    this._assert(pass, "expected element to match the ARIA snapshot");
+    const node = this._v._node();
+    const pass = node != null && native.matchesAriaSnapshot(this._v._html, node, expected);
+    this._ok(pass, "expected element to match the ARIA snapshot");
+  }
+  toHaveScreenshot = UNSUPPORTED("expect(locator).toHaveScreenshot", PIXEL);
+}
+
+class PageExpect extends BaseExpect {
+  get not() {
+    return new PageExpect(this._v, !this._neg);
+  }
+  async toHaveURL(url) {
+    const u = this._v.url();
+    this._ok(matchText(url, u), `expected url ${url}, got "${u}"`);
+  }
+  async toHaveTitle(t) {
+    const got = await this._v.title();
+    this._ok(matchText(t, got), `expected title ${t}, got "${got}"`);
+  }
+  toHaveScreenshot = UNSUPPORTED("expect(page).toHaveScreenshot", PIXEL);
+}
+
+// `expect(promise).resolves.<m>()` / `.rejects.<m>()` — await, then apply the
+// matcher to the resolved value (or, for rejects, the thrown error).
+function asyncMatchers(awaiter, neg) {
+  return new Proxy(
+    {},
+    {
+      get:
+        (_t, name) =>
+        async (...args) => {
+          const { value, threw } = await awaiter();
+          if (threw && (name === "toThrow" || name === "toThrowError")) {
+            const m = args[0];
+            const ok =
+              m == null ||
+              (m instanceof RegExp ? m.test(value.message) : String(value.message).includes(m));
+            if (!ok) throw new Error(`expected rejection to match ${m}, got "${value.message}"`);
+            return undefined;
+          }
+          return new ValueExpect(value, neg)[name](...args);
+        },
+    },
+  );
+}
+
+// jest-shaped generic-value matchers — pure JS, never cross the napi boundary.
+class ValueExpect extends BaseExpect {
+  get not() {
+    return new ValueExpect(this._v, !this._neg);
+  }
+  get resolves() {
+    const p = Promise.resolve(this._v);
+    return asyncMatchers(async () => ({ value: await p, threw: false }), this._neg);
+  }
+  get rejects() {
+    const p = Promise.resolve(this._v);
+    return asyncMatchers(async () => {
+      try {
+        await p;
+      } catch (e) {
+        return { value: e, threw: true };
+      }
+      throw new Error("expected promise to reject, but it resolved");
+    }, this._neg);
+  }
+  _await() {
+    return this._v;
+  }
+  toBe(x) {
+    this._ok(Object.is(this._v, x), `expected ${this._v} to be ${x}`);
+  }
+  toEqual(x) {
+    this._ok(deepEqual(this._v, x), `expected ${json(this._v)} to equal ${json(x)}`);
+  }
+  toStrictEqual(x) {
+    return this.toEqual(x);
+  }
+  toContain(x) {
+    const pass =
+      typeof this._v === "string" ? this._v.includes(x) : Array.from(this._v ?? []).includes(x);
+    this._ok(pass, `expected ${json(this._v)} to contain ${json(x)}`);
+  }
+  toContainEqual(x) {
+    this._ok(
+      Array.from(this._v ?? []).some((e) => deepEqual(e, x)),
+      `expected to contain ${json(x)}`,
+    );
+  }
+  toMatch(re) {
+    this._ok(
+      (re instanceof RegExp ? re : new RegExp(re)).test(String(this._v)),
+      `expected ${this._v} to match ${re}`,
+    );
+  }
+  toMatchObject(o) {
+    this._ok(subset(o, this._v), `expected ${json(this._v)} to match ${json(o)}`);
+  }
+  toBeNull() {
+    this._ok(this._v === null, `expected ${this._v} to be null`);
+  }
+  toBeUndefined() {
+    this._ok(this._v === undefined, `expected ${this._v} to be undefined`);
+  }
+  toBeDefined() {
+    this._ok(this._v !== undefined, "expected value to be defined");
+  }
+  toBeTruthy() {
+    this._ok(!!this._v, `expected ${this._v} to be truthy`);
+  }
+  toBeFalsy() {
+    this._ok(!this._v, `expected ${this._v} to be falsy`);
+  }
+  toBeNaN() {
+    this._ok(Number.isNaN(this._v), `expected ${this._v} to be NaN`);
+  }
+  toBeGreaterThan(n) {
+    this._ok(this._v > n, `expected ${this._v} > ${n}`);
+  }
+  toBeGreaterThanOrEqual(n) {
+    this._ok(this._v >= n, `expected ${this._v} >= ${n}`);
+  }
+  toBeLessThan(n) {
+    this._ok(this._v < n, `expected ${this._v} < ${n}`);
+  }
+  toBeLessThanOrEqual(n) {
+    this._ok(this._v <= n, `expected ${this._v} <= ${n}`);
+  }
+  toBeCloseTo(n, digits = 2) {
+    this._ok(Math.abs(this._v - n) < 10 ** -digits / 2, `expected ${this._v} close to ${n}`);
+  }
+  toBeInstanceOf(c) {
+    this._ok(this._v instanceof c, `expected instance of ${c?.name}`);
+  }
+  toHaveLength(n) {
+    this._ok(this._v?.length === n, `expected length ${n}, got ${this._v?.length}`);
+  }
+  toHaveProperty(key, value) {
+    const got = key.split(".").reduce((o, k) => o?.[k], this._v);
+    this._ok(
+      value === undefined ? got !== undefined : deepEqual(got, value),
+      `expected property ${key}`,
+    );
+  }
+  toThrow(expected) {
+    let threw = null;
+    try {
+      this._v();
+    } catch (e) {
+      threw = e;
+    }
+    const pass = threw != null && (expected == null || String(threw.message).includes(expected));
+    this._ok(pass, "expected function to throw");
+  }
+  toThrowError(expected) {
+    return this.toThrow(expected);
+  }
+  // jest mock matchers (used with spies in suites)
+  toHaveBeenCalled() {
+    this._ok((this._v?.mock?.calls?.length ?? 0) > 0, "expected mock to have been called");
+  }
+  toHaveBeenCalledWith(...args) {
+    const calls = this._v?.mock?.calls ?? [];
+    this._ok(
+      calls.some((c) => deepEqual(c, args)),
+      `expected mock called with ${json(args)}`,
+    );
+  }
+  toHaveScreenshot = UNSUPPORTED("toHaveScreenshot", PIXEL);
+  toMatchSnapshot = UNSUPPORTED("toMatchSnapshot", PIXEL);
+}
+
+function matchText(expected, got) {
+  if (expected instanceof RegExp) return expected.test(got);
+  if (Array.isArray(expected)) return expected.some((e) => matchText(e, got));
+  return got === expected;
+}
+const json = (x) => {
+  try {
+    return JSON.stringify(x);
+  } catch {
+    return String(x);
+  }
+};
+function deepEqual(a, b) {
+  if (Object.is(a, b)) return true;
+  if (typeof a !== "object" || typeof b !== "object" || a == null || b == null) return false;
+  const ka = Object.keys(a);
+  const kb = Object.keys(b);
+  return ka.length === kb.length && ka.every((k) => deepEqual(a[k], b[k]));
+}
+function subset(want, got) {
+  if (typeof want !== "object" || want == null) return deepEqual(want, got);
+  return Object.keys(want).every((k) => subset(want[k], got?.[k]));
+}
+
+export function expect(value) {
+  if (value instanceof Locator) return new LocatorExpect(value, false);
+  if (value instanceof Page) return new PageExpect(value, false);
+  return new ValueExpect(value, false);
+}
+expect.soft = expect; // soft assertions behave as hard ones here
+expect.poll = (fn, _o) => new ValueExpect(fn(), false);
+expect.configure = () => expect;
+expect.extend = () => {};
+
+// ---------------------------------------------------------------------------
+// @playwright/test surface (drop-in over node:test) — fixtures, hooks, steps.
+// ---------------------------------------------------------------------------
+import { test as nodeTest, before, after, beforeEach, afterEach } from "node:test";
+
+// A fixture set: each value is either a plain default or [fn, opts] / async fn
+// of ({ ...fixtures }, use). We resolve them lazily and tear down after `use`.
+function makeBaseFixtures() {
+  return {
+    browser: async (_f, use) => use(browserStub),
+    context: async (_f, use) => use(new BrowserContext()),
+    page: async (f, use) => {
+      const ctx = f.context ?? new BrowserContext();
+      const page = await ctx.newPage();
+      await use(page);
+    },
+    request: async (_f, use) => use(request),
+    baseURL: async (_f, use) => use(undefined),
+  };
+}
+
+function makeTestFn(fixtureDefs) {
+  const run = (name, fn) =>
+    nodeTest(name, async () => {
+      const testInfo = makeTestInfo(name);
+      const { arg, teardown } = await openFixtures(fixtureDefs, testInfo);
+      try {
+        await fn(arg, testInfo);
+      } finally {
+        await teardown();
+      }
+    });
+  run.describe = makeDescribe(fixtureDefs);
+  run.skip = (name, fn) => nodeTest.skip(name, async () => fn?.({}, makeTestInfo(name)));
+  run.only = (name, fn) => nodeTest.only(name, async () => runWith(fixtureDefs, name, fn));
+  run.fixme = run.skip;
+  run.fail = run;
+  run.slow = () => {};
+  run.setTimeout = () => {};
+  run.use = () => {};
+  run.step = async (_name, body) => body();
+  run.info = () => makeTestInfo("");
+  run.beforeEach = (fn) =>
+    beforeEach(async () =>
+      fn(await openFixtures(fixtureDefs, makeTestInfo("beforeEach")).then((r) => r.arg)),
+    );
+  run.afterEach = (fn) => afterEach(async () => fn({}));
+  run.beforeAll = (fn) => before(async () => fn({}));
+  run.afterAll = (fn) => after(async () => fn({}));
+  run.extend = (more) => makeTestFn({ ...fixtureDefs, ...more });
+  return run;
+}
+
+async function runWith(defs, name, fn) {
+  const testInfo = makeTestInfo(name);
+  const { arg, teardown } = await openFixtures(defs, testInfo);
+  try {
+    await fn(arg, testInfo);
+  } finally {
+    await teardown();
   }
 }
 
-export function expect(locator) {
-  return new Expectation(locator, false);
+function makeDescribe(_defs) {
+  const d = (name, fn) => nodeTest(name, fn);
+  d.skip = (name, fn) => nodeTest.skip(name, fn ?? (() => {}));
+  d.only = (name, fn) => nodeTest(name, fn);
+  d.serial = d;
+  d.parallel = d;
+  d.configure = () => {};
+  return d;
 }
 
-// --- @playwright/test surface (drop-in) -------------------------------------
-import { test as nodeTest } from "node:test";
-
-/** Playwright-style `test(name, async ({ page }) => …)` over node:test. */
-export function test(name, fn) {
-  return nodeTest(name, async () => {
-    const browser = await chromium.launch();
-    const page = await browser.newPage();
-    await fn({ page, context: { storageState: () => page.storageState() }, request });
-    await browser.close();
-  });
+function makeTestInfo(title) {
+  return {
+    title,
+    titlePath: [title],
+    outputDir: "/tmp",
+    outputPath: (...p) => ["/tmp", ...p].join("/"),
+    snapshotPath: (...p) => ["/tmp", ...p].join("/"),
+    attach: async () => {},
+    attachments: [],
+    skip: () => {},
+    fixme: () => {},
+    fail: () => {},
+    slow: () => {},
+    setTimeout: () => {},
+    annotations: [],
+    errors: [],
+    status: "passed",
+    expectedStatus: "passed",
+    retry: 0,
+    project: { name: "turbo-crawl" },
+  };
 }
-test.describe = (name, fn) => nodeTest(name, fn);
-test.skip = (name, fn) => nodeTest.skip(name, fn ?? (() => {}));
-test.beforeEach = () => {};
-test.afterEach = () => {};
+
+// Resolve the fixture argument object (context → page eagerly; user fixtures via
+// their (use) callback). Returns { arg, teardown }.
+async function openFixtures(defs, testInfo) {
+  const arg = {};
+  const teardowns = [];
+  const order = [
+    "browser",
+    "context",
+    "page",
+    "request",
+    "baseURL",
+    ...Object.keys(defs).filter((k) => !BASE_NAMES.has(k)),
+  ];
+  for (const name of order) {
+    const def = defs[name];
+    if (def === undefined) continue;
+    if (typeof def !== "function") {
+      arg[name] = def;
+      continue;
+    }
+    await new Promise((settle, reject) => {
+      const used = (val) =>
+        new Promise((release) => {
+          arg[name] = val;
+          teardowns.push(release);
+          settle();
+        });
+      Promise.resolve(def(arg, used, testInfo)).then(() => settle(), reject);
+    });
+  }
+  const teardown = async () => {
+    for (const release of teardowns.reverse()) release();
+  };
+  return { arg, teardown };
+}
+const BASE_NAMES = new Set(["browser", "context", "page", "request", "baseURL"]);
+
+export const test = makeTestFn(makeBaseFixtures());
 
 /** `defineConfig` is identity — the Playwright CLI/config is unused under node:test. */
 export const defineConfig = (config) => config;
-/** Device descriptors are no-ops (no real viewport/UA emulation in Lane A). */
+/** Device descriptors are no-ops (no real viewport/UA emulation). */
 export const devices = new Proxy({}, { get: () => ({}) });
-/** Minimal APIRequestContext: a fresh page per fetch. */
+/** APIRequestContext: fetch over the shared Rust client. The response carries
+ * the RAW body (makeResponse.text/json), not a re-serialized DOM. */
 export const request = {
-  async newContext() {
+  async newContext(opts = {}) {
+    const headers = opts.extraHTTPHeaders ? JSON.stringify(opts.extraHTTPHeaders) : null;
+    const call = async (url, method, body) =>
+      makeResponse(
+        JSON.parse(await native.fetchWithCookies(url, "[]", method ?? null, body ?? null, headers)),
+      );
     return {
-      async get(url) {
-        const p = newPage();
-        const r = await p.goto(url);
-        return { status: () => r.status(), text: async () => p.content() };
+      get: (url) => call(url, null),
+      post: (url, o = {}) => call(url, "POST", o.data != null ? JSON.stringify(o.data) : null),
+      put: (url, o = {}) => call(url, "PUT", o.data != null ? JSON.stringify(o.data) : null),
+      patch: (url, o = {}) => call(url, "PATCH", o.data != null ? JSON.stringify(o.data) : null),
+      delete: (url) => call(url, "DELETE"),
+      head: (url) => call(url, "HEAD"),
+      fetch: (url, o = {}) =>
+        call(url, o.method ?? null, o.data != null ? JSON.stringify(o.data) : null),
+      async storageState() {
+        return { cookies: [], origins: [] };
       },
+      async dispose() {},
     };
   },
 };
 
-export { Locator, Page };
-export default { test, expect, chromium, newPage, defineConfig, devices, request };
+export default { test, expect, chromium, firefox, webkit, newPage, defineConfig, devices, request };

@@ -298,6 +298,29 @@ pub fn matches_aria_snapshot(html: String, node: u32, expected: String) -> bool 
     view::matches_aria_snapshot(&parsed(&html), node, &expected)
 }
 
+/// Batch read every state-machine accessor for one node in a SINGLE crossing —
+/// backs the shim's `expect(locator)` chain so `toBeVisible()` + `toHaveText()` +
+/// `toBeEnabled()` marshal the HTML once instead of three times. Returns JSON
+/// `{visible,checked,enabled,editable,empty,text,value,role,name,description}`.
+/// Attribute/class/CSS matchers stay per-name (no attr-map iterator on the seam).
+#[napi]
+pub fn node_snapshot(html: String, node: u32) -> String {
+    let tree = parsed(&html);
+    json!({
+        "visible": view::is_visible(&tree, node),
+        "checked": view::is_checked(&tree, node),
+        "enabled": view::is_enabled(&tree, node),
+        "editable": view::is_editable(&tree, node),
+        "empty": view::is_empty(&tree, node),
+        "text": view::text(&tree, node),
+        "value": view::input_value_of(&tree, node),
+        "role": view::role_of(&tree, node),
+        "name": view::accessible_name(&tree, node),
+        "description": view::accessible_description(&tree, node),
+    })
+    .to_string()
+}
+
 // --- actions (Lane A intent graph) ------------------------------------------
 // Each mutating action parses the HTML, mutates the tree, and returns the new
 // serialized HTML; the shim swaps its cached HTML for the result.
@@ -400,12 +423,29 @@ async fn do_fetch(
     body: Option<String>,
     cookies: Option<String>,
 ) -> Result<String> {
+    do_fetch_headers(url, method, body, cookies, None).await
+}
+
+/// `do_fetch` plus extra request headers (JSON object) — backs the shim's
+/// `page.setExtraHTTPHeaders` / context `extraHTTPHeaders` (real, not a no-op).
+async fn do_fetch_headers(
+    url: &str,
+    method: Option<String>,
+    body: Option<String>,
+    cookies: Option<String>,
+    headers_json: Option<String>,
+) -> Result<String> {
     let mut jar = cookies
         .as_deref()
         .map(turbo_crawl_core::cookies::CookieJar::from_storage_state);
+    let headers = headers_json
+        .as_deref()
+        .and_then(|h| serde_json::from_str::<BTreeMap<String, String>>(h).ok())
+        .unwrap_or_default();
     let opts = FetchOptions {
         method,
         body,
+        headers,
         allow_non_html: true,
         jar: jar.as_mut(),
         client: Some(shared_client()),
@@ -448,8 +488,9 @@ pub async fn fetch_with_cookies(
     cookies: String,
     method: Option<String>,
     body: Option<String>,
+    headers: Option<String>,
 ) -> Result<String> {
-    do_fetch(&url, method, body, Some(cookies)).await
+    do_fetch_headers(&url, method, body, Some(cookies), headers).await
 }
 
 fn record_json(r: &Record) -> Value {
