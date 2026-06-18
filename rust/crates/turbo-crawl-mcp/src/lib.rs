@@ -278,6 +278,128 @@ fn serialize_doc(tree: &Tree) -> String {
 // --- tool registry ----------------------------------------------------------
 
 /// `tools/list` descriptors (name + one-line description + minimal input schema).
+// A compact Playwright-shaped API defined over the render isolate's live `document`
+// (rtdom). Backs the `run_playwright` tool — a script using `page`/`locator`/`getBy*`/
+// `expect` runs against the engine, no browser. `console.*` is captured into __LOGS;
+// `test(...)` blocks are collected and run by the wrapper. goto inside a script does a
+// best-effort no-JS re-fetch+reparse (load the initial page via the tool's `url`/mode
+// for SPA hydration).
+const PLAYWRIGHT_PRELUDE: &str = r###"
+(function(){
+  globalThis.__LOGS = [];
+  var cap = function(){ try { globalThis.__LOGS.push(Array.prototype.map.call(arguments, String).join(' ')); } catch(e){} };
+  globalThis.console = { log: cap, info: cap, warn: cap, error: cap, debug: function(){} };
+  var TID = globalThis.__TESTID_ATTR || 'data-testid';
+  var norm = function(s){ return String(s==null?'':s).replace(/ /g,' ').replace(/\s+/g,' ').trim(); };
+  function cssq(v){ return '"' + String(v).replace(/"/g,'\\"') + '"'; }
+  function mk(getEls){
+    return {
+      _get: getEls,
+      first: function(){ return mk(function(){ var e=getEls(); return e.length?[e[0]]:[]; }); },
+      last: function(){ return mk(function(){ var e=getEls(); return e.length?[e[e.length-1]]:[]; }); },
+      nth: function(i){ return mk(function(){ var e=getEls(); return e[i]?[e[i]]:[]; }); },
+      locator: function(s){ return mk(function(){ var out=[]; getEls().forEach(function(el){ Array.prototype.push.apply(out, Array.prototype.slice.call(el.querySelectorAll(s))); }); return out; }); },
+      getByTestId: function(id){ return this.locator('['+TID+'='+cssq(id)+']'); },
+      count: function(){ return Promise.resolve(getEls().length); },
+      _one: function(){ var e=getEls(); if(!e.length) throw new Error('locator matched no elements'); return e[0]; },
+      textContent: function(){ var e=getEls(); return Promise.resolve(e.length? e[0].textContent : null); },
+      innerText: function(){ var e=getEls(); return Promise.resolve(e.length? norm(e[0].textContent) : ''); },
+      getAttribute: function(n){ var e=getEls(); return Promise.resolve(e.length? e[0].getAttribute(n) : null); },
+      inputValue: function(){ var e=getEls(); return Promise.resolve(e.length? (e[0].value!=null?e[0].value:'') : ''); },
+      isVisible: function(){ return Promise.resolve(getEls().length>0); },
+      isChecked: function(){ var e=getEls(); return Promise.resolve(e.length? !!e[0].checked : false); },
+      fill: function(v){ this._one().value = v; return Promise.resolve(); },
+      type: function(v){ this._one().value = v; return Promise.resolve(); },
+      check: function(){ this._one().checked = true; return Promise.resolve(); },
+      uncheck: function(){ this._one().checked = false; return Promise.resolve(); },
+      click: function(){ var el=this._one(); if (el.click) el.click(); return Promise.resolve(); },
+    };
+  }
+  var byCss = function(s){ return mk(function(){ return Array.prototype.slice.call(document.querySelectorAll(s)); }); };
+  var byPred = function(pred){ return mk(function(){ return Array.prototype.slice.call(document.querySelectorAll('*')).filter(pred); }); };
+  globalThis.page = {
+    goto: function(u){ return fetch(u).then(function(r){ return r.text(); }).then(function(b){
+        try { var m=/<body[^>]*>([\s\S]*?)<\/body>/i.exec(b); if (document.body) document.body.innerHTML = m? m[1] : b; } catch(e){}
+        return { status: function(){ return 200; }, ok: function(){ return true; }, url: function(){ return u; } };
+      }); },
+    locator: byCss,
+    getByTestId: function(id){ return byCss('['+TID+'='+cssq(id)+']'); },
+    getByRole: function(r, o){ var name = o && o.name; return byPred(function(el){ var role=el.getAttribute('role')||IMPLICIT_ROLE(el); if (role!==r) return false; if (name==null) return true; return norm(el.textContent).indexOf(norm(name))>=0 || (el.getAttribute('aria-label')||'').indexOf(name)>=0; }); },
+    getByText: function(t){ return byPred(function(el){ return norm(el.textContent).indexOf(norm(t))>=0; }); },
+    getByLabel: function(t){ return byCss('[aria-label='+cssq(t)+']'); },
+    getByPlaceholder: function(t){ return byCss('[placeholder*='+cssq(t)+']'); },
+    title: function(){ var e=document.querySelector('title'); return Promise.resolve(e? e.textContent : ''); },
+    content: function(){ return Promise.resolve(document.documentElement ? document.documentElement.outerHTML : ''); },
+    innerText: function(s){ return byCss(s).innerText(); },
+    url: function(){ return globalThis.location ? globalThis.location.href : ''; },
+    fill: function(s,v){ return byCss(s).fill(v); },
+    click: function(s){ return byCss(s).click(); },
+    check: function(s){ return byCss(s).check(); },
+    waitForTimeout: function(){ return Promise.resolve(); },
+    waitForLoadState: function(){ return Promise.resolve(); },
+    waitForURL: function(){ return Promise.resolve(); },
+    waitForSelector: function(s){ return Promise.resolve(byCss(s)); },
+  };
+  function IMPLICIT_ROLE(el){ var t=(el.tagName||'').toLowerCase(); return ({a:'link',button:'button',h1:'heading',h2:'heading',h3:'heading',nav:'navigation',input:'textbox',select:'combobox'})[t] || ''; }
+  function assert(pass, msg){ if(!pass) throw new Error(msg); }
+  globalThis.expect = function(v){
+    var make = function(neg){ return {
+      get not(){ return make(!neg); },
+      toBeVisible: function(){ return v.count().then(function(c){ assert((c>0)!==neg, 'expected element to be visible'); }); },
+      toBeHidden: function(){ return v.count().then(function(c){ assert((c===0)!==neg, 'expected element to be hidden'); }); },
+      toHaveCount: function(n){ return v.count().then(function(c){ assert((c===n)!==neg, 'expected count '+n+', got '+c); }); },
+      toHaveText: function(s){ return v.textContent().then(function(t){ t=norm(t); var p=(s instanceof RegExp)?s.test(t):(t===norm(s)); assert(p!==neg, 'expected text '+s+', got "'+t+'"'); }); },
+      toContainText: function(s){ return v.textContent().then(function(t){ t=norm(t); var p=(s instanceof RegExp)?s.test(t):(t.indexOf(norm(s))>=0); assert(p!==neg, 'expected text to contain '+s+', got "'+t+'"'); }); },
+      toHaveValue: function(s){ return v.inputValue().then(function(got){ var p=(s instanceof RegExp)?s.test(got):(got===s); assert(p!==neg, 'expected value '+s+', got "'+got+'"'); }); },
+      toHaveAttribute: function(n, val){ return v.getAttribute(n).then(function(got){ var p=(val===undefined)?got!==null:got===val; assert(p!==neg, 'expected attribute '+n+'='+val+', got '+got); }); },
+      toBeChecked: function(){ return v.isChecked().then(function(c){ assert(c!==neg, 'expected element to be checked'); }); },
+      toBe: function(x){ assert((v===x)!==neg, 'expected '+x+', got '+v); },
+      toEqual: function(x){ assert((JSON.stringify(v)===JSON.stringify(x))!==neg, 'expected equal'); },
+      toContain: function(x){ assert(((typeof v==='string'? v.indexOf(x)>=0 : (Array.isArray(v)&&v.indexOf(x)>=0)))!==neg, 'expected to contain '+x); },
+      toBeTruthy: function(){ assert((!!v)!==neg, 'expected truthy'); },
+      toBeFalsy: function(){ assert((!v)!==neg, 'expected falsy'); },
+      toBeNull: function(){ assert((v===null)!==neg, 'expected null'); },
+      toBeGreaterThan: function(n){ assert((v>n)!==neg, 'expected > '+n); },
+      toBeLessThan: function(n){ assert((v<n)!==neg, 'expected < '+n); },
+    }; };
+    return make(false);
+  };
+  globalThis.__TESTS = [];
+  globalThis.test = function(name, fn){ globalThis.__TESTS.push({ name: name, fn: fn }); };
+  globalThis.test.describe = function(n, fn){ if (fn) fn(); };
+  globalThis.test.skip = function(){};
+  globalThis.test.beforeEach = function(){}; globalThis.test.afterEach = function(){};
+  globalThis.test.beforeAll = function(){}; globalThis.test.afterAll = function(){};
+})();
+"###;
+
+async fn tool_run_playwright(session: &mut Session, args: &Value) -> Result<Value, String> {
+    let script = arg_str(args, "script").ok_or("run_playwright: missing 'script'")?;
+    let test_id = arg_str(args, "testIdAttribute").unwrap_or("data-testid");
+    if let Some(url) = arg_str(args, "url") {
+        session.goto(url).await?; // honors session.mode (hydrates SPA when a JS mode is set)
+    }
+    let (html, base) = {
+        let tree = session.tree()?;
+        let html = serialize_inner(tree, tree.root());
+        let base = if session.url.is_empty() {
+            "about:blank".to_string()
+        } else {
+            session.url.clone()
+        };
+        (html, base)
+    };
+    // Frame: config + prelude + the user's script (+ run any test() blocks) → __RESULT.
+    let program = format!(
+        "globalThis.__TESTID_ATTR={};\n{}\nglobalThis.__RESULT='';(async function(){{ try {{\n{}\n; if (globalThis.__TESTS && globalThis.__TESTS.length) {{ for (var i=0;i<globalThis.__TESTS.length;i++) {{ await globalThis.__TESTS[i].fn({{ page: globalThis.page, expect: globalThis.expect }}); }} }} globalThis.__RESULT = JSON.stringify({{ ok:true, ran:(globalThis.__TESTS||[]).map(function(t){{return t.name;}}), logs:globalThis.__LOGS }}); }} catch (e) {{ globalThis.__RESULT = JSON.stringify({{ ok:false, error:String((e&&e.stack)||e), logs:globalThis.__LOGS }}); }} }})();",
+        serde_json::to_string(test_id).unwrap_or_else(|_| "\"data-testid\"".into()),
+        PLAYWRIGHT_PRELUDE,
+        script,
+    );
+    let out = turbo_crawl_render::eval_async(&html, &base, &program).await?;
+    serde_json::from_str(&out).map_err(|e| format!("run_playwright: bad result ({e}); raw={out}"))
+}
+
 pub fn tools() -> Value {
     let specs: &[(&str, &str)] = &[
         // navigation
@@ -370,6 +492,10 @@ pub fn tools() -> Value {
         ),
         ("latest_dom", "Most recent rendered HTML"),
         ("dom_history", "Rendered-HTML history trail"),
+        (
+            "run_playwright",
+            "Execute a Playwright-style script (page/locator/getBy*/expect, test() blocks) with config (script, url?, testIdAttribute?) over the engine — no browser",
+        ),
         // session / network
         ("get_cookies", "Cookie jar as a storageState array"),
         ("set_cookie", "Add a cookie to the jar"),
@@ -461,6 +587,7 @@ pub async fn call_tool(session: &mut Session, name: &str, args: &Value) -> Resul
         },
         "latest_dom" => Ok(json!(session.dom_history.last())),
         "dom_history" => Ok(json!(session.dom_history)),
+        "run_playwright" => tool_run_playwright(session, args).await,
         "requests" => Ok(json!(session.requests)),
         // --- session / network ---
         "set_extra_headers" => tool_set_headers(session, args),
@@ -1222,5 +1349,59 @@ mod tests {
         assert!(call_tool(&mut empty, "text", &json!({})).await.is_err());
         // goto missing url
         assert!(call_tool(&mut s, "goto", &json!({})).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn run_playwright_script_over_loaded_page() {
+        let mut s = Session::new();
+        s.load(
+            "https://x.test/",
+            "<main><h1>Widget</h1><button data-test-id='go'>Add</button>\
+             <input id='q' value='hi'><p class='d'>nice widget</p></main>",
+        );
+        // A Playwright-style script: locators + getByTestId(config) + expect, no browser.
+        let r = call_tool(
+            &mut s,
+            "run_playwright",
+            &json!({
+                "testIdAttribute": "data-test-id",
+                "script": "\
+                    await expect(page.locator('h1')).toHaveText('Widget');\n\
+                    await expect(page.getByTestId('go')).toHaveCount(1);\n\
+                    await expect(page.locator('.d')).toContainText('widget');\n\
+                    await page.fill('#q', 'rust');\n\
+                    await expect(page.locator('#q')).toHaveValue('rust');\n\
+                    await expect(page.locator('button')).not.toHaveCount(5);\n\
+                    expect(2 + 2).toBe(4);"
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r["ok"], true, "script should pass: {r}");
+
+        // A failing assertion surfaces ok:false + the message (not a hard error).
+        let bad = call_tool(
+            &mut s,
+            "run_playwright",
+            &json!({ "script": "await expect(page.locator('h1')).toHaveText('Nope');" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(bad["ok"], false, "{bad}");
+        assert!(
+            bad["error"].as_str().unwrap().contains("expected text"),
+            "{bad}"
+        );
+
+        // test() blocks are collected + run.
+        let suite = call_tool(
+            &mut s,
+            "run_playwright",
+            &json!({ "script": "test('h1 ok', async ({ page, expect }) => { await expect(page.locator('h1')).toHaveText('Widget'); });" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(suite["ok"], true, "{suite}");
+        assert_eq!(suite["ran"][0], "h1 ok", "{suite}");
     }
 }

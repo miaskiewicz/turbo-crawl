@@ -789,6 +789,48 @@ pub async fn render_hydrate_with_budget(
     out
 }
 
+/// Run `script` over `html`'s DOM, drive the event loop + hydration drain, then
+/// return the string value of `globalThis.__RESULT`. Backs the MCP `run_playwright`
+/// tool: the caller frames a program that runs a Playwright-style script and stashes
+/// a JSON result in `__RESULT`. Bounded by [`DEFAULT_RENDER_BUDGET_MS`].
+pub async fn eval_async(html: &str, base: &str, script: &str) -> Result<String, String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let mut rt = make_runtime(base);
+    let handle = rt.v8_isolate().thread_safe_handle();
+    let done = Arc::new(AtomicBool::new(false));
+    let watch = done.clone();
+    let watchdog = std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        while !watch.load(Ordering::Relaxed) {
+            if start.elapsed() >= std::time::Duration::from_millis(DEFAULT_RENDER_BUDGET_MS) {
+                handle.terminate_execution();
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    });
+    let result = async {
+        install_dom(&mut rt, html, base)?;
+        rt.execute_script("<script>", script.to_string())
+            .map_err(|e| e.to_string())?;
+        drain_event_loop(&mut rt).await?;
+        rt.execute_script("<timers>", "__runTimers()")
+            .map_err(|e| e.to_string())?;
+        drain_event_loop(&mut rt).await?;
+        let g = rt
+            .execute_script("<result>", "String(globalThis.__RESULT || '')")
+            .map_err(|e| e.to_string())?;
+        read_string(&mut rt, g)
+    }
+    .await;
+    done.store(true, Ordering::Relaxed);
+    let _ = watchdog.join();
+    let out = result.map_err(|e| budget_msg(&e, DEFAULT_RENDER_BUDGET_MS));
+    crate::browser_env::reset();
+    out
+}
+
 async fn run_hydrate(rt: &mut JsRuntime, html: &str, base: &str) -> Result<String, String> {
     install_dom(rt, html, base)?;
     // Unified event-loop pump. A single "run scripts+timers, then drain" pass isn't

@@ -104,7 +104,7 @@ npx turbo-crawl-mcp          # stdio MCP server (60 tools), e.g.:
 #              is_empty, aria_role, accessible_name, accessible_description
 # bulk:        crawl, batch
 # render/JS:   render, set_mode, eval_js, inject_js, latest_dom, dom_history,
-#              evaluate, detect_js
+#              evaluate, detect_js, run_playwright
 # session:     get_cookies, set_cookie, set_extra_headers, robots_check
 # direct:      fetch_json, fetch_raw
 ```
@@ -113,6 +113,18 @@ npx turbo-crawl-mcp          # stdio MCP server (60 tools), e.g.:
 the native DOM); then `eval_js` and `inject_js` run against the **live render heap**
 (page globals, handlers) and each mutation appends to a DOM-history trail readable
 via `latest_dom`/`dom_history`.
+
+`run_playwright` executes a **Playwright-style script** directly — `page` /
+`locator` / `getBy*` / `expect` (with `.not`) / `test()` blocks — over the engine,
+no browser. Args: `{ script, url?, testIdAttribute? }` (a `url` navigates first,
+honoring `set_mode` so an SPA hydrates). It returns `{ ok, ran, logs }` or
+`{ ok:false, error, logs }` — a failed assertion is a result, not a tool error:
+
+```jsonc
+// tools/call run_playwright
+{ "url": "https://example.com", "testIdAttribute": "data-test-id",
+  "script": "await expect(page.locator('h1')).toHaveText('Example Domain');\nawait page.fill('#q','rust');\nawait expect(page.locator('#q')).toHaveValue('rust');" }
+```
 
 ### Set it up in Claude Code (step by step)
 
