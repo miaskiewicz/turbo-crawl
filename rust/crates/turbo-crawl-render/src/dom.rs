@@ -93,7 +93,7 @@ deno_core::extension!(turbo_dom, ops = [op_cookie_get, op_cookie_set, op_fetch],
 // top-level `const`/`let` would throw "already declared" the second time, but
 // inside the IIFE they're per-invocation. Globals are assigned to `globalThis`
 // (idempotent) and the cookie bridge re-applies to the current `document`.
-const ENV_BOOTSTRAP: &str = r#"(() => {
+const ENV_BOOTSTRAP: &str = r##"(() => {
 const ops = Deno.core.ops;
 globalThis.self = globalThis;
 // turbo-crawl brand UA (browser_env.js seeds a generic one; override it here).
@@ -196,7 +196,95 @@ globalThis.history = {
 };
 globalThis.requestIdleCallback = (fn) => globalThis.setTimeout(fn, 0);
 globalThis.cancelIdleCallback = (id) => globalThis.clearTimeout(id);
-})();"#;
+
+// WHATWG URL + URLSearchParams — deno_core ships neither, but app bundles (Next.js,
+// the PropelAuth SDK, …) use `new URL(...)` while hydrating, so without these the
+// page crashes with "URL is not defined" before rendering. Regex-parsed: covers the
+// http(s) shapes hydration reads (protocol/host/port/path/query/hash + searchParams).
+if (typeof globalThis.URLSearchParams === "undefined") {
+  globalThis.URLSearchParams = class URLSearchParams {
+    constructor(init = "") {
+      this._d = [];
+      if (init instanceof URLSearchParams) { this._d = init._d.map((p) => [p[0], p[1]]); return; }
+      if (init && typeof init === "object") {
+        for (const k of Object.keys(init)) this._d.push([String(k), String(init[k])]);
+        return;
+      }
+      let s = String(init);
+      if (s[0] === "?") s = s.slice(1);
+      if (!s) return;
+      for (const pair of s.split("&")) {
+        if (!pair) continue;
+        const i = pair.indexOf("=");
+        const k = i === -1 ? pair : pair.slice(0, i);
+        const v = i === -1 ? "" : pair.slice(i + 1);
+        const dec = (x) => { try { return decodeURIComponent(x.replace(/\+/g, " ")); } catch { return x; } };
+        this._d.push([dec(k), dec(v)]);
+      }
+    }
+    append(k, v) { this._d.push([String(k), String(v)]); }
+    delete(k) { this._d = this._d.filter((p) => p[0] !== k); }
+    get(k) { const p = this._d.find((p) => p[0] === k); return p ? p[1] : null; }
+    getAll(k) { return this._d.filter((p) => p[0] === k).map((p) => p[1]); }
+    has(k) { return this._d.some((p) => p[0] === k); }
+    set(k, v) { this.delete(k); this._d.push([String(k), String(v)]); }
+    sort() { this._d.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)); }
+    forEach(cb, t) { for (const p of this._d) cb.call(t, p[1], p[0], this); }
+    keys() { return this._d.map((p) => p[0])[Symbol.iterator](); }
+    values() { return this._d.map((p) => p[1])[Symbol.iterator](); }
+    entries() { return this._d.map((p) => [p[0], p[1]])[Symbol.iterator](); }
+    [Symbol.iterator]() { return this.entries(); }
+    get size() { return this._d.length; }
+    toString() {
+      return this._d.map((p) => encodeURIComponent(p[0]) + "=" + encodeURIComponent(p[1])).join("&");
+    }
+  };
+}
+if (typeof globalThis.URL === "undefined") {
+  const ABS = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
+  globalThis.URL = class URL {
+    constructor(url, base) {
+      let input = String(url);
+      if (!ABS.test(input)) {
+        if (base == null) throw new TypeError("Invalid URL: " + url);
+        const b = base instanceof URL ? base : new URL(String(base));
+        if (input.startsWith("//")) input = b.protocol + input;
+        else if (input.startsWith("/")) input = b.protocol + "//" + b.host + input;
+        else if (input.startsWith("#")) input = b.protocol + "//" + b.host + b.pathname + b.search + input;
+        else if (input.startsWith("?")) input = b.protocol + "//" + b.host + b.pathname + input;
+        else {
+          const dir = b.pathname.slice(0, b.pathname.lastIndexOf("/") + 1) || "/";
+          input = b.protocol + "//" + b.host + dir + input;
+        }
+      }
+      const m = /^([a-zA-Z][a-zA-Z0-9+.-]*:)(\/\/(([^/?#@]*)@)?([^/?#:]*)(:(\d+))?)?([^?#]*)(\?[^#]*)?(#.*)?$/.exec(input);
+      if (!m) throw new TypeError("Invalid URL: " + url);
+      this.protocol = m[1];
+      const ui = (m[4] || "").split(":");
+      this.username = ui[0] || "";
+      this.password = ui[1] || "";
+      this.hostname = m[5] || "";
+      this.port = m[7] || "";
+      this.pathname = m[8] || (m[2] ? "/" : "");
+      this.hash = m[10] || "";
+      this.searchParams = new URLSearchParams(m[9] || "");
+    }
+    get host() { return this.port ? this.hostname + ":" + this.port : this.hostname; }
+    get origin() { return this.protocol + "//" + this.host; }
+    get search() { const q = this.searchParams.toString(); return q ? "?" + q : ""; }
+    set search(v) { this.searchParams = new URLSearchParams(String(v)); }
+    get href() {
+      const auth = this.username ? this.username + (this.password ? ":" + this.password : "") + "@" : "";
+      return this.protocol + "//" + auth + this.host + this.pathname + this.search + this.hash;
+    }
+    set href(v) { Object.assign(this, new URL(v)); }
+    toString() { return this.href; }
+    toJSON() { return this.href; }
+  };
+  globalThis.URL.createObjectURL = () => "blob:turbo-crawl";
+  globalThis.URL.revokeObjectURL = () => {};
+}
+})();"##;
 
 fn make_runtime(base: &str) -> JsRuntime {
     let rt = JsRuntime::new(RuntimeOptions {

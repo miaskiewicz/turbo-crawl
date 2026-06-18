@@ -93,6 +93,46 @@ fn window_and_navigator_present() {
     );
 }
 
+// Mirrors the payroll /login hydration crash: the page's client JS (Next.js +
+// the PropelAuth SDK) uses WHATWG `URL` / `URLSearchParams` while building the
+// login form. deno_core doesn't ship those globals, so hydration died with
+// "ReferenceError: URL is not defined" and the `login-email-input` never
+// rendered. The render tier must provide them.
+#[test]
+fn whatwg_url_available_for_hydration() {
+    let html = render_html(
+        "<body><div id='root'></div></body>",
+        r#"
+        const u = new URL("https://app.example/login?next=%2Fhome");
+        const sp = new URLSearchParams(u.search);
+        const root = document.getElementById('root');
+        const input = document.createElement('input');
+        input.setAttribute('data-testid', 'login-email-input');
+        input.setAttribute('data-next', sp.get('next'));
+        input.setAttribute('data-host', u.hostname);
+        input.setAttribute('data-proto', u.protocol);
+        root.appendChild(input);
+        "#,
+    )
+    .unwrap();
+    assert!(
+        html.contains(r#"data-testid="login-email-input""#),
+        "login form should render after hydration: {html}"
+    );
+    assert!(
+        html.contains(r#"data-next="/home""#),
+        "URLSearchParams.get must decode: {html}"
+    );
+    assert!(
+        html.contains(r#"data-host="app.example""#),
+        "URL.hostname must parse: {html}"
+    );
+    assert!(
+        html.contains(r#"data-proto="https:""#),
+        "URL.protocol must parse: {html}"
+    );
+}
+
 // --- hydration (the headline tier-3 capability) -----------------------------
 #[test]
 fn page_script_hydrates_then_serializes() {
