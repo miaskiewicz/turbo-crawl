@@ -416,6 +416,9 @@
       Object.defineProperty(el, field, { configurable: true, enumerable: false,
         get: function(){ return protoDesc.get.call(this); },
         set: function(v){ current = '' + v; protoDesc.set.call(this, v); } });
+      // The tracker tracks the `value` field (text inputs). For checkbox/radio — which track `checked`
+      // — el_set_attribute('type', …) strips this `value`+`_valueTracker` once the type is known, so
+      // a framework falls back to its own checked path.
       el._valueTracker = { getValue: function(){ return current; }, setValue: function(v){ current = '' + v; }, stopTracking: function(){ el._valueTracker = null; try { Object.defineProperty(el, field, protoDesc); } catch(e){} } };
     };
     var applyControlProto = function(el){

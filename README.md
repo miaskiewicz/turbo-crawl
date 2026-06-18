@@ -390,24 +390,28 @@ timing each. `npm run harness`. The **Rust** port runs here too — `turbo-rust
 | turbo-crawl (no-JS) *(JS impl)* | **153** | — *(needs JS)* | ✓ |
 | turbo-crawl (js-fast) *(JS impl)* | 343 | **248** | ✓ |
 | turbo-crawl (js-secure) *(JS impl)* | 291 | 287 | ✓ |
-| **turbo-rust (no-JS)** *(Rust)* | 192 | — *(needs JS)* | ✓ |
+| **turbo-rust (no-JS)** *(Rust)* | **163** | — *(needs JS)* | ✓ |
 | **turbo-rust (js)** *(Rust)* | —‡ | 524 | ✓ |
 | chromium *(oracle)* | 919 | 1170 | — |
 | firefox | 726 | 1237 | ✓ |
 | webkit | 1196 | 1271 | ✓ |
 
 Every engine produces the **same observations** as Chromium / Firefox / WebKit
-(parity ✓). The **pure-Rust** crawler is right there with the mature JS impl and
-crushes every browser: `turbo-rust (no-js)` runs the Wikipedia click-through in
-**192 ms** — **~4.8× faster than Chromium** (919), and faster than Firefox (726) /
-WebKit (1196) — and `turbo-rust (js)` **runs the real jQuery on
-`quotes.toscrape.com/js`** (the same 10 quotes Chromium extracts) in **524 ms,
-~2.2× faster than Chromium** (1170), via a true V8 isolate over a native rtdom
-DOM, no Chromium process. Both numbers are essentially network-bound now: the
-napi addon uses a **process-shared pooled HTTP client** (connection + TLS reuse
-across pages) and a **thread-persistent V8 isolate** that `page.evaluate` reuses
-across pages (the ~20 ms isolate boot is paid once, then ~5 ms/call), so the Rust
-engine sits within a hair of the in-process `node:vm` JS impl.
+(parity ✓). The **pure-Rust** crawler matches the mature JS impl and crushes every
+browser: `turbo-rust (no-js)` runs the Wikipedia click-through in **163 ms** —
+**~5.6× faster than Chromium** (919), faster than Firefox (726) / WebKit (1196) —
+and `turbo-rust (js)` **runs the real jQuery on `quotes.toscrape.com/js`** (the
+same 10 quotes Chromium extracts) in **524 ms, ~2.2× faster than Chromium** (1170),
+via a true V8 isolate over a native rtdom DOM, no Chromium process. It's
+network-bound now, after closing the per-call overhead the napi engine carried:
+a **process-shared pooled HTTP client** (connection/TLS reuse across pages), a
+**thread-persistent V8 isolate** whose **DOM install is reused across same-page
+`page.evaluate`s** (parse once per page, ~0.5 ms/call after), a **per-thread parse
+cache** so multiple views of one page (links + markdown + extract — the real crawl
+shape) parse it once (~4 ms → ~1 ms per extra view), and a back-forward snapshot
+cache so `goBack` restores instead of re-fetching. A Rust criterion microbench
+(`cargo bench -p turbo-crawl-view`) + a napi hotspot profiler
+(`harness/hotpath/rust-hotpath.mjs`) track these.
 
 ‡ js-mode executes the *page's own* scripts; on a server-rendered page like
 Wikipedia that over-runs (use `no-js` there — 192 ms, 4/4). The `form` routine is

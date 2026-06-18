@@ -64,7 +64,9 @@ class RustPage {
   async _navigate(r, track) {
     this._apply(r);
     if (this._js) await this._render();
-    if (track) this._history.push(this._url);
+    // History holds full page snapshots (like a browser's back-forward cache), so
+    // goBack restores instantly instead of re-fetching — matching a real browser.
+    if (track) this._history.push({ html: this._html, url: this._url, cookies: this._cookies });
     return { status: () => r.status, url: () => r.finalUrl };
   }
 
@@ -74,9 +76,13 @@ class RustPage {
   }
 
   async goBack() {
-    this._history.pop(); // current page
-    const prev = this._history.pop(); // goto re-pushes it
-    return prev == null ? null : this.goto(prev);
+    this._history.pop(); // drop current
+    const prev = this._history[this._history.length - 1];
+    if (!prev) return null;
+    this._html = prev.html;
+    this._url = prev.url;
+    this._cookies = prev.cookies;
+    return { status: () => 200, url: () => this._url };
   }
 
   async evaluate(fnOrStr) {
@@ -89,7 +95,9 @@ class RustPage {
   }
 
   async title() {
-    return this._native.title(this._html);
+    // Via evaluate so it shares the persistent isolate's install with the routine's
+    // other page.evaluate calls (one parse per page, not one per napi read).
+    return this.evaluate("document.title");
   }
 
   url() {

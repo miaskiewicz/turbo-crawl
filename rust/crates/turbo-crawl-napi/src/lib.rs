@@ -28,24 +28,47 @@ fn to_json_string<T: serde::Serialize>(v: &T) -> String {
     serde_json::to_string(v).unwrap_or_else(|_| "null".to_string())
 }
 
-// --- view passes (parse-per-call; the shim caches the HTML) -----------------
+thread_local! {
+    /// Memoize the most recent `html -> Tree` parse per thread. Reads are stateless
+    /// (Node passes the HTML each call), so a page that gets several view passes
+    /// (links + markdown + text + extract — the real crawl pattern, and the shim's
+    /// query-then-accessors) re-parsed the 250 KB document every call. Cache the last
+    /// one: a same-HTML follow-up call is a cheap string compare + `Rc` clone instead
+    /// of a ~5 ms re-parse. Mutating actions still own their own `Tree` (need `&mut`).
+    static PARSE_CACHE: std::cell::RefCell<Option<(String, std::rc::Rc<Tree>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Parsed `Tree` for `html`, reusing the thread's last parse when the HTML is
+/// unchanged. Returned as `Rc<Tree>`; `&tree` derefs to `&Tree` at call sites.
+fn parsed(html: &str) -> std::rc::Rc<Tree> {
+    PARSE_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.as_ref().map(|(k, _)| k.as_str()) != Some(html) {
+            *c = Some((html.to_string(), std::rc::Rc::new(Tree::parse(html))));
+        }
+        c.as_ref().expect("just set").1.clone()
+    })
+}
+
+// --- view passes (parse cached per page; the shim caches the HTML) ----------
 
 #[napi]
 pub fn markdown(html: String, base_url: String) -> String {
-    let tree = Tree::parse(&html);
+    let tree = parsed(&html);
     view::markdown(&tree, tree.root(), &base_url)
 }
 
 #[napi]
 pub fn text(html: String) -> String {
-    let tree = Tree::parse(&html);
+    let tree = parsed(&html);
     view::text(&tree, tree.root())
 }
 
 /// Document `<title>` (raw text — the text view skips TITLE, so read it directly).
 #[napi]
 pub fn title(html: String) -> String {
-    let tree = Tree::parse(&html);
+    let tree = parsed(&html);
     tree.query_selector("title")
         .map(|h| tree.text_content(h).trim().to_string())
         .unwrap_or_default()
@@ -53,31 +76,31 @@ pub fn title(html: String) -> String {
 
 #[napi]
 pub fn html(html: String) -> String {
-    let tree = Tree::parse(&html);
+    let tree = parsed(&html);
     serialize_inner(&tree, tree.root())
 }
 
 #[napi]
 pub fn links(html: String, base_url: String) -> Vec<String> {
-    let tree = Tree::parse(&html);
+    let tree = parsed(&html);
     view::links(&tree, &base_url)
 }
 
 #[napi]
 pub fn interactive_elements(html: String, base_url: String) -> String {
-    let tree = Tree::parse(&html);
+    let tree = parsed(&html);
     to_json_string(&view::interactive_elements(&tree, &base_url, true))
 }
 
 #[napi]
 pub fn accessibility_tree(html: String) -> String {
-    let tree = Tree::parse(&html);
+    let tree = parsed(&html);
     to_json_string(&view::accessibility_tree(&tree))
 }
 
 #[napi]
 pub fn aria_snapshot(html: String) -> String {
-    let tree = Tree::parse(&html);
+    let tree = parsed(&html);
     match tree.query_selector("body") {
         Some(b) => view::aria_snapshot(&tree, b),
         None => String::new(),
@@ -86,19 +109,19 @@ pub fn aria_snapshot(html: String) -> String {
 
 #[napi]
 pub fn hydration_state(html: String) -> String {
-    let tree = Tree::parse(&html);
+    let tree = parsed(&html);
     to_json_string(&view::extract_hydration_state(&tree))
 }
 
 #[napi]
 pub fn detect(html: String) -> String {
-    let tree = Tree::parse(&html);
+    let tree = parsed(&html);
     to_json_string(&view::detect_js_required(&tree, None, None))
 }
 
 #[napi]
 pub fn query(html: String, selector: String, kind: Option<String>) -> String {
-    let tree = Tree::parse(&html);
+    let tree = parsed(&html);
     let ty = match kind.as_deref() {
         Some("css") => QueryType::Css,
         Some("xpath") => QueryType::Xpath,
@@ -111,7 +134,7 @@ pub fn query(html: String, selector: String, kind: Option<String>) -> String {
 /// `name` filters a role match by accessible name (substring).
 #[napi]
 pub fn get_by(html: String, kind: String, value: String, name: Option<String>) -> String {
-    let tree = Tree::parse(&html);
+    let tree = parsed(&html);
     let nm = name.as_deref().map(|n| (n, TextMode::Substring));
     let hits = match kind.as_str() {
         "role" => view::by_role(&tree, &value, nm),
@@ -130,7 +153,7 @@ pub fn get_by(html: String, kind: String, value: String, name: Option<String>) -
 pub fn extract(html: String, base_url: String, schema_json: String) -> Result<String> {
     let schema_value: Value =
         serde_json::from_str(&schema_json).map_err(|e| Error::from_reason(e.to_string()))?;
-    let tree = Tree::parse(&html);
+    let tree = parsed(&html);
     let schema = parse_schema(&schema_value);
     Ok(to_json_string(&view::extract_schema(
         &tree, &schema, &base_url,
@@ -211,70 +234,68 @@ pub fn render_ts(
 
 #[napi]
 pub fn attr_of(html: String, node: u32, name: String) -> Option<String> {
-    Tree::parse(&html)
-        .get_attribute(node, &name)
-        .map(str::to_string)
+    parsed(&html).get_attribute(node, &name).map(str::to_string)
 }
 
 #[napi]
 pub fn input_value_of(html: String, node: u32) -> String {
-    view::input_value_of(&Tree::parse(&html), node)
+    view::input_value_of(&parsed(&html), node)
 }
 
 #[napi]
 pub fn is_visible(html: String, node: u32) -> bool {
-    view::is_visible(&Tree::parse(&html), node)
+    view::is_visible(&parsed(&html), node)
 }
 
 #[napi]
 pub fn is_checked(html: String, node: u32) -> bool {
-    view::is_checked(&Tree::parse(&html), node)
+    view::is_checked(&parsed(&html), node)
 }
 
 #[napi]
 pub fn is_enabled(html: String, node: u32) -> bool {
-    view::is_enabled(&Tree::parse(&html), node)
+    view::is_enabled(&parsed(&html), node)
 }
 
 #[napi]
 pub fn is_editable(html: String, node: u32) -> bool {
-    view::is_editable(&Tree::parse(&html), node)
+    view::is_editable(&parsed(&html), node)
 }
 
 #[napi]
 pub fn is_empty(html: String, node: u32) -> bool {
-    view::is_empty(&Tree::parse(&html), node)
+    view::is_empty(&parsed(&html), node)
 }
 
 #[napi]
 pub fn aria_role_of(html: String, node: u32) -> String {
-    view::role_of(&Tree::parse(&html), node)
+    view::role_of(&parsed(&html), node)
 }
 
 #[napi]
 pub fn accessible_name_of(html: String, node: u32) -> String {
-    view::accessible_name(&Tree::parse(&html), node)
+    view::accessible_name(&parsed(&html), node)
 }
 
 #[napi]
 pub fn accessible_description_of(html: String, node: u32) -> String {
-    view::accessible_description(&Tree::parse(&html), node)
+    view::accessible_description(&parsed(&html), node)
 }
 
 #[napi]
 pub fn selected_values_of(html: String, node: u32) -> Vec<String> {
-    view::selected_values(&Tree::parse(&html), node)
+    view::selected_values(&parsed(&html), node)
 }
 
 #[napi]
 pub fn css_value_of(html: String, node: u32, name: String) -> String {
-    view::css_value(&Tree::parse(&html), node, &name)
+    view::css_value(&parsed(&html), node, &name)
 }
 
 /// Whether `expected` is an ordered ARIA-snapshot subset of `node`'s subtree.
 #[napi]
 pub fn matches_aria_snapshot(html: String, node: u32, expected: String) -> bool {
-    view::matches_aria_snapshot(&Tree::parse(&html), node, &expected)
+    view::matches_aria_snapshot(&parsed(&html), node, &expected)
 }
 
 // --- actions (Lane A intent graph) ------------------------------------------
@@ -329,7 +350,7 @@ fn intent_json(intent: view::ClickIntent) -> String {
 /// `{action:"navigate",url}` / `{action:"submit",...}` / `{action:"inert"}`.
 #[napi]
 pub fn click(html: String, selector: String, base_url: String) -> Result<String> {
-    let tree = Tree::parse(&html);
+    let tree = parsed(&html);
     let h = first_match(&tree, &selector)?;
     Ok(intent_json(view::click_intent(&tree, h, &base_url)))
 }
@@ -359,7 +380,7 @@ pub fn select_option_node(html: String, node: u32, value: String) -> String {
 
 #[napi]
 pub fn click_node(html: String, node: u32, base_url: String) -> String {
-    intent_json(view::click_intent(&Tree::parse(&html), node, &base_url))
+    intent_json(view::click_intent(&parsed(&html), node, &base_url))
 }
 
 // --- async: fetch + crawl ---------------------------------------------------

@@ -251,33 +251,35 @@ thread_local! {
     /// (`browser_env::reset`) after every call, so the thread-local DOM is empty at
     /// thread exit (no dangling handles when the isolate finally drops). Page-JS
     /// isolation across pages is intentionally relaxed here — a crawl doesn't need it.
-    static EVAL_RT: RefCell<Option<JsRuntime>> = const { RefCell::new(None) };
+    static EVAL_RT: RefCell<Option<(JsRuntime, String)>> = const { RefCell::new(None) };
 }
 
 /// Evaluate `script` against `html`'s DOM, returning its result as a string
 /// (Playwright `page.evaluate`-ish; synchronous, no event loop). Reuses a
-/// thread-persistent isolate — see [`EVAL_RT`].
+/// thread-persistent isolate AND the installed DOM across calls on the SAME page
+/// (see [`EVAL_RT`]): the page is parsed + installed once, then repeated
+/// `page.evaluate`s on it just run script (~0.5 ms) instead of re-parsing the
+/// document (~5 ms). The DOM is re-installed only when the HTML changes (a new
+/// page). Same-page evaluates share the page's globals/DOM, which matches
+/// Playwright's page-scoped `evaluate` semantics.
 pub fn run_with_dom(html: &str, script: &str) -> Result<String, String> {
     EVAL_RT.with(|cell| {
         let mut slot = cell.borrow_mut();
         if slot.is_none() {
-            *slot = Some(make_runtime("about:blank"));
+            *slot = Some((make_runtime("about:blank"), String::new()));
         }
-        let rt = slot.as_mut().expect("eval runtime present");
-        let out = run_eval(rt, html, script);
-        // Clear the binding's V8 globals while the (reused) isolate is alive, so the
-        // thread-local DOM is empty between calls and at thread exit.
-        crate::browser_env::reset();
-        out
+        let (rt, installed) = slot.as_mut().expect("eval runtime present");
+        if installed != html {
+            crate::browser_env::reset(); // drop the previous page's binding (isolate still alive)
+            install_dom(rt, html, "about:blank")?;
+            installed.clear();
+            installed.push_str(html);
+        }
+        let global = rt
+            .execute_script("<page>", script.to_string())
+            .map_err(|e| e.to_string())?;
+        read_string(rt, global)
     })
-}
-
-fn run_eval(rt: &mut JsRuntime, html: &str, script: &str) -> Result<String, String> {
-    install_dom(rt, html, "about:blank")?;
-    let global = rt
-        .execute_script("<page>", script.to_string())
-        .map_err(|e| e.to_string())?;
-    read_string(rt, global)
 }
 
 /// Run page `script` against `html`, drain virtual timers, and return the hydrated
