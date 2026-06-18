@@ -268,6 +268,111 @@ if (typeof globalThis.crypto === "undefined" || !globalThis.crypto.getRandomValu
     return `${h.slice(0,4).join("")}-${h.slice(4,6).join("")}-4${h[6].slice(1)}-${h[8]}${h[9]}-${h.slice(10,16).join("")}`;
   };
 }
+// crypto.subtle.digest (real SHA-256) — auth SDKs hash PKCE verifiers / state with it.
+// Other operations reject clearly (vs an undefined-property crash) rather than no-op.
+if (!globalThis.crypto.subtle) {
+  const K = new Uint32Array([
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2,
+  ]);
+  const rotr = (n, x) => (x >>> n) | (x << (32 - n));
+  const sha256 = (msg) => {
+    const H = new Uint32Array([0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]);
+    const bitLen = msg.length * 8;
+    const pad = (56 - ((msg.length + 1) % 64) + 64) % 64;
+    const total = msg.length + 1 + pad + 8;
+    const m = new Uint8Array(total);
+    m.set(msg);
+    m[msg.length] = 0x80;
+    const dv = new DataView(m.buffer);
+    dv.setUint32(total - 8, Math.floor(bitLen / 0x100000000));
+    dv.setUint32(total - 4, bitLen >>> 0);
+    const w = new Uint32Array(64);
+    for (let i = 0; i < total; i += 64) {
+      for (let t = 0; t < 16; t++) w[t] = dv.getUint32(i + t * 4);
+      for (let t = 16; t < 64; t++) {
+        const s0 = rotr(7, w[t-15]) ^ rotr(18, w[t-15]) ^ (w[t-15] >>> 3);
+        const s1 = rotr(17, w[t-2]) ^ rotr(19, w[t-2]) ^ (w[t-2] >>> 10);
+        w[t] = (w[t-16] + s0 + w[t-7] + s1) >>> 0;
+      }
+      let a=H[0],b=H[1],c=H[2],d=H[3],e=H[4],f=H[5],g=H[6],h=H[7];
+      for (let t = 0; t < 64; t++) {
+        const S1 = rotr(6,e) ^ rotr(11,e) ^ rotr(25,e);
+        const ch = (e & f) ^ (~e & g);
+        const t1 = (h + S1 + ch + K[t] + w[t]) >>> 0;
+        const S0 = rotr(2,a) ^ rotr(13,a) ^ rotr(22,a);
+        const maj = (a & b) ^ (a & c) ^ (b & c);
+        const t2 = (S0 + maj) >>> 0;
+        h=g; g=f; f=e; e=(d + t1) >>> 0; d=c; c=b; b=a; a=(t1 + t2) >>> 0;
+      }
+      H[0]=(H[0]+a)>>>0; H[1]=(H[1]+b)>>>0; H[2]=(H[2]+c)>>>0; H[3]=(H[3]+d)>>>0;
+      H[4]=(H[4]+e)>>>0; H[5]=(H[5]+f)>>>0; H[6]=(H[6]+g)>>>0; H[7]=(H[7]+h)>>>0;
+    }
+    const out = new Uint8Array(32);
+    const odv = new DataView(out.buffer);
+    for (let i = 0; i < 8; i++) odv.setUint32(i * 4, H[i]);
+    return out;
+  };
+  const reject = (op) => () => Promise.reject(new Error("crypto.subtle." + op + " unavailable in the no-browser render tier"));
+  globalThis.crypto.subtle = {
+    digest: (algo, data) => {
+      const name = (typeof algo === "string" ? algo : (algo && algo.name) || "").toUpperCase();
+      const bytes = data instanceof Uint8Array ? data : new Uint8Array(data.buffer || data);
+      if (name === "SHA-256") return Promise.resolve(sha256(bytes).buffer);
+      return Promise.reject(new Error("crypto.subtle.digest: " + name + " not supported (SHA-256 only)"));
+    },
+    importKey: reject("importKey"), exportKey: reject("exportKey"), generateKey: reject("generateKey"),
+    sign: reject("sign"), verify: reject("verify"), encrypt: reject("encrypt"), decrypt: reject("decrypt"),
+    deriveBits: reject("deriveBits"), deriveKey: reject("deriveKey"),
+  };
+}
+// BroadcastChannel — auth SDKs sync session state across tabs over it. One isolate =
+// "one tab", but deliver to other channels of the same name (some flows new up two).
+if (typeof globalThis.BroadcastChannel === "undefined") {
+  const __chans = {};
+  globalThis.BroadcastChannel = class BroadcastChannel {
+    constructor(name) {
+      this.name = String(name);
+      this.onmessage = null;
+      this._closed = false;
+      (__chans[this.name] = __chans[this.name] || []).push(this);
+    }
+    postMessage(data) {
+      for (const c of __chans[this.name] || []) {
+        if (c !== this && !c._closed) globalThis.setTimeout(() => { if (typeof c.onmessage === "function") c.onmessage({ data, target: c }); }, 0);
+      }
+    }
+    close() { this._closed = true; const a = __chans[this.name]; if (a) { const i = a.indexOf(this); if (i >= 0) a.splice(i, 1); } }
+    addEventListener(t, fn) { if (t === "message") this.onmessage = fn; }
+    removeEventListener() {}
+    dispatchEvent() { return true; }
+  };
+}
+// WebSocket — no live socket headless. Stay CONNECTING forever (never open, never
+// close): apps connect in the background and render regardless, so this can't hang a
+// render NOR trigger a reconnect loop (which firing onclose would).
+if (typeof globalThis.WebSocket === "undefined") {
+  globalThis.WebSocket = class WebSocket {
+    constructor(url) {
+      this.url = String(url);
+      this.readyState = 0; // CONNECTING, and it stays there
+      this.onopen = this.onmessage = this.onerror = this.onclose = null;
+      this.bufferedAmount = 0;
+    }
+    send() {}
+    close() { this.readyState = 3; if (typeof this.onclose === "function") try { this.onclose({ type: "close", code: 1000, wasClean: true }); } catch (_e) {} }
+    addEventListener(t, fn) { this["on" + t] = fn; }
+    removeEventListener() {}
+    dispatchEvent() { return true; }
+  };
+  Object.assign(globalThis.WebSocket, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 });
+}
 if (typeof globalThis.btoa === "undefined") {
   const __B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   globalThis.btoa = (s) => {

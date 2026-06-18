@@ -224,6 +224,51 @@ async fn readable_stream_and_abort_controller_present() {
     );
 }
 
+// crypto.subtle.digest (real SHA-256), BroadcastChannel, and WebSocket — auth SDKs
+// (PropelAuth) + analytics use these during hydration. WebSocket must not hang/throw.
+#[tokio::test]
+async fn crypto_subtle_websocket_broadcastchannel_present() {
+    let html = render_page(
+        "<body><div id='root'></div></body>",
+        "about:blank",
+        r#"
+        (async () => {
+          const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("abc"));
+          const hex = Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+          const root = document.getElementById("root");
+          root.setAttribute("data-sha", hex);
+          root.setAttribute("data-ws", typeof WebSocket);
+          root.setAttribute("data-bc", typeof BroadcastChannel);
+          const ws = new WebSocket("wss://x/y"); // must not throw or hang
+          root.setAttribute("data-ws-state", String(ws.readyState));
+          const bc = new BroadcastChannel("t"); let got = "";
+          const bc2 = new BroadcastChannel("t"); bc2.onmessage = (e) => { got = e.data; root.setAttribute("data-bc-msg", got); };
+          bc.postMessage("ping");
+        })();
+        "#,
+    )
+    .await
+    .unwrap();
+    assert!(
+        html.contains(
+            r#"data-sha="ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad""#
+        ),
+        "SHA-256(\"abc\") must match the known vector: {html}"
+    );
+    assert!(
+        html.contains(r#"data-ws="function""#) && html.contains(r#"data-ws-state="0""#),
+        "WebSocket stub present + CONNECTING: {html}"
+    );
+    assert!(
+        html.contains(r#"data-bc="function""#),
+        "BroadcastChannel present: {html}"
+    );
+    assert!(
+        html.contains(r#"data-bc-msg="ping""#),
+        "BroadcastChannel delivers same-name messages: {html}"
+    );
+}
+
 // Web globals deno_core lacks but app bundles use (TextEncoder/Decoder round-trip,
 // crypto.getRandomValues, btoa/atob). A bundle touching any of these mid-hydration
 // would otherwise crash with "X is not defined".
