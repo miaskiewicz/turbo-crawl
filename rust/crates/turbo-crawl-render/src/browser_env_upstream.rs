@@ -18,8 +18,11 @@ use turbo_dom_parser::rtdom::node_ref::DocumentExt;
 use turbo_dom_parser::rtdom::tree::{Handle, Tree};
 use turbo_dom_parser::rtdom::NodeRef;
 
+/// The all-Rust DOM (rtdom) is now the ONLY DOM environment — the JS turbo-dom bootstrap
+/// (installGlobals + the `.node` parser) was removed in v0.3.0. Kept as a function (always true) so
+/// the per-file install/reset call sites read intent; `TURBO_RUST_DOM` is no longer consulted.
 pub fn enabled() -> bool {
-    std::env::var("TURBO_RUST_DOM").map(|v| !v.is_empty() && v != "0").unwrap_or(false)
+    true
 }
 
 /// Whether to RECORD missing-member accesses (debug surface map). The interceptor itself is always

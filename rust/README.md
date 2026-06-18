@@ -77,10 +77,13 @@ place, and the render returns the hydrated HTML (the Lane B contract).
   for the vendor/sync story (verbatim copy + a one-command re-vendor script; the
   turbo-crawl-specific deltas — `install_html`/`document_html` and the env bootstrap
   — live separately and are never patched into the upstream file).
-- The runtime in [`src/dom.rs`](crates/turbo-crawl-render/src/dom.rs) grafts that
-  binding onto deno_core's context, then layers the non-DOM env (`navigator`,
-  `location`, virtual timers, `fetch`/XHR **over the tier-1 net stack**,
-  `document.cookie` bridged to the shared `CookieJar`, observers, history).
+- The runtime in [`src/runtime.rs`](crates/turbo-crawl-render/src/runtime.rs) grafts
+  that binding onto deno_core's context, then layers the non-DOM `window` env a real
+  page needs (`navigator`, `location`, virtual timers + real microtasks, `fetch`/XHR
+  **over the tier-1 net stack**, `URL`, `crypto`(+`subtle`), `MessageChannel`,
+  `ReadableStream`, `AbortController`, `BroadcastChannel`, `WebSocket`,
+  `document.cookie` bridged to the shared `CookieJar`, observers, history) + the
+  hydration pump (executes injected `<script>` chunks, drains to quiescence).
 - **`fetch` is real** (async, event-loop-driven; relative URLs resolve against the
   page base) — promise/`await`/timer-driven hydration settles before serialization.
 - `run_with_dom` (the sync `page.evaluate` path) reuses a **thread-persistent

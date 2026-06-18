@@ -124,7 +124,11 @@ globalThis.clearTimeout = (id) => {
 globalThis.clearInterval = globalThis.clearTimeout;
 globalThis.requestAnimationFrame = (fn) => globalThis.setTimeout(fn, 16);
 globalThis.cancelAnimationFrame = globalThis.clearTimeout;
-globalThis.queueMicrotask = (fn) => globalThis.setTimeout(fn, 0);
+// REAL microtask (not a macrotask): signals/reactivity libs batch reaction flushes
+// via queueMicrotask, and routing it to the timer queue breaks that batching — the
+// flush re-runs against half-applied state and re-notifies forever (an infinite
+// scheduler loop, no commit). V8's microtask queue is drained by the event loop.
+globalThis.queueMicrotask = (fn) => { Promise.resolve().then(fn); };
 globalThis.__runTimers = (max = 100000) => {
   let n = 0;
   while (__timers.length && n < max) {
