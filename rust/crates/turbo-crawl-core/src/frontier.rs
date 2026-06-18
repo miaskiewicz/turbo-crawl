@@ -111,5 +111,29 @@ mod tests {
         f.add("https://x.test/p", 0);
         assert!(f.seen("https://x.test/p#frag"));
         assert!(!f.seen("https://x.test/other"));
+        assert!(!f.seen("not a url")); // uncanonicalizable → not seen
+    }
+
+    #[test]
+    fn add_rejects_uncanonicalizable() {
+        let mut f = Frontier::new();
+        assert!(!f.add("", 0)); // empty → not canonicalizable
+        assert!(!f.add("http://", 0)); // no host → parse error
+    }
+
+    #[test]
+    fn ring_cursor_compacts_after_1024() {
+        let mut f = Frontier::new();
+        for i in 0..2100 {
+            f.add(&format!("https://x.test/p{i}"), 0);
+        }
+        // Drain past the compaction threshold (head > 1024 && head*2 > len).
+        for _ in 0..1100 {
+            assert!(f.next().is_some());
+        }
+        // Still consistent after the internal drain/compaction.
+        assert_eq!(f.pending(), 1000);
+        assert_eq!(f.size(), 2100);
+        assert!(f.next().is_some());
     }
 }

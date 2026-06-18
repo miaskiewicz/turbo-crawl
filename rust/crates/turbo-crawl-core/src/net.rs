@@ -409,4 +409,267 @@ mod tests {
         let bytes = [0xe9u8]; // é in latin1
         assert_eq!(decode(&bytes, "iso-8859-1"), "é");
     }
+
+    #[test]
+    fn meta_charset_empty_label_falls_back() {
+        // "charset=" followed by a non-token char → empty label → utf-8.
+        assert_eq!(detect_charset("text/html", b"<meta charset= >"), "utf-8");
+    }
+}
+
+// Live-IO coverage over a localhost server (offline + deterministic — no
+// external network). Exercises fetch_html, both redirect paths, the byte caps,
+// the content-type gate, charset decode, and the CookieJar round-trip.
+#[cfg(test)]
+mod io_tests {
+    use super::*;
+    use crate::cookies::CookieJar;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    fn http(status: &str, headers: &[(&str, &str)], body: &[u8]) -> Vec<u8> {
+        let mut v = format!("HTTP/1.1 {status}\r\n").into_bytes();
+        for (k, val) in headers {
+            v.extend_from_slice(format!("{k}: {val}\r\n").as_bytes());
+        }
+        v.extend_from_slice(b"Connection: close\r\n\r\n");
+        v.extend_from_slice(body);
+        v
+    }
+
+    fn route(path: &str) -> Vec<u8> {
+        match path {
+            "/json" => http("200 OK", &[("Content-Type", "application/json")], b"{}"),
+            "/r" => http("302 Found", &[("Location", "/dest")], b""),
+            "/post303" => http("303 See Other", &[("Location", "/dest")], b""),
+            "/emptyloc" => http(
+                "302 Found",
+                &[("Content-Type", "text/html")],
+                b"<html>noloc</html>",
+            ),
+            "/dest" => http(
+                "200 OK",
+                &[("Content-Type", "text/html")],
+                b"<html>dest</html>",
+            ),
+            "/big" => http(
+                "200 OK",
+                &[("Content-Type", "text/html"), ("Content-Length", "1000000")],
+                b"",
+            ),
+            "/stream" => http("200 OK", &[("Content-Type", "text/html")], &[b'x'; 50]),
+            "/latin" => http(
+                "200 OK",
+                &[("Content-Type", "text/html; charset=iso-8859-1")],
+                &[b'<', b'p', b'>', 0xe9, b'<', b'/', b'p', b'>'],
+            ),
+            "/cookie" => http(
+                "200 OK",
+                &[
+                    ("Content-Type", "text/html"),
+                    ("Set-Cookie", "sid=abc; Path=/"),
+                ],
+                b"<html>c</html>",
+            ),
+            _ => http(
+                "200 OK",
+                &[("Content-Type", "text/html")],
+                b"<html><title>ok</title></html>",
+            ),
+        }
+    }
+
+    async fn spawn() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    let _ = sock.write_all(&route(&path)).await;
+                    let _ = sock.flush().await;
+                });
+            }
+        });
+        port
+    }
+
+    fn url(port: u16, path: &str) -> String {
+        format!("http://127.0.0.1:{port}{path}")
+    }
+
+    #[tokio::test]
+    async fn fetches_and_decodes_html() {
+        let p = spawn().await;
+        let r = fetch_html(&url(p, "/"), FetchOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(r.status, 200);
+        assert!(r.html.contains("ok"));
+        assert!(!r.redirected);
+    }
+
+    #[tokio::test]
+    async fn content_type_gate_and_opt_out() {
+        let p = spawn().await;
+        let err = fetch_html(&url(p, "/json"), FetchOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotHtml);
+        let ok = fetch_html(
+            &url(p, "/json"),
+            FetchOptions {
+                allow_non_html: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(ok.html, "{}");
+    }
+
+    #[tokio::test]
+    async fn auto_redirect_follows() {
+        let p = spawn().await;
+        let r = fetch_html(&url(p, "/r"), FetchOptions::default())
+            .await
+            .unwrap();
+        assert!(r.final_url.ends_with("/dest"));
+        assert!(r.redirected);
+        assert!(r.html.contains("dest"));
+    }
+
+    #[tokio::test]
+    async fn manual_redirect_follows_with_cap() {
+        let p = spawn().await;
+        let r = fetch_html(
+            &url(p, "/r"),
+            FetchOptions {
+                max_redirects: Some(5),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(r.final_url.ends_with("/dest"));
+        assert!(r.redirected);
+    }
+
+    #[tokio::test]
+    async fn manual_redirect_cap_zero_stops_at_first_hop() {
+        let p = spawn().await;
+        let r = fetch_html(
+            &url(p, "/r"),
+            FetchOptions {
+                max_redirects: Some(0),
+                allow_non_html: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.status, 302); // not followed
+    }
+
+    #[tokio::test]
+    async fn content_length_cap_rejects() {
+        let p = spawn().await;
+        let err = fetch_html(
+            &url(p, "/big"),
+            FetchOptions {
+                max_bytes: Some(10),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::BodyTooLarge);
+    }
+
+    #[tokio::test]
+    async fn streamed_cap_rejects() {
+        let p = spawn().await;
+        let err = fetch_html(
+            &url(p, "/stream"),
+            FetchOptions {
+                max_bytes: Some(10),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::BodyTooLarge);
+    }
+
+    #[tokio::test]
+    async fn charset_decoded_from_header() {
+        let p = spawn().await;
+        let r = fetch_html(&url(p, "/latin"), FetchOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(r.html, "<p>é</p>");
+    }
+
+    #[tokio::test]
+    async fn cookie_round_trip() {
+        let p = spawn().await;
+        let mut jar = CookieJar::new();
+        jar.add("pre", "seed", "127.0.0.1", "/", None); // exercises build_headers cookie branch
+        let mut opts = FetchOptions {
+            jar: Some(&mut jar),
+            ..Default::default()
+        };
+        opts.headers.insert("x-test".into(), "1".into());
+        fetch_html(&url(p, "/cookie"), opts).await.unwrap();
+        // Set-Cookie from the response was ingested.
+        assert!(jar.cookie_header(&url(p, "/"), 0.0).contains("sid=abc"));
+    }
+
+    #[tokio::test]
+    async fn post_303_redirect_drops_body_and_switches_to_get() {
+        let p = spawn().await;
+        let r = fetch_html(
+            &url(p, "/post303"),
+            FetchOptions {
+                method: Some("POST".into()),
+                body: Some("payload".into()),
+                max_redirects: Some(5),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(r.final_url.ends_with("/dest"));
+    }
+
+    #[tokio::test]
+    async fn manual_redirect_without_location_is_terminal() {
+        let p = spawn().await;
+        let r = fetch_html(
+            &url(p, "/emptyloc"),
+            FetchOptions {
+                max_redirects: Some(5),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.status, 302); // no Location → treated as the final response
+        assert!(r.html.contains("noloc"));
+    }
+
+    #[tokio::test]
+    async fn network_error_surfaces() {
+        // Nothing listening on this port → transport error.
+        let err = fetch_html("http://127.0.0.1:1/", FetchOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::Network);
+    }
 }

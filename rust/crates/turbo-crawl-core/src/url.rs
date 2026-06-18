@@ -52,6 +52,9 @@ pub fn canonicalize(url: &str) -> Option<String> {
     kept.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
 
     apply_query(&mut u, &kept);
+    // Defensive mirror of the JS canonicalizer: the `url` crate already
+    // normalizes special-scheme (http/https) paths to "/", so this is
+    // effectively unreachable for the URLs we canonicalize.
     if u.path().is_empty() {
         u.set_path("/");
     }
@@ -127,5 +130,29 @@ mod tests {
         assert!(is_http_url("https://x.test"));
         assert!(!is_http_url("mailto:a@b.test"));
         assert!(!is_http_url("not a url"));
+    }
+
+    #[test]
+    fn host_of_includes_nondefault_port() {
+        assert_eq!(host_of("https://x.test/a").as_deref(), Some("x.test"));
+        assert_eq!(
+            host_of("https://x.test:8443/a").as_deref(),
+            Some("x.test:8443")
+        );
+        assert_eq!(host_of("mailto:a@b.test"), None);
+        assert_eq!(host_of("not a url"), None);
+    }
+
+    #[test]
+    fn origin_of_serializes_scheme_host_port() {
+        assert_eq!(
+            origin_of("https://x.test/a?b=1").as_deref(),
+            Some("https://x.test")
+        );
+        assert_eq!(
+            origin_of("http://x.test:81/a").as_deref(),
+            Some("http://x.test:81")
+        );
+        assert_eq!(origin_of("not a url"), None);
     }
 }

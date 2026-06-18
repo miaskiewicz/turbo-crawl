@@ -514,9 +514,155 @@ mod tests {
     async fn error_pages_recorded() {
         let pages = HashMap::new(); // start 404s
         let site = Arc::new(Site { pages });
-        let recs = crawl(opts(&["https://x.test/"]), site).await;
+        let o = CrawlOptions {
+            backoff_ms: 0, // keep the retry loop fast
+            ..opts(&["https://x.test/"])
+        };
+        let recs = crawl(o, site).await;
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].status, 0);
         assert!(recs[0].error.is_some());
+    }
+
+    fn empty_shared() -> Shared {
+        let mut sh = Shared {
+            frontier: Frontier::new(),
+            host_state: HashMap::new(),
+            start_hosts: HashMap::new(),
+            produced: 0,
+            active: 0,
+        };
+        sh.start_hosts.insert("x.test".to_string(), ());
+        sh
+    }
+
+    #[test]
+    fn host_blocked_true_when_host_unparseable() {
+        let o = opts(&["https://x.test/"]);
+        let hosts: HashMap<String, ()> = HashMap::new();
+        // is_http true but host_of None (no authority) → blocked.
+        assert!(host_blocked(&o, &hosts, "mailto:a@b.test"));
+    }
+
+    #[test]
+    fn claim_defers_at_cap_and_reports_politeness_wait() {
+        let o = CrawlOptions {
+            per_host_concurrency: 1,
+            ..opts(&["https://x.test/"])
+        };
+        let mut sh = empty_shared();
+        sh.frontier.add("https://x.test/a", 0);
+        // Host at its concurrency cap → item deferred (requeued), nothing ready.
+        sh.host_mut("x.test").in_flight = 1;
+        let c = claim(&mut sh, &o, 0);
+        assert!(c.item.is_none());
+        assert_eq!(c.wait, 0); // no politeness wait pending → clamps to 0
+        assert_eq!(sh.frontier.pending(), 1); // requeued
+
+        // Now under cap but inside the politeness window → wait reported.
+        sh.host_mut("x.test").in_flight = 0;
+        sh.host_mut("x.test").next_at = 100;
+        let c2 = claim(&mut sh, &o, 10);
+        assert!(c2.item.is_none());
+        assert_eq!(c2.wait, 90);
+
+        // Past the window → item is claimed.
+        let c3 = claim(&mut sh, &o, 200);
+        assert!(c3.item.is_some());
+    }
+
+    #[test]
+    fn record_of_falls_back_to_item_url_when_nav_url_empty() {
+        let item = Item {
+            url: "https://x.test/p".to_string(),
+            canon: "https://x.test/p".to_string(),
+            depth: 2,
+        };
+        let nav = Nav {
+            status: 200,
+            ..Default::default()
+        };
+        let rec = record_of(&item, &nav);
+        assert_eq!(rec.url, "https://x.test/p");
+        assert_eq!(rec.depth, 2);
+    }
+
+    struct Flaky {
+        hits: std::sync::Mutex<u32>,
+        fail_with: u16,
+        until: u32,
+    }
+    #[async_trait]
+    impl Navigator for Flaky {
+        async fn goto(&self, url: &str) -> Result<Nav, String> {
+            let mut h = self.hits.lock().unwrap();
+            *h += 1;
+            let status = if *h <= self.until {
+                self.fail_with
+            } else {
+                200
+            };
+            Ok(Nav {
+                url: url.to_string(),
+                status,
+                ..Default::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn retries_retryable_status_then_succeeds() {
+        let nav = Arc::new(Flaky {
+            hits: std::sync::Mutex::new(0),
+            fail_with: 503,
+            until: 1, // first attempt 503, retry → 200
+        });
+        let o = CrawlOptions {
+            backoff_ms: 0,
+            ..opts(&["https://x.test/"])
+        };
+        let recs = crawl(o, nav).await;
+        assert_eq!(recs[0].status, 200);
+    }
+
+    // Navigator that yields at goto so two workers interleave deterministically.
+    struct YieldSite;
+    #[async_trait]
+    impl Navigator for YieldSite {
+        async fn goto(&self, url: &str) -> Result<Nav, String> {
+            tokio::task::yield_now().await;
+            Ok(nav(url, &[]))
+        }
+    }
+
+    #[tokio::test]
+    async fn cap_hit_during_publish_stops_worker() {
+        // Two hosts, both claimed (and awaiting goto) before either publishes;
+        // with max_pages=1 the second publish sees the cap → returns true →
+        // the worker stops (the publish-true / worker-return path).
+        let o = CrawlOptions {
+            max_pages: 1,
+            concurrency: 2,
+            start: vec!["https://a.test/".to_string(), "https://b.test/".to_string()],
+            ..Default::default()
+        };
+        let recs = crawl(o, Arc::new(YieldSite)).await;
+        assert_eq!(recs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn gives_up_when_retry_budget_zero() {
+        let nav = Arc::new(Flaky {
+            hits: std::sync::Mutex::new(0),
+            fail_with: 503,
+            until: 99,
+        });
+        let o = CrawlOptions {
+            backoff_ms: 0,
+            retry_budget: 0, // should_retry_status false on the first 503
+            ..opts(&["https://x.test/"])
+        };
+        let recs = crawl(o, nav).await;
+        assert_eq!(recs[0].status, 503);
     }
 }

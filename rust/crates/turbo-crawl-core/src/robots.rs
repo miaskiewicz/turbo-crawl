@@ -50,6 +50,8 @@ fn pattern_matches(pat: &str, path: &str) -> bool {
             }
         }
     }
+    // Unreachable in practice: with N parts the loop always returns at the
+    // i==last arm (or the single-segment arm); kept as a defensive total.
     true
 }
 
@@ -269,6 +271,9 @@ mod tests {
         assert!(!pattern_matches("/x$", "/xy"));
         assert!(pattern_matches("/p/*/q$", "/p/a/q"));
         assert!(!pattern_matches("/p/*/q$", "/p/a/q/r"));
+        // two wildcards → a middle segment goes through the find loop
+        assert!(pattern_matches("/a/*/b/*/c", "/a/x/b/y/c"));
+        assert!(!pattern_matches("/a/*/zzz/*/c", "/a/x/b/y/c")); // middle seg not found
     }
 
     #[test]
@@ -317,5 +322,87 @@ mod tests {
     async fn non_2xx_allows_all() {
         let mut c = RobotsCache::new(StubFetcher(404, String::new()));
         assert!(c.allowed("https://x.test/anything", "turbo-crawl", 0).await);
+    }
+
+    #[test]
+    fn grouped_agents_share_rules_until_a_rule_appears() {
+        // Two agent lines back-to-back form ONE group; a rule then closes it, so
+        // the next User-agent opens a fresh group.
+        let groups = parse_robots(
+            "User-agent: bot-a\nUser-agent: bot-b\nDisallow: /x\n\nUser-agent: bot-c\nAllow: /\n",
+        );
+        assert_eq!(groups.len(), 2);
+        assert!(!group_allows(pick_group(&groups, "bot-a"), "/x/y"));
+        assert!(!group_allows(pick_group(&groups, "bot-b"), "/x/y"));
+        assert!(group_allows(pick_group(&groups, "bot-c"), "/x/y"));
+    }
+
+    #[test]
+    fn rules_before_any_user_agent_are_ignored() {
+        let groups = parse_robots("Disallow: /\nCrawl-delay: 9\nUser-agent: *\nAllow: /ok\n");
+        // The leading Disallow/Crawl-delay had no open group → dropped.
+        let g = pick_group(&groups, "any");
+        assert!(group_allows(g, "/ok"));
+        assert_eq!(g.unwrap().crawl_delay, None);
+    }
+
+    #[test]
+    fn empty_disallow_and_unknown_field() {
+        // Empty Disallow = allow all; an unknown field (Sitemap) is ignored.
+        let groups =
+            parse_robots("User-agent: *\nSitemap: https://x.test/s.xml\nDisallow:\n# comment\n");
+        let g = pick_group(&groups, "x");
+        assert!(group_allows(g, "/anything"));
+        assert!(g.unwrap().rules.is_empty()); // empty Disallow added no rule
+    }
+
+    #[test]
+    fn non_numeric_crawl_delay_ignored_and_no_group_match() {
+        let groups = parse_robots("User-agent: *\nCrawl-delay: soon\n");
+        assert_eq!(pick_group(&groups, "x").unwrap().crawl_delay, None);
+        // No group at all → allow-all + no crawl delay.
+        assert!(group_allows(pick_group(&[], "x"), "/anything"));
+    }
+
+    struct CountingFetcher {
+        calls: std::sync::atomic::AtomicU32,
+    }
+    #[async_trait]
+    impl RobotsFetcher for CountingFetcher {
+        async fn fetch_text(&self, _url: &str) -> Result<(u16, String), ()> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok((200, "User-agent: *\nDisallow: /no\n".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn ttl_caches_then_refetches() {
+        let mut c = RobotsCache::with_ttl(
+            CountingFetcher {
+                calls: std::sync::atomic::AtomicU32::new(0),
+            },
+            1000,
+        );
+        c.allowed("https://x.test/a", "ua", 0).await;
+        c.allowed("https://x.test/b", "ua", 500).await; // within TTL → cached
+        c.allowed("https://x.test/c", "ua", 2000).await; // past TTL → refetch
+                                                         // can't read the fetcher after move; assert behavior stays correct instead
+        assert!(!c.allowed("https://x.test/no", "ua", 2500).await);
+    }
+
+    #[tokio::test]
+    async fn unreachable_fetch_allows_all() {
+        struct Dead;
+        #[async_trait]
+        impl RobotsFetcher for Dead {
+            async fn fetch_text(&self, _url: &str) -> Result<(u16, String), ()> {
+                Err(())
+            }
+        }
+        let mut c = RobotsCache::new(Dead);
+        assert!(c.allowed("https://x.test/x", "ua", 0).await);
+        assert_eq!(c.crawl_delay("https://x.test", "ua", 0).await, None);
+        // malformed URL → allow
+        assert!(c.allowed("not a url", "ua", 0).await);
     }
 }

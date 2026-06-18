@@ -297,8 +297,13 @@ fn httpdate_ms(s: &str) -> Option<f64> {
 // Pull (day, month, year, "hh:mm:ss") out of the supported layouts.
 fn date_fields(p: &[&str]) -> Option<(i64, String, i64, String)> {
     match p.len() {
-        // "Wdy, DD Mon YYYY HH:MM:SS GMT" / "Wdy, DD-Mon-YY HH:MM:SS GMT"
-        6 => rfc1123_fields(p),
+        // "Wdy, DD Mon YYYY HH:MM:SS GMT" (RFC 1123)
+        6 => Some((
+            p[1].parse().ok()?,
+            p[2].to_string(),
+            p[3].parse().ok()?,
+            p[4].to_string(),
+        )),
         // "Wdy Mon D HH:MM:SS YYYY" (asctime)
         5 => Some((
             p[2].parse().ok()?,
@@ -306,25 +311,22 @@ fn date_fields(p: &[&str]) -> Option<(i64, String, i64, String)> {
             p[4].parse().ok()?,
             p[3].to_string(),
         )),
+        // "Wdy, DD-Mon-YY HH:MM:SS GMT" (RFC 850)
+        4 => rfc850_fields(p),
         _ => None,
     }
 }
 
-fn rfc1123_fields(p: &[&str]) -> Option<(i64, String, i64, String)> {
+fn rfc850_fields(p: &[&str]) -> Option<(i64, String, i64, String)> {
     let dmy: Vec<&str> = p[1].split('-').collect();
-    if dmy.len() == 3 {
-        return Some((
-            dmy[0].parse().ok()?,
-            dmy[1].to_string(),
-            two_digit_year(dmy[2])?,
-            p[2].to_string(),
-        ));
+    if dmy.len() != 3 {
+        return None;
     }
     Some((
-        p[1].parse().ok()?,
+        dmy[0].parse().ok()?,
+        dmy[1].to_string(),
+        two_digit_year(dmy[2])?,
         p[2].to_string(),
-        p[3].parse().ok()?,
-        p[4].to_string(),
     ))
 }
 
@@ -428,5 +430,117 @@ mod tests {
         j.add("k", "v", "x.test", "/", None);
         assert_eq!(j.cookie_header("https://x.test/", 0.0), "k=v");
         assert_eq!(j.all().len(), 1);
+    }
+
+    #[test]
+    fn httponly_samesite_and_empty_path_attrs() {
+        let mut j = CookieJar::new();
+        j.set_from_response(
+            "https://x.test/",
+            &["a=1; HttpOnly; SameSite=Lax; Path=".to_string()],
+            0.0,
+        );
+        let c = &j.cookies_for("https://x.test/", 0.0)[0];
+        assert!(c.http_only);
+        assert_eq!(c.same_site, "lax");
+        assert_eq!(c.path, "/"); // empty Path attr defaults to "/"
+    }
+
+    #[test]
+    fn explicit_domain_attr_and_reject_mismatch() {
+        let mut j = CookieJar::new();
+        // Domain the response host is within → kept.
+        j.set_from_response(
+            "https://app.x.test/",
+            &["a=1; Domain=x.test".to_string()],
+            0.0,
+        );
+        assert_eq!(j.cookie_header("https://x.test/", 0.0), "a=1");
+        // Domain the response host is NOT within → rejected.
+        j.set_from_response(
+            "https://x.test/",
+            &["b=2; Domain=other.test".to_string()],
+            0.0,
+        );
+        assert!(!j.cookie_header("https://other.test/", 0.0).contains("b=2"));
+    }
+
+    #[test]
+    fn path_match_prefix_boundary() {
+        let mut j = CookieJar::new();
+        j.set_from_response("https://x.test/app", &["a=1; Path=/app".to_string()], 0.0);
+        // "/app" matches "/app/x" (next char is '/') but not "/application".
+        assert_eq!(j.cookie_header("https://x.test/app/x", 0.0), "a=1");
+        assert_eq!(j.cookie_header("https://x.test/application", 0.0), "");
+    }
+
+    #[test]
+    fn expires_header_kept_and_add_with_seconds() {
+        let mut j = CookieJar::new();
+        // Expires in the past relative to a large `now` → deleted.
+        j.set_from_response(
+            "https://x.test/",
+            &["a=1; Expires=Wed, 21 Oct 2015 07:28:00 GMT".to_string()],
+            2_000_000_000_000.0,
+        );
+        assert_eq!(j.size(), 0);
+        // add() with epoch-seconds expiry in the far future → kept.
+        j.add("k", "v", "x.test", "/p", Some(4_000_000_000.0));
+        assert_eq!(j.cookie_header("https://x.test/p", 0.0), "k=v");
+    }
+
+    #[test]
+    fn http_date_formats() {
+        // asctime (5 fields)
+        assert!(httpdate_ms("Sun Nov 6 08:49:37 1994").is_some());
+        // rfc850 with 2-digit year
+        assert!(httpdate_ms("Sunday, 06-Nov-94 08:49:37 GMT").is_some());
+        // rfc850 with 4-digit year (two_digit_year >= 100 branch)
+        assert!(httpdate_ms("Sunday, 06-Nov-1994 08:49:37 GMT").is_some());
+        // bad month / bad time / wrong field count → None
+        assert!(httpdate_ms("Wed, 21 Xyz 2015 07:28:00 GMT").is_none());
+        assert!(httpdate_ms("Wed, 21 Oct 2015 0728 GMT").is_none());
+        assert!(httpdate_ms("garbage").is_none());
+    }
+
+    #[test]
+    fn two_digit_year_pivots() {
+        assert_eq!(two_digit_year("69"), Some(2069));
+        assert_eq!(two_digit_year("70"), Some(1970));
+        assert_eq!(two_digit_year("2024"), Some(2024));
+    }
+
+    #[test]
+    fn malformed_url_inputs_are_safe() {
+        let mut j = CookieJar::new();
+        j.set_from_response("not a url", &["a=1".to_string()], 0.0); // no panic, no store
+        assert_eq!(j.size(), 0);
+        assert!(j.cookies_for("not a url", 0.0).is_empty());
+    }
+
+    #[test]
+    fn unknown_attr_and_bad_namevalue_dropped() {
+        let mut j = CookieJar::new();
+        // unknown attribute is ignored; cookie still stored
+        j.set_from_response("https://x.test/", &["a=1; Weird=zzz".to_string()], 0.0);
+        assert_eq!(j.cookie_header("https://x.test/", 0.0), "a=1");
+        // empty name and no-"=" lines are rejected (parse None → ingest skip)
+        j.set_from_response("https://x.test/", &["=v".to_string()], 0.0);
+        j.set_from_response("https://x.test/", &["novalueatall".to_string()], 0.0);
+        assert_eq!(j.size(), 1);
+    }
+
+    #[test]
+    fn path_not_a_prefix_excludes_cookie() {
+        let mut j = CookieJar::new();
+        j.set_from_response("https://x.test/foo", &["a=1; Path=/foo".to_string()], 0.0);
+        // request path doesn't start with the cookie path → excluded (outer false)
+        assert_eq!(j.cookie_header("https://x.test/bar", 0.0), "");
+    }
+
+    #[test]
+    fn rfc850_with_bad_day_month_year_field() {
+        // 4 tokens but the date field doesn't split into 3 on '-' → None.
+        assert!(httpdate_ms("Mon, 06Nov94 08:49:37 GMT").is_none());
     }
 }

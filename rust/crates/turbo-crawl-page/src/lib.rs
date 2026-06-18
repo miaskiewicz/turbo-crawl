@@ -161,4 +161,45 @@ mod tests {
         let a = recs.iter().find(|r| r.url.ends_with("/a")).unwrap();
         assert_eq!(a.title, "A");
     }
+
+    // Covers TurboNavigator::goto end-to-end over a localhost server (offline).
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    async fn spawn_html(body: &'static str) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n{body}"
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn navigator_goto_fetches_and_parses() {
+        let port = spawn_html("<title>Live</title><a href='/next'>n</a>").await;
+        let nav = TurboNavigator::default();
+        let res = nav
+            .goto(&format!("http://127.0.0.1:{port}/"))
+            .await
+            .unwrap();
+        assert_eq!(res.status, 200);
+        assert_eq!(res.title, "Live");
+        assert_eq!(res.links, vec![format!("http://127.0.0.1:{port}/next")]);
+    }
+
+    #[tokio::test]
+    async fn navigator_goto_surfaces_transport_error() {
+        let nav = TurboNavigator::default();
+        let err = nav.goto("http://127.0.0.1:1/").await.unwrap_err();
+        assert!(!err.is_empty());
+    }
 }

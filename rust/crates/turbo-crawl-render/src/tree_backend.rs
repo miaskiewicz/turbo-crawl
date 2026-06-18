@@ -166,6 +166,53 @@ mod tests {
     }
 
     #[test]
+    fn element_api_surface() {
+        let dom = Rc::new(TreeDom::parse(
+            "<html><body><div id='a' class='c'>hi</div></body></html>",
+        ));
+        // tagName / innerHTML getter / outerHTML / document.body
+        assert_eq!(
+            run_with_dom(dom.clone(), "document.querySelector('#a').tagName").unwrap(),
+            "DIV"
+        );
+        assert!(
+            run_with_dom(dom.clone(), "document.querySelector('#a').innerHTML")
+                .unwrap()
+                .contains("hi")
+        );
+        assert!(
+            run_with_dom(dom.clone(), "document.querySelector('#a').outerHTML")
+                .unwrap()
+                .contains("class=\"c\"")
+        );
+        assert_eq!(
+            run_with_dom(dom.clone(), "String(document.body !== null)").unwrap(),
+            "true"
+        );
+        // setAttribute + id setter mutate; the shared backend persists across runs
+        run_with_dom(
+            dom.clone(),
+            "document.querySelector('#a').setAttribute('data-x','1')",
+        )
+        .unwrap();
+        assert_eq!(
+            run_with_dom(
+                dom.clone(),
+                "document.querySelector('#a').getAttribute('data-x')"
+            )
+            .unwrap(),
+            "1"
+        );
+        run_with_dom(dom.clone(), "document.querySelector('#a').id = 'b'").unwrap();
+        assert_eq!(
+            run_with_dom(dom.clone(), "String(document.getElementById('b') !== null)").unwrap(),
+            "true"
+        );
+        // TreeDom::html() convenience serializes the (mutated) document
+        assert!(dom.html().contains("data-x=\"1\""));
+    }
+
+    #[test]
     fn scoped_query_within_element() {
         let dom = Rc::new(TreeDom::parse(
             "<div id='a'><span class='x'>1</span></div><span class='x'>2</span>",
