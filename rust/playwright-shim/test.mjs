@@ -170,6 +170,27 @@ test("honest-throws for pixel APIs (G5)", async () => {
   await assert.rejects(() => page.locator("button").boundingBox(), /no-JS render engine/);
 });
 
+test("mock SPA hydrates through the shim (G15)", async () => {
+  const page = newPage();
+  await page.setContent("<html><body><div id='root'></div></body></html>");
+  await page.render(`
+    const root = document.getElementById('root');
+    let state = { n: 0 };
+    function render() {
+      root.innerHTML = '';
+      const h = document.createElement('h1');
+      h.setAttribute('class', 'title');
+      h.textContent = 'N' + state.n;
+      root.appendChild(h);
+    }
+    render();
+    setTimeout(() => { state.n = 7; render(); }, 5);
+  `);
+  // the hydrated DOM is visible to the locator surface
+  assert.equal(await page.locator(".title").textContent(), "N7");
+  await expect(page.locator("h1.title")).toHaveText("N7");
+});
+
 test("goto over localhost via chromium.launch", async () => {
   const body = "<html><head><title>Live</title></head><body><p>hello</p></body></html>";
   const server = createServer((_req, res) => {

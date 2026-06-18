@@ -120,6 +120,81 @@ mod tests {
     use std::rc::Rc;
 
     #[tokio::test]
+    async fn mock_spa_hydrates_into_root() {
+        // A framework-shaped bundle: mounts into #root, holds state, and re-renders
+        // after an effect (setTimeout) — the SPA hydration path end to end.
+        let dom = Rc::new(TreeDom::parse(
+            "<html><body><div id='root'></div></body></html>",
+        ));
+        let bundle = r#"
+            const root = document.getElementById('root');
+            let state = { count: 0, items: ['a', 'b'] };
+            function render() {
+              root.innerHTML = '';
+              const app = document.createElement('div');
+              app.setAttribute('class', 'app');
+              const h = document.createElement('h1');
+              h.textContent = 'Count: ' + state.count;
+              app.appendChild(h);
+              const ul = document.createElement('ul');
+              for (const it of state.items) {
+                const li = document.createElement('li');
+                li.textContent = it;
+                ul.appendChild(li);
+              }
+              app.appendChild(ul);
+              root.appendChild(app);
+            }
+            render();                                   // initial mount
+            setTimeout(() => {                          // effect → setState → re-render
+              state.count = 5;
+              state.items.push('c');
+              render();
+            }, 10);
+        "#;
+        // turbo-dom serializes spaces as &nbsp; — normalize for the assertions.
+        let html = render_page(dom, "https://x.test/", bundle).await.unwrap().replace("&nbsp;", " ");
+        assert!(html.contains(r#"<div class="app">"#), "got: {html}");
+        assert!(html.contains("<h1>Count: 5</h1>"), "got: {html}");
+        assert!(html.contains("<li>c</li>"), "got: {html}");
+    }
+
+    #[tokio::test]
+    async fn mock_spa_fetches_data_via_xhr() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                let mut b = [0u8; 512];
+                let _ = s.read(&mut b).await;
+                let body = r#"{"title":"From XHR"}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}"
+                );
+                let _ = s.write_all(resp.as_bytes()).await;
+                let _ = s.flush().await;
+            }
+        });
+        let dom = Rc::new(TreeDom::parse("<body><div id='root'>loading</div></body>"));
+        let bundle = r#"
+            const xhr = new XMLHttpRequest();
+            xhr.open('GET', '/data.json');
+            xhr.onload = () => {
+              const d = JSON.parse(xhr.responseText);
+              document.getElementById('root').textContent = d.title;
+            };
+            xhr.send();
+        "#;
+        let html = render_page(dom, &format!("http://127.0.0.1:{port}/"), bundle)
+            .await
+            .unwrap()
+            .replace("&nbsp;", " ");
+        assert!(html.contains("From XHR"), "got: {html}");
+    }
+
+    #[tokio::test]
     async fn runaway_script_hits_render_budget() {
         // A synchronous infinite loop must be terminated by the watchdog, not hang.
         let dom = Rc::new(TreeDom::parse("<body><div id='app'></div></body>"));

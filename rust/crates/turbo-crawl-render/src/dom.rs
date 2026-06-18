@@ -303,6 +303,47 @@ globalThis.fetch = async (url) => {
     json: async () => JSON.parse(r.body),
   };
 };
+// XMLHttpRequest over fetch (async; resolves in the event loop).
+globalThis.XMLHttpRequest = class {
+  constructor() { this.readyState = 0; this.status = 0; this.responseText = ""; }
+  open(method, url) { this._m = method || "GET"; this._u = url; this.readyState = 1; }
+  setRequestHeader() {}
+  send(body) {
+    const self = this;
+    globalThis
+      .fetch(this._u, { method: this._m, body })
+      .then(async (r) => {
+        self.status = r.status;
+        self.responseText = await r.text();
+        self.response = self.responseText;
+        self.readyState = 4;
+        if (self.onreadystatechange) self.onreadystatechange();
+        if (self.onload) self.onload();
+      });
+  }
+};
+// Observers: no live mutation notifications over the static tree → no-op stubs so
+// frameworks that construct them don't crash.
+class __NoopObserver {
+  constructor(cb) { this._cb = cb; }
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+  takeRecords() { return []; }
+}
+globalThis.MutationObserver = __NoopObserver;
+globalThis.IntersectionObserver = __NoopObserver;
+globalThis.ResizeObserver = __NoopObserver;
+// History API (single virtual entry; updates location.href).
+globalThis.history = {
+  state: null,
+  length: 1,
+  pushState(s, _t, u) { this.state = s; if (u != null) globalThis.location.href = String(u); },
+  replaceState(s, _t, u) { this.state = s; if (u != null) globalThis.location.href = String(u); },
+  back() {}, forward() {}, go() {},
+};
+globalThis.requestIdleCallback = (fn) => globalThis.setTimeout(fn, 0);
+globalThis.cancelIdleCallback = (id) => globalThis.clearTimeout(id);
 "#;
 
 fn make_runtime(backend: Backend, base: &str) -> Result<JsRuntime, String> {
