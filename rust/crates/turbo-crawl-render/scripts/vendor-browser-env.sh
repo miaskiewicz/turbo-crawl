@@ -18,12 +18,20 @@
 #   sh scripts/vendor-browser-env.sh [path-to-turbo-test/src]
 set -eu
 
-src="${1:-../../../../../turbo-test/src}"
+# Vendor from the turbo-test repo's LAST COMMIT (HEAD), never the dirty working
+# tree — so a half-finished local edit in turbo-test can't leak into our vendored
+# copy. Pass the turbo-test repo root (default: sibling of turbo-crawl).
+repo="${1:-../../../../../turbo-test}"
 dest="$(CDPATH= cd -- "$(dirname -- "$0")/../src" && pwd)"
 
-[ -f "$src/browser_env.rs" ] || { echo "turbo-test src not found at: $src" >&2; exit 1; }
+git -C "$repo" rev-parse --short HEAD >/dev/null 2>&1 || {
+  echo "not a git repo (need turbo-test's HEAD): $repo" >&2
+  exit 1
+}
+rev="$(git -C "$repo" rev-parse --short HEAD)"
 
-cp "$src/browser_env.js" "$dest/browser_env.js"
-sed 's#^//!#//#' "$src/browser_env.rs" > "$dest/browser_env_upstream.rs"
+git -C "$repo" show HEAD:src/browser_env.js > "$dest/browser_env.js"
+git -C "$repo" show HEAD:src/browser_env.rs | sed 's#^//!#//#' > "$dest/browser_env_upstream.rs"
 
-echo "vendored browser_env.{js,rs} ← $src (turbo-test). Review the diff + run: cargo test -p turbo-crawl-render"
+echo "vendored browser_env.{js,rs} ← $repo @ $rev (committed HEAD)."
+echo "Update the '// turbo-test @ <rev>' line in src/browser_env.rs to $rev, then: cargo test -p turbo-crawl-render"

@@ -185,22 +185,7 @@ fn el_remove_child(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments
     let Some(parent) = handle_of(scope, args.this()) else { return };
     let Some(child) = arg_handle(scope, &args, 0) else { return };
     with_tree_mut(|t| t.remove_child(parent, child));
-    heal_focus_after_removal();
     rv.set(args.get(0));
-}
-
-/// Real DOM: removing the focused element (or an ancestor of it) resets `document.activeElement`
-/// to `<body>`. We track focus as a thread-local handle (ACTIVE) that otherwise dangles after the
-/// node is detached — and a dangling, disconnected ACTIVE poisons the NEXT test's focus transitions
-/// (e.g. testing-library cleanup leaves a prior tree's focused input as ACTIVE, breaking userEvent
-/// in the following test). Re-point ACTIVE at the live `<body>` so it's always a connected node.
-fn heal_focus_after_removal() {
-    let active = ACTIVE.with(|a| *a.borrow());
-    let Some(a) = active else { return };
-    let still = with_tree(|t| is_connected(t, a)).unwrap_or(false);
-    if still { return; }
-    let body = with_tree(|t| t.query_selector("body")).flatten();
-    ACTIVE.with(|cell| *cell.borrow_mut() = body);
 }
 
 fn el_insert_before(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
@@ -317,7 +302,6 @@ fn set_inner_html(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, value: v
     let Some(h) = handle_of(scope, args.holder()) else { return };
     let html = value.to_rust_string_lossy(scope);
     with_tree_mut(|t| t.set_inner_html(h, &html));
-    heal_focus_after_removal();
 }
 fn get_outer_html(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8::PropertyCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
     let Some(h) = handle_of(scope, args.holder()) else { return };
@@ -385,10 +369,7 @@ fn el_focus(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: 
     let prev = ACTIVE.with(|a| *a.borrow());
     if prev == Some(h) { return; }
     ACTIVE.with(|a| *a.borrow_mut() = Some(h));
-    // Only blur a previously-focused element that is still attached. A detached `prev` is a stale
-    // pointer left by a prior, now-unmounted tree (testing-library cleanup); dispatching blur/focusout
-    // on it walks a detached subtree and would corrupt the focus transition into the new element.
-    if let Some(p) = prev.filter(|&p| with_tree(|t| is_connected(t, p)).unwrap_or(false)) {
+    if let Some(p) = prev {
         dispatch_synthetic(scope, p, "blur", false, false);
         dispatch_synthetic(scope, p, "focusout", true, false);
     }
@@ -404,15 +385,7 @@ fn el_blur(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v
 }
 /// `document.activeElement` → the focused element, or `<body>`.
 fn get_active_element(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, _args: v8::PropertyCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
-    // Real DOM resets focus to <body> when the active element is removed from the tree. If our
-    // tracked handle is detached (e.g. the focused input of a prior, now-unmounted React tree —
-    // testing-library cleanup leaves the JS ACTIVE pointer dangling), drop it so the stale node
-    // never leaks into the next test's focus/userEvent logic.
     let active = ACTIVE.with(|a| *a.borrow());
-    let active = active.filter(|&h| with_tree(|t| is_connected(t, h)).unwrap_or(false));
-    if active.is_none() {
-        ACTIVE.with(|a| *a.borrow_mut() = None);
-    }
     let h = active.or_else(|| with_tree(|t| t.query_selector("body")).flatten());
     if let Some(h) = h {
         let node = wrap(scope, h);
@@ -450,7 +423,6 @@ fn el_remove_self(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments,
     let parent = with_tree(|t| NodeRef::new(t, h).parent().map(|p| p.handle())).flatten();
     if let Some(p) = parent {
         with_tree_mut(|t| t.remove_child(p, h));
-        heal_focus_after_removal();
     }
 }
 
