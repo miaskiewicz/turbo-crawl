@@ -94,6 +94,59 @@ fn window_and_navigator_present() {
     );
 }
 
+// Setting `location.href` must DECOMPOSE the URL into pathname/search/hash/host/etc.
+// Next's app-router reads usePathname()/useSearchParams() off these; a static location
+// (browser_env's plain object) left pathname at "/" so the payroll login route guard saw
+// a protected route and rendered "Redirecting…" instead of the form.
+#[test]
+fn location_href_decomposes_into_components() {
+    let out = run_with_dom(
+        "<body></body>",
+        r#"
+        location.href = "https://app.example/login?next=%2Fhome&x=1#frag";
+        JSON.stringify({
+          pathname: location.pathname, search: location.search, hash: location.hash,
+          host: location.host, hostname: location.hostname, protocol: location.protocol,
+          origin: location.origin,
+        });
+        "#,
+    )
+    .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["pathname"], "/login", "{out}");
+    assert_eq!(v["search"], "?next=%2Fhome&x=1", "{out}");
+    assert_eq!(v["hash"], "#frag", "{out}");
+    assert_eq!(v["host"], "app.example", "{out}");
+    assert_eq!(v["protocol"], "https:", "{out}");
+    assert_eq!(v["origin"], "https://app.example", "{out}");
+}
+
+// FormData — PropelAuth + form libs build credential payloads with it during hydration;
+// deno_core ships none, so the login bundle crashed with "FormData is not defined".
+#[test]
+fn form_data_present_and_spec_shaped() {
+    let out = run_with_dom(
+        "<body></body>",
+        r#"
+        const fd = new FormData();
+        fd.append("a", "1"); fd.append("a", "2"); fd.set("b", "3"); fd.set("a", "9");
+        JSON.stringify({
+          a: fd.getAll("a"), b: fd.get("b"), hasB: fd.has("b"),
+          entries: [...fd.entries()],
+        });
+        "#,
+    )
+    .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        v["a"],
+        serde_json::json!(["9"]),
+        "set must replace all: {out}"
+    );
+    assert_eq!(v["b"], "3", "{out}");
+    assert_eq!(v["hasB"], true, "{out}");
+}
+
 // Mirrors the payroll /login hydration crash: the page's client JS (Next.js +
 // the PropelAuth SDK) uses WHATWG `URL` / `URLSearchParams` while building the
 // login form. deno_core doesn't ship those globals, so hydration died with

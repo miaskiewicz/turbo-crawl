@@ -198,6 +198,28 @@ globalThis.ResizeObserver = __NoopObserver;
 // (a jsdom-style getComputedStyle the Playwright shim's cssValue/visibility reads,
 // and a matchMedia stub). Do NOT redefine them here — ENV_BOOTSTRAP runs AFTER the
 // binding, so an override would clobber the real ones and break the shim.
+// FormData — auth/login SDKs (PropelAuth) build credential payloads with it; deno_core
+// ships none. A spec-shaped impl over an entry list (append keeps duplicates; set
+// replaces; field values stringified, File/Blob passed through).
+if (typeof globalThis.FormData === "undefined") {
+  globalThis.FormData = class FormData {
+    constructor() { this._e = []; }
+    append(name, value) { this._e.push([String(name), typeof value === "object" && value !== null ? value : String(value)]); }
+    set(name, value) {
+      const n = String(name); const v = typeof value === "object" && value !== null ? value : String(value);
+      this._e = this._e.filter(([k]) => k !== n); this._e.push([n, v]);
+    }
+    get(name) { const n = String(name); const f = this._e.find(([k]) => k === n); return f ? f[1] : null; }
+    getAll(name) { const n = String(name); return this._e.filter(([k]) => k === n).map(([, v]) => v); }
+    has(name) { const n = String(name); return this._e.some(([k]) => k === n); }
+    delete(name) { const n = String(name); this._e = this._e.filter(([k]) => k !== n); }
+    forEach(cb, thisArg) { for (const [k, v] of this._e) cb.call(thisArg, v, k, this); }
+    keys() { return this._e.map(([k]) => k)[Symbol.iterator](); }
+    values() { return this._e.map(([, v]) => v)[Symbol.iterator](); }
+    entries() { return this._e.map(([k, v]) => [k, v])[Symbol.iterator](); }
+    [Symbol.iterator]() { return this.entries(); }
+  };
+}
 // MessageChannel — React 18's scheduler drains its work queue by posting to a
 // MessagePort and running the handler on the other port's onmessage. Route the
 // message through the timer queue (setTimeout 0) so the hydration pump drains it;
@@ -589,6 +611,37 @@ if (typeof globalThis.URL === "undefined") {
   globalThis.URL.createObjectURL = () => "blob:turbo-crawl";
   globalThis.URL.revokeObjectURL = () => {};
 }
+
+// location — back it with a real URL so setting `location.href` (done at install time,
+// and by history.pushState/replaceState) UPDATES pathname/search/hash/host/origin too.
+// browser_env.js ships a plain static object whose href is just a string field, so
+// pathname stayed "/" regardless of the page URL — and a client router that reads
+// `usePathname()`/`useSearchParams()` (Next's app router, route guards) then misroutes:
+// the payroll login page rendered "Redirecting…" instead of the form because the auth
+// guard saw pathname "/" (a protected route) rather than "/login". Defined AFTER the URL
+// polyfill so `new URL` is available. Components are live getters over the backing URL.
+(() => {
+  let _u = null;
+  const reparse = (v, base) => { try { _u = new globalThis.URL(String(v), base); } catch (_e) { /* keep prior */ } };
+  reparse((globalThis.location && globalThis.location.href) || "http://localhost/");
+  const loc = {
+    assign(v) { reparse(v, _u ? _u.href : undefined); },
+    replace(v) { reparse(v, _u ? _u.href : undefined); },
+    reload() {},
+    toString() { return _u ? _u.href : ""; },
+  };
+  for (const f of ["href", "protocol", "host", "hostname", "port", "pathname", "search", "hash", "origin"]) {
+    Object.defineProperty(loc, f, {
+      enumerable: true,
+      configurable: true,
+      get() { return _u ? _u[f] : ""; },
+      // setting href reparses (relative allowed against the current URL); other
+      // components write through to the backing URL where it supports it.
+      set(v) { if (f === "href") reparse(v, _u ? _u.href : undefined); else if (_u) { try { _u[f] = v; } catch (_e) {} } },
+    });
+  }
+  globalThis.location = loc;
+})();
 
 // Next.js's webpack runtime reads `document.currentScript` to resolve chunk paths
 // (getPathFromScript → `currentScript.getAttribute('src').replace(...)`). The tier
