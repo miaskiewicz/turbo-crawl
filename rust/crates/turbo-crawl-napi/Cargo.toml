@@ -15,9 +15,11 @@ napi-derive = "2"
 turbo-crawl-core = { path = "../turbo-crawl-core" }
 turbo-crawl-page = { path = "../turbo-crawl-page" }
 turbo-crawl-view = { path = "../turbo-crawl-view" }
+turbo-crawl-render = { path = "../turbo-crawl-render" }
 turbo-dom-parser = { package = "turbo-dom", version = "0.3.1" }
 serde = "1"
 serde_json = "1"
+tokio = { version = "1", features = ["rt"] }
 
 [build-dependencies]
 napi-build = "2"

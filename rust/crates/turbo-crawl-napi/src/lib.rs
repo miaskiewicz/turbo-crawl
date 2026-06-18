@@ -156,6 +156,35 @@ fn parse_field(spec: &Value) -> Field {
     }
 }
 
+// --- JS execution (tier 3, deno_core) ---------------------------------------
+
+/// Evaluate `script` against the page's DOM and return its result as a string
+/// (Playwright `page.evaluate`-ish; synchronous, no event loop).
+#[napi]
+pub fn evaluate(html: String, script: String) -> Result<String> {
+    let dom = std::rc::Rc::new(turbo_crawl_render::TreeDom::parse(&html));
+    turbo_crawl_render::run_with_dom(dom, &script).map_err(Error::from_reason)
+}
+
+/// Run the page's own `script` over its DOM (promises/await + virtual timers +
+/// `document.cookie`/`fetch` against `baseUrl`) and return the hydrated HTML —
+/// the no-Chromium render. The V8 isolate is not `Send`, so it runs on a
+/// dedicated thread with its own current-thread runtime (only strings cross).
+#[napi]
+pub fn render(html: String, base_url: String, script: String) -> Result<String> {
+    std::thread::spawn(move || {
+        let dom = std::rc::Rc::new(turbo_crawl_render::TreeDom::parse(&html));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())?;
+        rt.block_on(turbo_crawl_render::render_page(dom, &base_url, &script))
+    })
+    .join()
+    .map_err(|_| Error::from_reason("render thread panicked"))?
+    .map_err(Error::from_reason)
+}
+
 // --- async: fetch + crawl ---------------------------------------------------
 
 /// Fetch a URL; returns JSON `{ html, finalUrl, status, redirected }`.

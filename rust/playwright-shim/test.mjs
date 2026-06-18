@@ -58,6 +58,20 @@ test("page views", async () => {
   assert.ok((await page.innerText()).includes("Widget"));
 });
 
+test("evaluate + render (JS execution, no browser)", async () => {
+  const page = newPage();
+  await page.setContent("<body><h1 id='t'>Hi</h1><div id='app'></div></body>");
+  // evaluate: read the DOM via page JS
+  assert.equal(await page.evaluate("document.querySelector('#t').textContent"), "Hi");
+  // render: the page's own script hydrates the DOM (incl. a virtual timer)
+  await page.render(
+    "document.getElementById('app').innerHTML='<p>hi</p>'; setTimeout(()=>{document.querySelector('p').textContent='late'},5)",
+  );
+  assert.match(await page.content(), /<p>late<\/p>/);
+  // the locator surface now sees the hydrated DOM
+  assert.equal(await page.locator("p").textContent(), "late");
+});
+
 test("goto over localhost via chromium.launch", async () => {
   const body = "<html><head><title>Live</title></head><body><p>hello</p></body></html>";
   const server = createServer((_req, res) => {

@@ -88,6 +88,18 @@ class Page {
     return native.markdown(this._html, this._url);
   }
 
+  // Evaluate JS against the page DOM → result string (Playwright page.evaluate-ish).
+  async evaluate(script) {
+    return native.evaluate(this._html, script);
+  }
+
+  // Run the page's own script (promises/timers/fetch/cookies) and replace the
+  // cached HTML with the hydrated result — subsequent reads see the new DOM.
+  async render(script) {
+    this._html = native.render(this._html, this._url, script);
+    return this._html;
+  }
+
   async links() {
     return native.links(this._html, this._url);
   }

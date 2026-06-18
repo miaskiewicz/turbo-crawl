@@ -10,6 +10,12 @@ export function fetchHtml(url: string): Promise<string>;
 /** Crawl from a JSON options string → JSON array of page records. */
 export function crawl(optsJson: string): Promise<string>;
 
+/** Evaluate JS against the page DOM → result as a string (no event loop). */
+export function evaluate(html: string, script: string): string;
+
+/** Run the page's own JS (promises/timers/fetch/cookies) → hydrated HTML. */
+export function render(html: string, baseUrl: string, script: string): string;
+
 export function markdown(html: string, baseUrl: string): string;
 export function text(html: string): string;
 export function title(html: string): string;
