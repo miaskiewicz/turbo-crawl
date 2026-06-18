@@ -4,6 +4,8 @@
 //! (driven on napi's tokio runtime). The thin `@playwright/test` shim (task #10)
 //! composes these; `goto` = `fetchHtml` then view calls on the cached HTML.
 
+mod session;
+
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use serde_json::{json, Value};

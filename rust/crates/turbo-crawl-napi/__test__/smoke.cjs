@@ -32,4 +32,20 @@ const ex = JSON.parse(
 );
 assert.strictEqual(ex.name, "Widget");
 
+// swc transform (G14)
+assert.ok(!addon.transform("const x: number = 1;", true, false).includes(": number"));
+
+// stateful Session (G11): retained tree, mutation persists across calls (no reparse)
+const sess = new addon.Session();
+sess.call(
+  "load",
+  JSON.stringify({ html: "<body><input id='t'><h1>Hi</h1></body>", url: "https://x.test/" }),
+);
+assert.strictEqual(sess.call("text"), "Hi");
+sess.call("fill", JSON.stringify({ selector: "#t", value: "typed" }));
+assert.ok(
+  sess.call("html").includes('value="typed"'),
+  "session fill persists on the retained tree",
+);
+
 console.log("smoke: OK — native addon loaded and all checks passed");
