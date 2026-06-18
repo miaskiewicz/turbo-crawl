@@ -4,11 +4,12 @@
 //! controls into stable `[i]`-addressable records; `links` collects absolute
 //! http(s) targets.
 //!
-//! Visibility is cascade-derived in the JS impl (`visible.mjs` / getComputedStyle).
-//! That cascade port is a separate task; until it lands every record reports
-//! `visible: true` (mirrors the JS `options.visibility:false` fast path).
+//! Visibility is cascade-derived (`visible::is_visible`). Pass `check_visible:
+//! false` to skip the cascade pass (the hot-path cost) — every record is then
+//! reported `visible: true`, mirroring the JS `options.visibility:false` path.
 
 use crate::aria::{accessible_name, implicit_role};
+use crate::visible::is_visible;
 use std::collections::HashSet;
 use turbo_crawl_core::url::{is_http_url, resolve};
 use turbo_dom_parser::rtdom::Tree;
@@ -54,7 +55,7 @@ fn role_for(tree: &Tree, h: u32, tag: &str, ty: &Option<String>) -> String {
     }
 }
 
-fn to_record(tree: &Tree, h: u32, i: usize, base: &str) -> Interactive {
+fn to_record(tree: &Tree, h: u32, i: usize, base: &str, check_visible: bool) -> Interactive {
     let tag = tree.tag_name(h).unwrap_or_default().to_ascii_lowercase();
     let ty = tree
         .get_attribute(h, "type")
@@ -68,7 +69,7 @@ fn to_record(tree: &Tree, h: u32, i: usize, base: &str) -> Interactive {
         value: tree.get_attribute(h, "value").map(str::to_string),
         href,
         r#type: ty,
-        visible: true, // cascade visibility pending (see module docs)
+        visible: !check_visible || is_visible(tree, h),
         js_handler,
         node: h,
         tag,
@@ -76,12 +77,14 @@ fn to_record(tree: &Tree, h: u32, i: usize, base: &str) -> Interactive {
 }
 
 /// Index interactive elements into `[i]`-addressable records (document order).
-pub fn interactive_elements(tree: &Tree, base: &str) -> Vec<Interactive> {
+/// `check_visible` runs the cascade visibility pass; `false` skips it (every
+/// record reported `visible: true`).
+pub fn interactive_elements(tree: &Tree, base: &str, check_visible: bool) -> Vec<Interactive> {
     let nodes = tree.query_selector_all(INTERACTIVE_SELECTOR);
     let mut out = Vec::with_capacity(nodes.len());
     for &h in nodes.iter() {
         let i = out.len();
-        out.push(to_record(tree, h, i, base));
+        out.push(to_record(tree, h, i, base, check_visible));
     }
     out
 }
@@ -116,7 +119,7 @@ mod tests {
         let tree = Tree::parse(
             "<a href='/p'>link</a><button>Go</button><input type='checkbox'><div role='tab'>T</div>",
         );
-        let els = interactive_elements(&tree, BASE);
+        let els = interactive_elements(&tree, BASE, false);
         assert_eq!(els.len(), 4);
         assert_eq!(els[0].tag, "a");
         assert_eq!(els[0].role, "link");
@@ -136,7 +139,7 @@ mod tests {
     #[test]
     fn flags_js_handler_without_native_nav() {
         let tree = Tree::parse("<button onclick='x()'>Go</button><a href='/p' onclick='y()'>L</a>");
-        let els = interactive_elements(&tree, BASE);
+        let els = interactive_elements(&tree, BASE, false);
         assert!(els[0].js_handler); // button + onclick, no nav
         assert!(!els[1].js_handler); // anchor has href → native nav
     }
@@ -144,7 +147,7 @@ mod tests {
     #[test]
     fn submit_input_is_native_nav() {
         let tree = Tree::parse("<input type='submit' onclick='x()'>");
-        let els = interactive_elements(&tree, BASE);
+        let els = interactive_elements(&tree, BASE, false);
         assert!(!els[0].js_handler);
         assert_eq!(els[0].role, "button");
     }
@@ -152,8 +155,19 @@ mod tests {
     #[test]
     fn value_captured() {
         let tree = Tree::parse("<input value='hi'>");
-        let els = interactive_elements(&tree, BASE);
+        let els = interactive_elements(&tree, BASE, false);
         assert_eq!(els[0].value.as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn check_visible_flags_hidden_controls() {
+        let tree = Tree::parse(
+            "<button>vis</button><button style='display:none'>gone</button><button hidden>h</button>",
+        );
+        let els = interactive_elements(&tree, BASE, true);
+        assert!(els[0].visible);
+        assert!(!els[1].visible); // display:none
+        assert!(!els[2].visible); // hidden attr
     }
 
     #[test]
