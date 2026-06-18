@@ -133,6 +133,31 @@ fn whatwg_url_available_for_hydration() {
     );
 }
 
+// Next.js's webpack runtime resolves chunk paths via `document.currentScript`
+// (getPathFromScript → currentScript.getAttribute(...)). Our tier ran scripts as
+// one blob with no currentScript, so hydration crashed with "Cannot read
+// properties of undefined (reading 'getAttribute')". currentScript must be a real
+// element so that read is safe.
+#[test]
+fn document_current_script_is_present_for_webpack() {
+    let out = run_with_dom(
+        "<body><div id='root'></div></body>",
+        r#"
+        const cs = document.currentScript;
+        // webpack does currentScript.getAttribute('src').replace(...) — must be a string.
+        const src = cs && typeof cs.getAttribute === 'function' ? cs.getAttribute('src') : 'MISSING';
+        const safe = typeof src === 'string' ? src.replace(/x/g, 'x') : 'NOT-A-STRING';
+        document.getElementById('root').setAttribute('data-cs', safe);
+        document.getElementById('root').getAttribute('data-cs');
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        out, "http://localhost/",
+        "currentScript.getAttribute('src') must be the page URL string, got {out}"
+    );
+}
+
 // --- hydration (the headline tier-3 capability) -----------------------------
 #[test]
 fn page_script_hydrates_then_serializes() {

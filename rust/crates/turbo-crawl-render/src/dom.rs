@@ -284,6 +284,21 @@ if (typeof globalThis.URL === "undefined") {
   globalThis.URL.createObjectURL = () => "blob:turbo-crawl";
   globalThis.URL.revokeObjectURL = () => {};
 }
+
+// Next.js's webpack runtime reads `document.currentScript` to resolve chunk paths
+// (getPathFromScript → `currentScript.getAttribute('src').replace(...)`). The tier
+// runs the page's scripts as one concatenated bundle, so there's no "current" script
+// element — expose a detached one whose `src` is the page URL (a string, so the
+// `.replace` is safe) to keep that read working.
+try {
+  if (globalThis.document && !globalThis.document.currentScript) {
+    const __cs = globalThis.document.createElement("script");
+    const __href = (globalThis.location && globalThis.location.href) || "";
+    __cs.setAttribute("src", __href);
+    try { __cs.src = __href; } catch (_e) {}
+    globalThis.document.currentScript = __cs;
+  }
+} catch (_e) {}
 })();"##;
 
 fn make_runtime(base: &str) -> JsRuntime {
