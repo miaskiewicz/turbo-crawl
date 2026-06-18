@@ -177,6 +177,37 @@ secure` for untrusted JS.)
 
 Or embed: `import { createServer } from "@miaskiewicz/turbo-crawl/mcp"`.
 
+### Set it up in Claude Code
+
+Register the stdio server once and every Claude Code session gets the tools:
+
+```sh
+# JS server (npm) — zero build, needs Node:
+claude mcp add turbo-crawl -- npx -y turbo-crawl-mcp
+
+# …or the native Rust binary (no Node at runtime — build it once):
+cargo build --release -p turbo-crawl-mcp --manifest-path rust/Cargo.toml
+claude mcp add turbo-crawl -- "$PWD/rust/target/release/turbo-crawl-mcp"
+```
+
+Both speak newline-delimited JSON-RPC 2.0 over stdio. The JS server exposes the full
+60-tool surface; the native Rust binary is one process (no Node, no Chromium) exposing
+the ported core subset (~23 tools — navigation, reads, interaction, crawl) and is
+growing toward parity. Verify with `claude mcp list`. To scope it to one project
+instead of globally, add `--scope project` (writes
+`.mcp.json` in the repo) or commit a `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "turbo-crawl": { "command": "rust/target/release/turbo-crawl-mcp", "args": [] }
+  }
+}
+```
+
+(For other MCP clients — Claude Desktop, Cursor — point their MCP config's `command`
+at the same binary or `npx -y turbo-crawl-mcp`.)
+
 ## Run Playwright scripts (no browser)
 
 Drop-in compatibility layer so existing Playwright scripts run on the no-JS
