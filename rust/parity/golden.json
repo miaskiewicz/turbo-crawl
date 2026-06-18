@@ -1,0 +1,22 @@
+{
+  "url": {
+    "canonicalize": [
+      "https://x.test/p?a=1&b=2",
+      "https://x.test/",
+      "http://x.test/a",
+      "https://x.test/b",
+      "https://x.test/p?a=1&a=2&z=1"
+    ],
+    "resolve": ["https://x.test/c", "https://y.test/z", null],
+    "isHttpUrl": [true, true, false, false]
+  },
+  "robots": {
+    "allowed": [false, true, true, false],
+    "crawlDelay": 3
+  },
+  "cookies": {
+    "root": "a=1",
+    "appHttps": "b=2; a=1",
+    "appHttp": "a=1"
+  }
+}
