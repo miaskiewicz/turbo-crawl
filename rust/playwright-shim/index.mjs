@@ -1314,19 +1314,52 @@ export const devices = new Proxy({}, { get: () => ({}) });
 export const request = {
   async newContext(opts = {}) {
     const headers = opts.extraHTTPHeaders ? JSON.stringify(opts.extraHTTPHeaders) : null;
-    const call = async (url, method, body) =>
-      makeResponse(
-        JSON.parse(await native.fetchWithCookies(url, "[]", method ?? null, body ?? null, headers)),
+    // Honor the context `baseURL` like real Playwright: a relative request path
+    // (e.g. `ctx.get('/api/backend/...')`) resolves against it. Without this the
+    // schemeless URL reaches reqwest as-is and fails with "builder error".
+    const base = opts.baseURL ?? null;
+    const resolve = (url) => {
+      if (!base) return url;
+      try {
+        return new URL(url, base).href;
+      } catch {
+        return url;
+      }
+    };
+    const ctxHeaders = opts.extraHTTPHeaders ?? {};
+    // Encode a request `data`/body like Playwright: an object → JSON body with
+    // `Content-Type: application/json` (unless the caller set one), a string → sent
+    // as-is. Per-request `headers` merge over the context's `extraHTTPHeaders`.
+    const encode = (o = {}) => {
+      const h = { ...ctxHeaders, ...o.headers };
+      let body = null;
+      if (o.data != null) {
+        if (typeof o.data === "string" || Buffer.isBuffer?.(o.data)) {
+          body = String(o.data);
+        } else {
+          body = JSON.stringify(o.data);
+          if (!Object.keys(h).some((k) => k.toLowerCase() === "content-type")) {
+            h["Content-Type"] = "application/json";
+          }
+        }
+      }
+      const hdr = Object.keys(h).length ? JSON.stringify(h) : headers;
+      return { body, hdr };
+    };
+    const call = async (url, method, o = {}) => {
+      const { body, hdr } = encode(o);
+      return makeResponse(
+        JSON.parse(await native.fetchWithCookies(resolve(url), "[]", method ?? null, body, hdr)),
       );
+    };
     return {
-      get: (url) => call(url, null),
-      post: (url, o = {}) => call(url, "POST", o.data != null ? JSON.stringify(o.data) : null),
-      put: (url, o = {}) => call(url, "PUT", o.data != null ? JSON.stringify(o.data) : null),
-      patch: (url, o = {}) => call(url, "PATCH", o.data != null ? JSON.stringify(o.data) : null),
-      delete: (url) => call(url, "DELETE"),
-      head: (url) => call(url, "HEAD"),
-      fetch: (url, o = {}) =>
-        call(url, o.method ?? null, o.data != null ? JSON.stringify(o.data) : null),
+      get: (url, o = {}) => call(url, null, o),
+      post: (url, o = {}) => call(url, "POST", o),
+      put: (url, o = {}) => call(url, "PUT", o),
+      patch: (url, o = {}) => call(url, "PATCH", o),
+      delete: (url, o = {}) => call(url, "DELETE", o),
+      head: (url, o = {}) => call(url, "HEAD", o),
+      fetch: (url, o = {}) => call(url, o.method ?? null, o),
       async storageState() {
         return { cookies: [], origins: [] };
       },

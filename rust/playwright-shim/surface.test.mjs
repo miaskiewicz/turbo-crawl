@@ -500,6 +500,33 @@ test("request methods pass the HTTP method + body through", async () => {
   server.close();
 });
 
+test("request.newContext baseURL resolves relative paths + JSON content-type for object data", async () => {
+  const seen = [];
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      seen.push({ url: req.url, method: req.method, ctype: req.headers["content-type"], body });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(`{"ok":true}`);
+    });
+  });
+  const base = await listen(server);
+  // baseURL set on the context → a relative path must resolve against it (was a
+  // reqwest "builder error" before). Object `data` → JSON body + content-type.
+  const ctx = await request.newContext({ baseURL: base });
+  const res = await ctx.post("/api/thing?x=1", { data: { user: "greg" } });
+  assert.equal(res.status(), 200);
+  assert.equal(seen[0].url, "/api/thing?x=1");
+  assert.equal(seen[0].ctype, "application/json");
+  assert.match(seen[0].body, /"user":"greg"/);
+  // per-request header overrides, string body sent as-is
+  await ctx.post("/raw", { data: "plain", headers: { "content-type": "text/plain" } });
+  assert.equal(seen[1].ctype, "text/plain");
+  assert.equal(seen[1].body, "plain");
+  server.close();
+});
+
 test("BrowserContext reads baseURL/testIdAttribute from env (config use{} mapping)", () => {
   process.env.TURBO_SHIM_BASE_URL = "http://env.example";
   process.env.TURBO_SHIM_TESTID_ATTR = "data-qa";

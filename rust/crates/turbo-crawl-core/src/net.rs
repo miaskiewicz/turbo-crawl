@@ -203,7 +203,11 @@ async fn send(
     if let Some(b) = body {
         req = req.body(b.clone());
     }
-    req.send().await.map_err(|e| err(e, ErrorCode::Network))
+    // Include the URL in transport errors — reqwest's "builder error" (e.g. a
+    // relative/schemeless URL) is otherwise undebuggable.
+    req.send()
+        .await
+        .map_err(|e| err(format!("{e} (url: {url})"), ErrorCode::Network))
 }
 
 fn apply_headers(
