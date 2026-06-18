@@ -455,7 +455,7 @@ pub async fn fetch_with_cookies(
 fn record_json(r: &Record) -> Value {
     json!({
         "url": r.url, "status": r.status, "depth": r.depth,
-        "title": r.title, "links": r.links, "error": r.error,
+        "title": r.title, "links": r.links, "error": r.error, "items": r.items,
     })
 }
 
@@ -470,11 +470,16 @@ fn crawl_options(opts: &Value) -> CrawlOptions {
         })
         .unwrap_or_default();
     let u = |k: &str, d: u64| opts.get(k).and_then(Value::as_u64).unwrap_or(d);
+    let concurrency = u("concurrency", 4) as usize;
     CrawlOptions {
         start,
         max_pages: u("maxPages", 100) as usize,
         max_depth: u("maxDepth", 3) as usize,
-        concurrency: u("concurrency", 4) as usize,
+        concurrency,
+        // default per-host to the global cap; politeness off unless asked. These let
+        // a benchmark match a competitor's fairness settings exactly.
+        per_host_concurrency: u("perHostConcurrency", concurrency as u64) as usize,
+        politeness_ms: u("politenessMs", 0),
         same_host_only: opts
             .get("sameHost")
             .and_then(Value::as_bool)
@@ -484,13 +489,20 @@ fn crawl_options(opts: &Value) -> CrawlOptions {
 }
 
 /// Crawl from `optsJson` (`{ start:[…], maxPages?, maxDepth?, concurrency?,
-/// sameHost? }`); returns a JSON array of page records.
+/// sameHost?, itemSelector? }`); returns a JSON array of page records. When
+/// `itemSelector` is set, each record's `items` is the count of matching elements
+/// on that page (extraction-during-crawl, for the crawler benchmark's parity metric).
 #[napi]
 pub async fn crawl(opts_json: String) -> Result<String> {
     let opts_value: Value =
         serde_json::from_str(&opts_json).map_err(|e| Error::from_reason(e.to_string()))?;
     let opts = crawl_options(&opts_value);
-    let recs = run_crawl(opts, Arc::new(TurboNavigator::default())).await;
+    let item_selector = opts_value
+        .get("itemSelector")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let nav = TurboNavigator::default().with_item_selector(item_selector);
+    let recs = run_crawl(opts, Arc::new(nav)).await;
     let arr: Vec<Value> = recs.iter().map(record_json).collect();
     Ok(Value::Array(arr).to_string())
 }

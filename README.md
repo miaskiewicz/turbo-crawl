@@ -434,6 +434,7 @@ crawl-bench`):
 |---|---|---|---|---|
 | crawlee `CheerioCrawler` | Node | 339 | 2767 | 7.2 |
 | **turbo-crawl (no-js)** | **Node, browserless** | 316 | 3261 | **6.1** |
+| **turbo-rust (no-js)** | **Rust napi, browserless** | 339 | 3375 | **5.9** |
 | spider-rs | Rust + N-API | 194 | 3486 | 5.7 |
 | got + cheerio (hand-rolled) | Node | 339 | 5590 | 3.6 |
 | node-crawler (`crawler`) | Node | 339 | 49624 | 0.4 |
@@ -444,7 +445,10 @@ At equal politeness the wall-clock is **network-bound**, so the in-process
 crawlers cluster together: turbo-crawl sits in the **top tier** alongside the
 dedicated speed engines (crawlee, spider-rs) and ahead of a hand-rolled
 got+cheerio loop — while extracting equivalent content and running **no
-browser**. The heavyweight engines trail ~15×: Scrapy and Colly pay a fresh
+browser**. The **pure-Rust** `turbo-rust (no-js)` (the whole BFS — fetch, parse,
+same-host gate, per-page item count — runs in Rust via the napi addon) lands right
+alongside the JS engine, and **~13× ahead of Scrapy / Colly**. The heavyweight
+engines trail ~15×: Scrapy and Colly pay a fresh
 process startup per crawl (the harness shells out to their CLIs), and
 node-crawler's per-request overhead is high. turbo-dom's raw parse advantage
 doesn't show here — at 20 live pages, network swamps a sub-millisecond parse;

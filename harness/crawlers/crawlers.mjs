@@ -19,6 +19,7 @@
 // once by run.mjs before the timed iterations.
 
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -158,6 +159,51 @@ async function turboCrawl(target, opts, render) {
     }
   } finally {
     await renderer?.close();
+  }
+  return { pages, items, ms: ms(t0) };
+}
+
+// ── turbo-rust: the whole crawl runs in Rust via the napi addon ──────────────
+// `native.crawl` does the BFS, fetch (pooled client), parse, same-host gate, and
+// per-page item count (itemSelector) entirely in Rust — only the JSON result
+// crosses to Node. Same page cap / concurrency / politeness as every other engine.
+let turboRustNative;
+function loadTurboRustNative() {
+  if (turboRustNative === undefined) {
+    try {
+      const require = createRequire(import.meta.url);
+      turboRustNative = require("../../rust/crates/turbo-crawl-napi/index.js");
+    } catch {
+      turboRustNative = null;
+    }
+  }
+  return turboRustNative;
+}
+
+async function turboRustCrawl(target, opts) {
+  const native = loadTurboRustNative();
+  const t0 = process.hrtime.bigint();
+  const recs = JSON.parse(
+    await native.crawl(
+      JSON.stringify({
+        start: [target.start],
+        maxPages: opts.pages,
+        maxDepth: 1_000_000,
+        concurrency: CONCURRENCY,
+        perHostConcurrency: CONCURRENCY,
+        politenessMs: POLITENESS_MS,
+        sameHost: true,
+        itemSelector: target.itemSelector,
+      }),
+    ),
+  );
+  let pages = 0;
+  let items = 0;
+  for (const r of recs) {
+    if (!r.error) {
+      pages++;
+      items += r.items || 0;
+    }
   }
   return { pages, items, ms: ms(t0) };
 }
@@ -445,6 +491,13 @@ export const CRAWLERS = [
     turbo: true,
     available: () => Promise.resolve(true),
     crawl: (target, opts) => turboCrawl(target, opts, null),
+  },
+  {
+    name: "turbo-rust (no-js)",
+    set: "nojs",
+    turbo: true,
+    available: () => Promise.resolve(loadTurboRustNative() != null),
+    crawl: turboRustCrawl,
   },
   {
     name: "spider-rs (Rust)",

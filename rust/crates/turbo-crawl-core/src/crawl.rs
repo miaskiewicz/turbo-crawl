@@ -22,6 +22,10 @@ pub struct Nav {
     pub title: String,
     pub links: Vec<String>,
     pub error: Option<String>,
+    /// Count of elements matching the crawl's item selector on this page (0 when no
+    /// selector is configured). Lets the crawler report extraction counts without a
+    /// second pass — used by the crawler-vs-crawler benchmark for correctness parity.
+    pub items: u32,
 }
 
 /// The fetch+parse seam. `goto` resolves a URL to a `Nav`, or `Err` for a
@@ -69,6 +73,7 @@ pub struct Record {
     pub title: String,
     pub links: Vec<String>,
     pub error: Option<String>,
+    pub items: u32,
 }
 
 type AllowFn = Box<dyn Fn(&str) -> bool + Send + Sync>;
@@ -278,6 +283,7 @@ fn error_record(item: &Item, err: String) -> Record {
         title: String::new(),
         links: Vec::new(),
         error: Some(err),
+        items: 0,
     }
 }
 
@@ -312,6 +318,7 @@ fn record_of(item: &Item, nav: &Nav) -> Record {
         title: nav.title.clone(),
         links: nav.links.clone(),
         error: nav.error.clone(),
+        items: nav.items,
     }
 }
 
@@ -517,6 +524,7 @@ mod tests {
             title: "t".to_string(),
             links: links.iter().map(|s| s.to_string()).collect(),
             error: None,
+            items: 0,
         }
     }
 

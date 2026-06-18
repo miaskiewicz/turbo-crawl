@@ -18,13 +18,29 @@ use turbo_dom_parser::rtdom::Tree;
 /// Parse a fetched document into a [`Nav`]: title + absolute out-links. Pure —
 /// no network. `final_url` is the post-redirect URL (the link-resolution base).
 pub fn parse_nav(html: &str, final_url: &str, status: u16) -> Nav {
+    parse_nav_with_items(html, final_url, status, None)
+}
+
+/// Like [`parse_nav`], but also counts elements matching `item_selector` (the
+/// crawl's extraction target) in the SAME parse — so the crawler reports item
+/// counts without a second pass. `None` selector → `items = 0`.
+pub fn parse_nav_with_items(
+    html: &str,
+    final_url: &str,
+    status: u16,
+    item_selector: Option<&str>,
+) -> Nav {
     let tree = Tree::parse(html);
+    let items = item_selector
+        .map(|s| tree.query_selector_all(s).iter().count() as u32)
+        .unwrap_or(0);
     Nav {
         url: final_url.to_string(),
         status,
         title: title_of(&tree),
         links: links_of(&tree, final_url),
         error: None,
+        items,
     }
 }
 
@@ -56,6 +72,9 @@ fn links_of(tree: &Tree, base: &str) -> Vec<String> {
 pub struct TurboNavigator {
     pub max_bytes: Option<usize>,
     pub allow_non_html: bool,
+    /// Optional extraction target counted per page (for the crawl benchmark's
+    /// item-parity metric); `None` skips counting.
+    pub item_selector: Option<String>,
     client: reqwest::Client,
 }
 
@@ -64,8 +83,17 @@ impl Default for TurboNavigator {
         Self {
             max_bytes: None,
             allow_non_html: false,
+            item_selector: None,
             client: turbo_crawl_core::net::build_client(),
         }
+    }
+}
+
+impl TurboNavigator {
+    /// Set the per-page item selector (builder style; `client` stays private).
+    pub fn with_item_selector(mut self, selector: Option<String>) -> Self {
+        self.item_selector = selector;
+        self
     }
 }
 
@@ -79,7 +107,12 @@ impl Navigator for TurboNavigator {
             ..Default::default()
         };
         let res = fetch_html(url, opts).await.map_err(|e| e.to_string())?;
-        Ok(parse_nav(&res.html, &res.final_url, res.status))
+        Ok(parse_nav_with_items(
+            &res.html,
+            &res.final_url,
+            res.status,
+            self.item_selector.as_deref(),
+        ))
     }
 }
 
