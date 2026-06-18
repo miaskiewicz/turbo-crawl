@@ -8,3 +8,4 @@ description = "turbo-crawl tier 2 views: text / xpath / query over the turbo-dom
 
 [dependencies]
 turbo-dom-parser = { path = "/Users/grzegorzmiaskiewicz/github-flux/turbo-dom", default-features = false, features = ["rust-runtime"] }
+turbo-crawl-core = { path = "../turbo-crawl-core" }
