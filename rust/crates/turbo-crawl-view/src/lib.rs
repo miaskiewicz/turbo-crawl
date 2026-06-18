@@ -13,6 +13,8 @@
 //! Remaining (task #4): dom-ops, actions, ax, aria-snapshot, schema.
 
 pub mod aria;
+pub mod aria_snapshot;
+pub mod ax;
 pub mod detect;
 pub mod extract;
 pub mod hydration;
@@ -25,6 +27,8 @@ pub mod visible;
 pub mod xpath;
 
 pub use aria::{accessible_name, implicit_role, role_of};
+pub use aria_snapshot::{aria_snapshot, matches_aria_snapshot};
+pub use ax::{accessibility_tree, ax_subtree, AxNode};
 pub use detect::{detect_js_required, Detect};
 pub use extract::{interactive_elements, links, Interactive};
 pub use hydration::{extract_hydration_state, Hydration};
