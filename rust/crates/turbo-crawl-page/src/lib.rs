@@ -39,7 +39,8 @@ fn title_of(tree: &Tree) -> String {
 // Unresolvable hrefs (javascript:, malformed) are dropped.
 fn links_of(tree: &Tree, base: &str) -> Vec<String> {
     let mut out = Vec::new();
-    for h in tree.query_selector_all("a[href]") {
+    // turbo-dom returns an Rc<[Handle]> (zero-copy from its query cache).
+    for &h in tree.query_selector_all("a[href]").iter() {
         if let Some(href) = tree.get_attribute(h, "href") {
             if let Some(abs) = resolve(base, href) {
                 out.push(abs);

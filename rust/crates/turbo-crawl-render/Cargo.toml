@@ -9,6 +9,8 @@ description = "turbo-crawl JS-execution tier (tier 3): deno_core isolate + DOM o
 [dependencies]
 deno_core = "0.404"
 turbo-dom-parser = { path = "/Users/grzegorzmiaskiewicz/github-flux/turbo-dom", default-features = false, features = ["rust-runtime"] }
+turbo-crawl-core = { path = "../turbo-crawl-core" }
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "io-util"] }

@@ -9,7 +9,27 @@
 //! (no async IO in this tier yet) rather than a silent no-op.
 
 use deno_core::{op2, v8, JsRuntime, OpState, RuntimeOptions};
+use std::cell::RefCell;
 use std::rc::Rc;
+use turbo_crawl_core::cookies::CookieJar;
+use turbo_crawl_core::net::{fetch_html, FetchOptions};
+use turbo_crawl_core::url::resolve;
+
+/// Page base URL (the `location.href`): the base for relative `fetch` and the
+/// scope for the `document.cookie` bridge. Stored in op state.
+struct Base(String);
+
+/// Shared cookie jar backing `document.cookie` (and page `fetch`, later). Stored
+/// in op state behind `Rc<RefCell<…>>` since ops borrow it across the isolate.
+type Jar = Rc<RefCell<CookieJar>>;
+
+/// `fetch` result marshaled back to JS as a `Response`-like object.
+#[derive(serde::Serialize)]
+struct FetchOut {
+    status: u16,
+    ok: bool,
+    body: String,
+}
 
 /// Native DOM surface the ops call into. All methods take `&self`; the turbo-dom
 /// `Tree` lives behind interior mutability in the implementor (`TreeDom`), since
@@ -128,6 +148,50 @@ fn op_set_inner_html(state: &mut OpState, node: u32, #[string] html: &str) {
     dom(state).set_inner_html(node, html);
 }
 
+// `document.cookie` getter: cookies applicable to the page's base URL.
+#[op2]
+#[string]
+fn op_cookie_get(state: &mut OpState) -> String {
+    let base = state.borrow::<Base>().0.clone();
+    state.borrow::<Jar>().borrow().cookie_header(&base, 0.0)
+}
+
+// `document.cookie` setter: ingest a `name=value; attrs` line against the base.
+#[op2(fast)]
+fn op_cookie_set(state: &mut OpState, #[string] line: &str) {
+    let base = state.borrow::<Base>().0.clone();
+    state
+        .borrow::<Jar>()
+        .borrow_mut()
+        .set_from_response(&base, &[line.to_string()], 0.0);
+}
+
+// `fetch(url)` over the tier-1 net stack. Relative URLs resolve against the
+// page base. Never throws across the boundary: a transport/parse failure comes
+// back as `{ status: 0, ok: false }` so page code sees a real (failed) Response.
+#[op2]
+#[serde]
+async fn op_fetch(state: Rc<RefCell<OpState>>, #[string] url: String) -> FetchOut {
+    let base = state.borrow().borrow::<Base>().0.clone();
+    let target = resolve(&base, &url).unwrap_or(url);
+    let opts = FetchOptions {
+        allow_non_html: true, // fetch pulls JSON/text too
+        ..Default::default()
+    };
+    match fetch_html(&target, opts).await {
+        Ok(r) => FetchOut {
+            status: r.status,
+            ok: (200..300).contains(&r.status),
+            body: r.html,
+        },
+        Err(_) => FetchOut {
+            status: 0,
+            ok: false,
+            body: String::new(),
+        },
+    }
+}
+
 deno_core::extension!(
     turbo_dom,
     ops = [
@@ -146,6 +210,9 @@ deno_core::extension!(
         op_create_element,
         op_append_child,
         op_set_inner_html,
+        op_cookie_get,
+        op_cookie_set,
+        op_fetch,
     ],
 );
 
@@ -220,17 +287,36 @@ globalThis.__runTimers = (max = 100000) => {
     try { t.fn(...t.args); } catch (e) { Deno.core.print("timer error: " + e + "\n"); }
   }
 };
-globalThis.fetch = () => {
-  throw new Error("fetch is inert in the render tier (no async IO yet)");
+// document.cookie bridge → the shared CookieJar (scoped to the page base URL).
+Object.defineProperty(globalThis.document, "cookie", {
+  get() { return ops.op_cookie_get(); },
+  set(v) { ops.op_cookie_set(String(v)); },
+});
+// fetch over the tier-1 net stack → a minimal Response.
+globalThis.fetch = async (url) => {
+  const r = await ops.op_fetch(String(url));
+  return {
+    status: r.status,
+    ok: r.ok,
+    url: String(url),
+    text: async () => r.body,
+    json: async () => JSON.parse(r.body),
+  };
 };
 "#;
 
-fn make_runtime(backend: Backend) -> Result<JsRuntime, String> {
+fn make_runtime(backend: Backend, base: &str) -> Result<JsRuntime, String> {
     let mut rt = JsRuntime::new(RuntimeOptions {
         extensions: vec![turbo_dom::init()],
         ..Default::default()
     });
-    rt.op_state().borrow_mut().put::<Backend>(backend);
+    {
+        let state = rt.op_state();
+        let mut state = state.borrow_mut();
+        state.put::<Backend>(backend);
+        state.put(Base(base.to_string()));
+        state.put::<Jar>(Rc::new(RefCell::new(CookieJar::new())));
+    }
     rt.execute_script("<bootstrap>", BOOTSTRAP)
         .map_err(|e| e.to_string())?;
     Ok(rt)
@@ -239,7 +325,7 @@ fn make_runtime(backend: Backend) -> Result<JsRuntime, String> {
 /// Evaluate `script` against a `DomBackend`, returning its result as a string.
 /// (Read/eval helper for tests; no timer drain.)
 pub fn run_with_dom(backend: Backend, script: &str) -> Result<String, String> {
-    let mut rt = make_runtime(backend)?;
+    let mut rt = make_runtime(backend, "about:blank")?;
     let global = rt
         .execute_script("<page>", script.to_string())
         .map_err(|e| e.to_string())?;
@@ -250,7 +336,7 @@ pub fn run_with_dom(backend: Backend, script: &str) -> Result<String, String> {
 /// hydrated document HTML. The Lane B render contract: JS-gated page in, the
 /// HTML after the page's own scripts ran out.
 pub fn render_html(backend: Backend, script: &str) -> Result<String, String> {
-    let mut rt = make_runtime(backend.clone())?;
+    let mut rt = make_runtime(backend.clone(), "about:blank")?;
     rt.execute_script("<page>", script.to_string())
         .map_err(|e| e.to_string())?;
     rt.execute_script("<timers>", "__runTimers()")
@@ -269,10 +355,17 @@ async fn drain_event_loop(rt: &mut JsRuntime) -> Result<(), String> {
 /// callbacks that themselves await) resolves before serialization. This is the
 /// fidelity step real SPA frameworks need.
 pub async fn render_html_async(backend: Backend, script: &str) -> Result<String, String> {
-    let mut rt = make_runtime(backend.clone())?;
+    render_page(backend, "about:blank", script).await
+}
+
+/// Async render with a page base URL — relative `fetch` resolves against it and
+/// the `document.cookie` bridge is scoped to it. Drives the event loop so
+/// `fetch`-driven and promise-based hydration completes before serialization.
+pub async fn render_page(backend: Backend, base: &str, script: &str) -> Result<String, String> {
+    let mut rt = make_runtime(backend.clone(), base)?;
     rt.execute_script("<page>", script.to_string())
         .map_err(|e| e.to_string())?;
-    drain_event_loop(&mut rt).await?; // resolve promises/microtasks from the page
+    drain_event_loop(&mut rt).await?; // resolve promises/microtasks + fetch from the page
     rt.execute_script("<timers>", "__runTimers()")
         .map_err(|e| e.to_string())?;
     drain_event_loop(&mut rt).await?; // resolve promises queued by timer callbacks
@@ -413,10 +506,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fetch_throws_honestly() {
-        let d = dom_with("x", 1);
-        let err = run_with_dom(d, "fetch('/x')").unwrap_err();
-        assert!(err.contains("inert in the render tier"));
+    #[tokio::test]
+    async fn document_cookie_bridge_roundtrips() {
+        let d = dom_with("body", 1);
+        // Set a cookie via the bridge, read it back, write it into body text.
+        render_page(
+            d.clone(),
+            "https://x.test/",
+            "document.cookie = 'a=1'; document.body.textContent = document.cookie;",
+        )
+        .await
+        .unwrap();
+        // MapDom's document_html is fixed, so assert through the backend directly.
+        assert_eq!(d.text_content(1).as_deref(), Some("a=1"));
     }
 }

@@ -41,7 +41,8 @@ impl DomBackend for TreeDom {
     fn query_selector_all(&self, selector: &str) -> String {
         let tree = self.tree.borrow();
         let mut s = String::new();
-        for h in tree.query_selector_all(selector) {
+        // turbo-dom returns an Rc<[Handle]> (zero-copy from its query cache).
+        for h in tree.query_selector_all(selector).iter() {
             if !s.is_empty() {
                 s.push(' ');
             }
@@ -114,8 +115,67 @@ impl DomBackend for TreeDom {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{render_html, render_html_async, run_with_dom};
+    use crate::{render_html, render_html_async, render_page, run_with_dom};
     use std::rc::Rc;
+
+    #[tokio::test]
+    async fn fetch_over_net_hydrates_from_localhost() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        // Localhost server returns JSON the page fetches and renders (offline).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                let mut b = [0u8; 512];
+                let _ = s.read(&mut b).await;
+                let body = r#"{"msg":"from-fetch"}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}"
+                );
+                let _ = s.write_all(resp.as_bytes()).await;
+                let _ = s.flush().await;
+            }
+        });
+        let dom = Rc::new(TreeDom::parse(
+            "<html><body><div id='app'></div></body></html>",
+        ));
+        let html = render_page(
+            dom,
+            &format!("http://127.0.0.1:{port}/"),
+            r#"
+            (async () => {
+              const r = await fetch('/data.json');
+              const j = await r.json();
+              document.getElementById('app').textContent = j.msg + ':' + r.status;
+            })();
+            "#,
+        )
+        .await
+        .unwrap();
+        assert!(html.contains("from-fetch:200"), "got: {html}");
+    }
+
+    #[tokio::test]
+    async fn fetch_failure_surfaces_as_failed_response() {
+        let dom = Rc::new(TreeDom::parse(
+            "<html><body><div id='app'></div></body></html>",
+        ));
+        // Nothing listening → fetch resolves to a failed Response (no throw).
+        let html = render_page(
+            dom,
+            "http://127.0.0.1:1/",
+            r#"
+            (async () => {
+              const r = await fetch('/x');
+              document.getElementById('app').textContent = 'ok=' + r.ok + '/st=' + r.status;
+            })();
+            "#,
+        )
+        .await
+        .unwrap();
+        assert!(html.contains("ok=false/st=0"), "got: {html}");
+    }
 
     #[tokio::test]
     async fn async_promise_hydration_resolves() {
