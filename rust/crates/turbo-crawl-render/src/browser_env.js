@@ -326,7 +326,7 @@
       if (defType[n]) Object.defineProperty(p, 'type', mkTypeDesc(defType[n]));
       // Reflected IDL string attributes: a library setting `input.name = 'x'` (e.g. react-number-
       // format, MUI) must show up as the `name` content attribute (toHaveAttribute, [name] selectors).
-      ['name','placeholder','accept'].forEach(function(a){ Object.defineProperty(p, a, { configurable: true, get: function(){ return this.getAttribute(a) || ''; }, set: function(v){ this.setAttribute(a, v == null ? '' : String(v)); } }); });
+      ['name','placeholder','accept','min','max','step','pattern','autocomplete'].forEach(function(a){ Object.defineProperty(p, a, { configurable: true, get: function(){ return this.getAttribute(a) || ''; }, set: function(v){ this.setAttribute(a, v == null ? '' : String(v)); } }); });
       // Reflected BOOLEAN IDL attributes (presence): el.disabled = true -> the `disabled` content
       // attribute; reading returns hasAttribute. Tests read el.disabled / [disabled] / multiple.
       [['disabled','disabled'],['multiple','multiple'],['required','required'],['readOnly','readonly'],['autoFocus','autofocus']].forEach(function(pair){ Object.defineProperty(p, pair[0], { configurable: true, get: function(){ return this.hasAttribute(pair[1]); }, set: function(v){ if (v) this.setAttribute(pair[1], ''); else this.removeAttribute(pair[1]); } }); });
@@ -335,6 +335,14 @@
         p.setSelectionRange = function(s, e, dir){ this.__selStart = s; this.__selEnd = e; this.__selDir = dir || 'none'; };
         p.select = function(){ this.__selStart = 0; this.__selEnd = String(this.value||'').length; };
         p.setRangeText = function(){};
+      }
+      // click() on the interface prototype (input/textarea/button) so tests can spy on
+      // HTMLInputElement.prototype.click (e.g. opening a file picker via inputRef.click()); the own
+      // native click is dropped in createElement. NOT for select/option (their own click is
+      // load-bearing for native dropdown behavior). Dispatches a bubbling click (checkbox/radio
+      // activation + React onClick still run via el_dispatch_event).
+      if (n === 'HTMLInputElement' || n === 'HTMLTextAreaElement' || n === 'HTMLButtonElement') {
+        p.click = function(){ try { var C = g.MouseEvent || g.PointerEvent || g.Event; this.dispatchEvent(new C('click', { bubbles: true, cancelable: true })); } catch(e){} };
       }
     } catch(e){} g[n].prototype = p; protoFor[n] = p; });
     // Descendant <option>s. Prefer querySelectorAll (document order); fall back to a `children` walk
@@ -429,6 +437,9 @@
           // value uses a spec internal dirty-value slot (valDesc, distinct from the content attribute);
           // attach the DOM value-change tracker so framework change-detection works (per-char + dedup).
           if (t === 'input' || t === 'textarea') { attachValueTracker(el, 'value', valDesc); Object.defineProperty(el, 'checked', checkedDesc); }
+          // drop the own native click on input/textarea/button so it resolves to the patchable proto
+          // click (tests spy on HTMLInputElement.prototype.click for file pickers etc.).
+          if ((t === 'input' || t === 'textarea' || t === 'button') && Object.prototype.hasOwnProperty.call(el, 'click')) delete el.click;
         } else if (t === 'a') {
           Object.setPrototypeOf(el, anchorProto);
           if (Object.prototype.hasOwnProperty.call(el, 'click')) delete el.click; // resolve to the patchable proto click
