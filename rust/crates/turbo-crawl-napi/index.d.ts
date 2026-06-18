@@ -20,7 +20,7 @@ export function render(html: string, baseUrl: string, script: string): string;
  * the way a browser does — fetch+execute each, fire onload, drain to quiescence — so
  * a real SPA bundle mounts. Async (Promise): must not block Node's event loop, since
  * chunk fetches may hit a same-process server. */
-export function hydrate(html: string, baseUrl: string): Promise<string>;
+export function hydrate(html: string, baseUrl: string, cookies?: string): Promise<string>;
 
 /** Transform TS/JSX source → classic JS (swc). */
 export function transform(src: string, ts: boolean, jsx: boolean): string;

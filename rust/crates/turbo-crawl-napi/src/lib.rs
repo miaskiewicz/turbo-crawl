@@ -220,6 +220,7 @@ pub fn render(html: String, base_url: String, script: String) -> Result<String> 
 pub struct HydrateTask {
     html: String,
     base_url: String,
+    cookies: String,
 }
 
 #[napi]
@@ -232,9 +233,11 @@ impl Task for HydrateTask {
             .enable_all()
             .build()
             .map_err(|e| Error::from_reason(e.to_string()))?;
-        rt.block_on(turbo_crawl_render::render_hydrate(
+        rt.block_on(turbo_crawl_render::render_hydrate_with_budget(
             &self.html,
             &self.base_url,
+            &self.cookies,
+            turbo_crawl_render::DEFAULT_RENDER_BUDGET_MS,
         ))
         .map_err(Error::from_reason)
     }
@@ -245,8 +248,12 @@ impl Task for HydrateTask {
 }
 
 #[napi]
-pub fn hydrate(html: String, base_url: String) -> AsyncTask<HydrateTask> {
-    AsyncTask::new(HydrateTask { html, base_url })
+pub fn hydrate(html: String, base_url: String, cookies: Option<String>) -> AsyncTask<HydrateTask> {
+    AsyncTask::new(HydrateTask {
+        html,
+        base_url,
+        cookies: cookies.unwrap_or_default(),
+    })
 }
 
 /// Transform TS/JSX page source → classic JS (swc) so a bundle written in
@@ -504,6 +511,7 @@ async fn do_fetch_headers(
         "finalUrl": res.final_url,
         "status": res.status,
         "redirected": res.redirected,
+        "contentType": res.content_type,
         "cookies": cookie_state,
     })
     .to_string())

@@ -311,6 +311,39 @@ async fn readable_stream_parks_for_async_producer() {
     );
 }
 
+// File / Blob / FileReader / Headers — auth SDKs + analytics (PostHog) reference these
+// during hydration; their absence aborted PostHog init ("File/Headers is not defined")
+// and a fetch Response with no `headers` crashed Next's RSC client navigation
+// (`res.headers.get('content-type')`). Verify the globals exist and the fetch Response
+// exposes a working `headers`.
+#[tokio::test]
+async fn web_platform_globals_for_hydration() {
+    let out = render_html(
+        "<body><div id='root'></div></body>",
+        r#"
+        const fr = new FileReader();
+        const f = new File(["hi"], "a.txt", { type: "text/plain" });
+        const h = new Headers({ "Content-Type": "text/x-component" });
+        const out = document.getElementById('root');
+        out.setAttribute('data-file', String(f.name) + ":" + String(f.size));
+        out.setAttribute('data-blob', String(new Blob(["abcd"]).size));
+        out.setAttribute('data-hdr', String(h.get("content-type")));   // case-insensitive
+        out.setAttribute('data-types', [typeof File, typeof Blob, typeof FileReader, typeof Headers].join(','));
+        "#,
+    )
+    .unwrap();
+    assert!(out.contains(r#"data-file="a.txt:2""#), "File: {out}");
+    assert!(out.contains(r#"data-blob="4""#), "Blob.size: {out}");
+    assert!(
+        out.contains(r#"data-hdr="text/x-component""#),
+        "Headers.get (ci): {out}"
+    );
+    assert!(
+        out.contains(r#"data-types="function,function,function,function""#),
+        "all four globals defined: {out}"
+    );
+}
+
 // crypto.subtle.digest (real SHA-256), BroadcastChannel, and WebSocket — auth SDKs
 // (PropelAuth) + analytics use these during hydration. WebSocket must not hang/throw.
 #[tokio::test]

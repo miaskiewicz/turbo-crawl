@@ -34,6 +34,7 @@ struct FetchOut {
     status: u16,
     ok: bool,
     body: String,
+    content_type: String,
 }
 
 // `document.cookie` getter: cookies applicable to the page's base URL.
@@ -60,24 +61,37 @@ fn op_cookie_set(state: &mut OpState, #[string] line: &str) {
 #[op2]
 #[serde]
 async fn op_fetch(state: Rc<RefCell<OpState>>, #[string] url: String) -> FetchOut {
-    let base = state.borrow().borrow::<Base>().0.clone();
+    let (base, jar_rc) = {
+        let s = state.borrow();
+        (s.borrow::<Base>().0.clone(), s.borrow::<Jar>().clone())
+    };
     let target = resolve(&base, &url).unwrap_or(url);
+    // Carry the page's cookies on same-origin fetches and ingest Set-Cookie back, so
+    // session-authenticated hydration works (e.g. an auth SDK fetching the current user
+    // with the session cookie). Snapshot the shared jar into a local one for the call —
+    // a RefCell borrow can't be held across the await.
+    let mut local = CookieJar::from_storage_state(&jar_rc.borrow().storage_state());
     let opts = FetchOptions {
         allow_non_html: true, // fetch pulls JSON/text too
+        jar: Some(&mut local),
         ..Default::default()
     };
-    match fetch_html(&target, opts).await {
+    let out = match fetch_html(&target, opts).await {
         Ok(r) => FetchOut {
             status: r.status,
             ok: (200..300).contains(&r.status),
             body: r.html,
+            content_type: r.content_type,
         },
         Err(_) => FetchOut {
             status: 0,
             ok: false,
             body: String::new(),
+            content_type: String::new(),
         },
-    }
+    };
+    *jar_rc.borrow_mut() = local; // persist any Set-Cookie updates for later fetches
+    out
 }
 
 deno_core::extension!(turbo_dom, ops = [op_cookie_get, op_cookie_set, op_fetch],);
@@ -153,15 +167,50 @@ Object.defineProperty(globalThis.document, "cookie", {
   get() { return ops.op_cookie_get(); },
   set(v) { ops.op_cookie_set(String(v)); },
 });
-// fetch over the tier-1 net stack → a minimal Response.
-globalThis.fetch = async (url) => {
-  const r = await ops.op_fetch(String(url));
+// Headers — fetch + analytics (PostHog) construct/read these; deno_core ships none.
+// Case-insensitive name lookup, per the spec.
+if (typeof globalThis.Headers === "undefined") {
+  globalThis.Headers = class Headers {
+    constructor(init) {
+      this._m = new Map();
+      if (init) {
+        const ents = typeof init.forEach === "function" ? null : (Array.isArray(init) ? init : Object.entries(init));
+        if (ents) for (const [k, v] of ents) this.append(k, v);
+        else init.forEach((v, k) => this.append(k, v));
+      }
+    }
+    append(k, v) { const key = String(k).toLowerCase(); this._m.set(key, this._m.has(key) ? this._m.get(key) + ", " + v : String(v)); }
+    set(k, v) { this._m.set(String(k).toLowerCase(), String(v)); }
+    get(k) { const v = this._m.get(String(k).toLowerCase()); return v == null ? null : v; }
+    has(k) { return this._m.has(String(k).toLowerCase()); }
+    delete(k) { this._m.delete(String(k).toLowerCase()); }
+    forEach(cb, thisArg) { for (const [k, v] of this._m) cb.call(thisArg, v, k, this); }
+    keys() { return this._m.keys(); }
+    values() { return this._m.values(); }
+    entries() { return this._m.entries(); }
+    [Symbol.iterator]() { return this._m.entries(); }
+  };
+}
+// fetch over the tier-1 net stack → a minimal Response (with real headers, so RSC
+// client navigation that reads `res.headers.get('content-type')` works).
+globalThis.fetch = async (url, init) => {
+  const r = await ops.op_fetch(String((url && url.url) || url));
+  const headers = new globalThis.Headers();
+  if (r.content_type) headers.set("content-type", r.content_type);
   return {
     status: r.status,
+    statusText: "",
     ok: r.ok,
-    url: String(url),
+    redirected: false,
+    type: "basic",
+    url: String((url && url.url) || url),
+    headers,
+    clone() { return this; },
     text: async () => r.body,
     json: async () => JSON.parse(r.body),
+    arrayBuffer: async () => new TextEncoder().encode(r.body).buffer,
+    blob: async () => new globalThis.Blob([r.body], { type: r.content_type || "" }),
+    body: new globalThis.ReadableStream({ start(c) { if (r.body) c.enqueue(new TextEncoder().encode(r.body)); c.close(); } }),
   };
 };
 // XMLHttpRequest over fetch (async; resolves in the event loop).
@@ -218,6 +267,49 @@ if (typeof globalThis.FormData === "undefined") {
     values() { return this._e.map(([, v]) => v)[Symbol.iterator](); }
     entries() { return this._e.map(([k, v]) => [k, v])[Symbol.iterator](); }
     [Symbol.iterator]() { return this.entries(); }
+  };
+}
+// Blob / File / FileReader — analytics + upload code (PostHog, file inputs) reference
+// these during hydration; deno_core ships none ("File is not defined" aborts PostHog
+// init). Minimal spec-shaped impls over the concatenated parts as a string — enough to
+// construct/inspect; no real binary I/O in this engine.
+if (typeof globalThis.Blob === "undefined") {
+  globalThis.Blob = class Blob {
+    constructor(parts = [], opts = {}) {
+      this._s = (parts || []).map((p) => (typeof p === "string" ? p : String(p))).join("");
+      this.type = (opts && opts.type) || "";
+    }
+    get size() { return this._s.length; }
+    async text() { return this._s; }
+    async arrayBuffer() { return new TextEncoder().encode(this._s).buffer; }
+    slice(a, b, type) { const n = new Blob([this._s.slice(a, b)]); n.type = type || ""; return n; }
+    stream() { const s = this._s; return new globalThis.ReadableStream({ start(c) { c.enqueue(s); c.close(); } }); }
+  };
+}
+if (typeof globalThis.File === "undefined") {
+  globalThis.File = class File extends globalThis.Blob {
+    constructor(parts, name, opts = {}) {
+      super(parts, opts);
+      this.name = String(name == null ? "" : name);
+      this.lastModified = (opts && opts.lastModified) || 0;
+    }
+  };
+}
+if (typeof globalThis.FileReader === "undefined") {
+  globalThis.FileReader = class FileReader {
+    constructor() { this.result = null; this.onload = null; this.onerror = null; this.onloadend = null; }
+    readAsText(blob) { this._read(blob, (s) => s); }
+    readAsDataURL(blob) { this._read(blob, (s) => "data:" + (blob.type || "") + ";base64," + btoa(s)); }
+    readAsArrayBuffer(blob) { this._read(blob, (s) => new TextEncoder().encode(s).buffer); }
+    _read(blob, map) {
+      const self = this;
+      Promise.resolve(blob && typeof blob.text === "function" ? blob.text() : "").then((s) => {
+        self.result = map(s);
+        const ev = { target: self };
+        if (typeof self.onload === "function") self.onload(ev);
+        if (typeof self.onloadend === "function") self.onloadend(ev);
+      });
+    }
   };
 }
 // MessageChannel — React 18's scheduler drains its work queue by posting to a
@@ -760,15 +852,20 @@ globalThis.__pendingWork = () =>
 })();
 })();"##;
 
-fn make_runtime(base: &str) -> JsRuntime {
+fn make_runtime(base: &str, cookies: &str) -> JsRuntime {
     let rt = JsRuntime::new(RuntimeOptions {
         extensions: vec![turbo_dom::init()],
         ..Default::default()
     });
+    let jar = if cookies.is_empty() {
+        CookieJar::new()
+    } else {
+        CookieJar::from_storage_state(cookies)
+    };
     let state = rt.op_state();
     let mut state = state.borrow_mut();
     state.put::<Base>(Base(base.to_string()));
-    state.put::<Jar>(Rc::new(RefCell::new(CookieJar::new())));
+    state.put::<Jar>(Rc::new(RefCell::new(jar)));
     drop(state);
     rt
 }
@@ -828,7 +925,7 @@ pub fn run_with_dom(html: &str, script: &str) -> Result<String, String> {
     EVAL_RT.with(|cell| {
         let mut slot = cell.borrow_mut();
         if slot.is_none() {
-            *slot = Some((make_runtime("about:blank"), String::new()));
+            *slot = Some((make_runtime("about:blank", ""), String::new()));
         }
         let (rt, installed) = slot.as_mut().expect("eval runtime present");
         if installed != html {
@@ -848,7 +945,7 @@ pub fn run_with_dom(html: &str, script: &str) -> Result<String, String> {
 /// document HTML. The Lane B render contract: JS-gated page in, HTML after the
 /// page's own scripts ran out. (Sync; no event loop — see [`render_page`].)
 pub fn render_html(html: &str, script: &str) -> Result<String, String> {
-    let mut rt = make_runtime("about:blank");
+    let mut rt = make_runtime("about:blank", "");
     let out = run_sync(&mut rt, html, script);
     crate::browser_env::reset();
     out
@@ -901,7 +998,7 @@ pub async fn render_page_with_budget(
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
-    let mut rt = make_runtime(base);
+    let mut rt = make_runtime(base, "");
     let handle = rt.v8_isolate().thread_safe_handle();
     let done = Arc::new(AtomicBool::new(false));
     let watch = done.clone();
@@ -946,19 +1043,22 @@ async fn run_async(
 /// mounts. No bundle concatenation by the caller, no framework runtime from us: the
 /// page's own bundle drives itself. Bounded by [`DEFAULT_RENDER_BUDGET_MS`].
 pub async fn render_hydrate(html: &str, base: &str) -> Result<String, String> {
-    render_hydrate_with_budget(html, base, DEFAULT_RENDER_BUDGET_MS).await
+    render_hydrate_with_budget(html, base, "", DEFAULT_RENDER_BUDGET_MS).await
 }
 
-/// [`render_hydrate`] with an explicit execution budget (ms) + runaway watchdog.
+/// [`render_hydrate`] with the page's cookies (a `storageState` JSON string, "" for
+/// none) seeded into the jar so session-authenticated hydration works, plus an
+/// explicit execution budget (ms) + runaway watchdog.
 pub async fn render_hydrate_with_budget(
     html: &str,
     base: &str,
+    cookies: &str,
     budget_ms: u64,
 ) -> Result<String, String> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
-    let mut rt = make_runtime(base);
+    let mut rt = make_runtime(base, cookies);
     let handle = rt.v8_isolate().thread_safe_handle();
     let done = Arc::new(AtomicBool::new(false));
     let watch = done.clone();
@@ -988,7 +1088,7 @@ pub async fn render_hydrate_with_budget(
 pub async fn eval_async(html: &str, base: &str, script: &str) -> Result<String, String> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
-    let mut rt = make_runtime(base);
+    let mut rt = make_runtime(base, "");
     let handle = rt.v8_isolate().thread_safe_handle();
     let done = Arc::new(AtomicBool::new(false));
     let watch = done.clone();

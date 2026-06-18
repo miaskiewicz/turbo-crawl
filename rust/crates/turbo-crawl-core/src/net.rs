@@ -54,6 +54,7 @@ pub struct FetchResult {
     pub final_url: String,
     pub status: u16,
     pub redirected: bool,
+    pub content_type: String,
 }
 
 #[derive(Default)]
@@ -300,6 +301,7 @@ async fn finish(
                 final_url,
                 status,
                 redirected,
+                content_type: header_value(&res, "content-type"),
             });
         }
     }
@@ -318,6 +320,7 @@ async fn finish(
         final_url,
         status,
         redirected,
+        content_type: ct,
     })
 }
 

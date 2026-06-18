@@ -342,14 +342,23 @@ class Page {
     this._html = r.html;
     this._url = r.finalUrl;
     this._cookies = r.cookies;
+    this._hydrated = false; // fresh document — not yet run its own JS
     this._emit("load");
     this._emit("domcontentloaded");
     return makeResponse(r);
   }
-  async goto(url, _opts) {
+  async goto(url, opts) {
     if (this._url !== "about:blank") this._history.push(this._url);
     this._fwd = []; // a fresh navigation invalidates the forward stack
-    return this._navigate(this._resolveUrl(url));
+    const resp = await this._navigate(this._resolveUrl(url));
+    // `waitUntil: 'networkidle'` means "let the page settle" — for an SPA that's
+    // hydration. A real browser runs the page's JS on navigation; the shim's fetch
+    // only pulls server HTML, so without this an SPA's client-rendered content
+    // (forms, dashboards) never appears and every locator misses. Mirror the browser:
+    // run the page's own bundle to quiescence. (Default/'load' stays raw so callers
+    // can still inspect the pre-hydration server shell.)
+    if (opts?.waitUntil === "networkidle") await this.hydrate();
+    return resp;
   }
   async reload() {
     return this._navigate(this._url); // re-fetch in place — no history entry
@@ -437,7 +446,11 @@ class Page {
   // way a browser does — fetch+execute each <script>, fire onload, drain to quiescence
   // — so a real SPA bundle mounts. The locator/expect surface then sees the live DOM.
   async hydrate() {
-    this._html = await native.hydrate(this._html, this._url);
+    if (this._hydrated) return this._html; // already run this document's JS
+    // Pass the page's cookies so session-authenticated SPAs hydrate as the logged-in
+    // user (the auth SDK's "fetch current user" call carries the session cookie).
+    this._html = await native.hydrate(this._html, this._url, this._cookies);
+    this._hydrated = true;
     return this._html;
   }
   async addInitScript(script, arg) {
@@ -559,7 +572,11 @@ class Page {
   }
 
   // --- waiters (static engine: resolve immediately / poll evaluate) ---
-  async waitForLoadState() {}
+  // `waitForLoadState('networkidle')` is the other "page has settled" signal — treat
+  // it like the networkidle goto and hydrate the SPA if it hasn't been already.
+  async waitForLoadState(state) {
+    if (state === "networkidle") await this.hydrate();
+  }
   async waitForTimeout(ms) {
     await new Promise((r) => setTimeout(r, Math.min(ms ?? 0, 50)));
   }
