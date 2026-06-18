@@ -318,7 +318,10 @@ async fn finish(
 }
 
 fn opt_header(res: &reqwest::Response, name: &str) -> Option<String> {
-    res.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_string)
+    res.headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
 }
 
 // State threaded through the manual-follow loop.
@@ -382,7 +385,8 @@ async fn follow_auto(
     // Reuse the caller's shared client (pooled connections) when provided.
     let cl = match opts.client {
         Some(c) => c.clone(),
-        None => client(reqwest::redirect::Policy::limited(20)).map_err(|e| err(e, ErrorCode::Network))?,
+        None => client(reqwest::redirect::Policy::limited(20))
+            .map_err(|e| err(e, ErrorCode::Network))?,
     };
     let method = opts.method.clone().unwrap_or_else(|| "GET".to_string());
     let headers = build_headers(url, opts);

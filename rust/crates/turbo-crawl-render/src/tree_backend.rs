@@ -153,7 +153,10 @@ mod tests {
             }, 10);
         "#;
         // turbo-dom serializes spaces as &nbsp; — normalize for the assertions.
-        let html = render_page(dom, "https://x.test/", bundle).await.unwrap().replace("&nbsp;", " ");
+        let html = render_page(dom, "https://x.test/", bundle)
+            .await
+            .unwrap()
+            .replace("&nbsp;", " ");
         assert!(html.contains(r#"<div class="app">"#), "got: {html}");
         assert!(html.contains("<h1>Count: 5</h1>"), "got: {html}");
         assert!(html.contains("<li>c</li>"), "got: {html}");

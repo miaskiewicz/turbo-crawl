@@ -191,7 +191,9 @@ pub fn render(html: String, base_url: String, script: String) -> Result<String> 
 
 #[napi]
 pub fn attr_of(html: String, node: u32, name: String) -> Option<String> {
-    Tree::parse(&html).get_attribute(node, &name).map(str::to_string)
+    Tree::parse(&html)
+        .get_attribute(node, &name)
+        .map(str::to_string)
 }
 
 #[napi]
@@ -291,57 +293,25 @@ pub fn select_option(html: String, selector: String, value: String) -> Result<St
     Ok(serialize_inner(&tree, tree.root()))
 }
 
-fn ancestor_anchor_href(tree: &Tree, h: u32) -> Option<String> {
-    let mut cur = Some(h);
-    while let Some(n) = cur {
-        if tree.tag_name(n).as_deref() == Some("A") {
-            if let Some(href) = tree.get_attribute(n, "href") {
-                return Some(href.to_string());
-            }
-        }
-        cur = tree.parent(n);
+fn intent_json(intent: view::ClickIntent) -> String {
+    match intent {
+        view::ClickIntent::Navigate(url) => json!({ "action": "navigate", "url": url }).to_string(),
+        view::ClickIntent::Submit(s) => json!({
+            "action": "submit", "method": s.method, "url": s.url,
+            "body": s.body, "contentType": s.content_type,
+        })
+        .to_string(),
+        view::ClickIntent::Inert => json!({ "action": "inert" }).to_string(),
     }
-    None
-}
-
-fn ancestor_form(tree: &Tree, h: u32) -> Option<u32> {
-    let mut cur = Some(h);
-    while let Some(n) = cur {
-        if tree.tag_name(n).as_deref() == Some("FORM") {
-            return Some(n);
-        }
-        cur = tree.parent(n);
-    }
-    None
-}
-
-fn is_submitter(tree: &Tree, h: u32) -> bool {
-    let tag = tree.tag_name(h).unwrap_or_default();
-    let ty = tree.get_attribute(h, "type").map(|t| t.to_ascii_lowercase());
-    tag == "BUTTON" || (tag == "INPUT" && matches!(ty.as_deref(), Some("submit") | Some("image")))
 }
 
 /// Resolve what clicking the first `selector` match does (no JS): JSON
-/// `{action:"navigate",url}` for an `<a href>`, `{action:"submit",method,url,
-/// body,contentType}` for a control in a `<form>`, else `{action:"inert"}`.
+/// `{action:"navigate",url}` / `{action:"submit",...}` / `{action:"inert"}`.
 #[napi]
 pub fn click(html: String, selector: String, base_url: String) -> Result<String> {
     let tree = Tree::parse(&html);
     let h = first_match(&tree, &selector)?;
-    if let Some(href) = ancestor_anchor_href(&tree, h) {
-        let url = turbo_crawl_core::url::resolve(&base_url, &href).unwrap_or(href);
-        return Ok(json!({ "action": "navigate", "url": url }).to_string());
-    }
-    if let Some(form) = ancestor_form(&tree, h) {
-        let submitter = is_submitter(&tree, h).then_some(h);
-        let s = view::build_submission(&tree, form, &base_url, submitter);
-        return Ok(json!({
-            "action": "submit", "method": s.method, "url": s.url,
-            "body": s.body, "contentType": s.content_type,
-        })
-        .to_string());
-    }
-    Ok(json!({ "action": "inert" }).to_string())
+    Ok(intent_json(view::click_intent(&tree, h, &base_url)))
 }
 
 // Node-handle action variants (back locator-scoped actions; work for getBy too).
@@ -369,21 +339,7 @@ pub fn select_option_node(html: String, node: u32, value: String) -> String {
 
 #[napi]
 pub fn click_node(html: String, node: u32, base_url: String) -> String {
-    let tree = Tree::parse(&html);
-    if let Some(href) = ancestor_anchor_href(&tree, node) {
-        let url = turbo_crawl_core::url::resolve(&base_url, &href).unwrap_or(href);
-        return json!({ "action": "navigate", "url": url }).to_string();
-    }
-    if let Some(form) = ancestor_form(&tree, node) {
-        let submitter = is_submitter(&tree, node).then_some(node);
-        let s = view::build_submission(&tree, form, &base_url, submitter);
-        return json!({
-            "action": "submit", "method": s.method, "url": s.url,
-            "body": s.body, "contentType": s.content_type,
-        })
-        .to_string();
-    }
-    json!({ "action": "inert" }).to_string()
+    intent_json(view::click_intent(&Tree::parse(&html), node, &base_url))
 }
 
 // --- async: fetch + crawl ---------------------------------------------------
@@ -404,8 +360,13 @@ async fn do_fetch(
         jar: jar.as_mut(),
         ..Default::default()
     };
-    let res = net_fetch(url, opts).await.map_err(|e| Error::from_reason(e.to_string()))?;
-    let cookie_state = jar.as_ref().map(|j| j.storage_state()).unwrap_or_else(|| "[]".to_string());
+    let res = net_fetch(url, opts)
+        .await
+        .map_err(|e| Error::from_reason(e.to_string()))?;
+    let cookie_state = jar
+        .as_ref()
+        .map(|j| j.storage_state())
+        .unwrap_or_else(|| "[]".to_string());
     Ok(json!({
         "html": res.html,
         "finalUrl": res.final_url,

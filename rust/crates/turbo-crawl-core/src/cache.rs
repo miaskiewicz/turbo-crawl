@@ -36,7 +36,13 @@ impl ResponseCache {
     }
 
     /// Record a response's validators + body (only when it carries a validator).
-    pub fn store(&mut self, url: &str, etag: Option<String>, last_modified: Option<String>, html: &str) {
+    pub fn store(
+        &mut self,
+        url: &str,
+        etag: Option<String>,
+        last_modified: Option<String>,
+        html: &str,
+    ) {
         if etag.is_some() || last_modified.is_some() {
             self.store.insert(
                 url.to_string(),
@@ -51,7 +57,10 @@ impl ResponseCache {
 
     /// Cached body for `url` (used on a 304), or "".
     pub fn body(&self, url: &str) -> String {
-        self.store.get(url).map(|e| e.html.clone()).unwrap_or_default()
+        self.store
+            .get(url)
+            .map(|e| e.html.clone())
+            .unwrap_or_default()
     }
 
     pub fn size(&self) -> usize {
@@ -78,7 +87,12 @@ mod tests {
         );
         assert_eq!(c.body("https://x.test/b"), "body-b");
         // last-modified only
-        c.store("https://x.test/c", None, Some("Mon, 01 Jan 2020 00:00:00 GMT".into()), "body-c");
+        c.store(
+            "https://x.test/c",
+            None,
+            Some("Mon, 01 Jan 2020 00:00:00 GMT".into()),
+            "body-c",
+        );
         assert_eq!(
             c.validators("https://x.test/c"),
             vec![(

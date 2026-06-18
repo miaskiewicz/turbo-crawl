@@ -602,7 +602,11 @@ mod tests {
     #[test]
     fn storage_state_round_trip() {
         let mut j = CookieJar::new();
-        j.set_from_response("https://x.test/app", &["sid=abc; Path=/; Secure".to_string()], 0.0);
+        j.set_from_response(
+            "https://x.test/app",
+            &["sid=abc; Path=/; Secure".to_string()],
+            0.0,
+        );
         j.add("k", "v", "x.test", "/", None); // session cookie (Infinity)
         let state = j.storage_state();
         let j2 = CookieJar::from_storage_state(&state);

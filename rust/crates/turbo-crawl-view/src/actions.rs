@@ -12,6 +12,17 @@ use url::form_urlencoded;
 
 const SUBMIT_TYPES: &[&str] = &["submit", "button", "reset", "image"];
 
+/// What clicking an element does in Lane A (no JS).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClickIntent {
+    /// Follow an `<a href>` to this absolute URL.
+    Navigate(String),
+    /// Submit the owning `<form>`.
+    Submit(Submission),
+    /// A JS-only handler — nothing to fire without JS.
+    Inert,
+}
+
 /// A navigation produced by submitting a form.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Submission {
@@ -210,6 +221,51 @@ fn is_multipart(tree: &Tree, form: u32) -> bool {
 fn form_action_url(tree: &Tree, form: u32, base: &str) -> String {
     let action = tree.get_attribute(form, "action").unwrap_or("");
     resolve(base, action).unwrap_or_else(|| base.to_string())
+}
+
+fn ancestor_anchor_href(tree: &Tree, h: u32) -> Option<String> {
+    let mut cur = Some(h);
+    while let Some(n) = cur {
+        if tree.tag_name(n).as_deref() == Some("A") {
+            if let Some(href) = tree.get_attribute(n, "href") {
+                return Some(href.to_string());
+            }
+        }
+        cur = tree.parent(n);
+    }
+    None
+}
+
+fn ancestor_form(tree: &Tree, h: u32) -> Option<u32> {
+    let mut cur = Some(h);
+    while let Some(n) = cur {
+        if tree.tag_name(n).as_deref() == Some("FORM") {
+            return Some(n);
+        }
+        cur = tree.parent(n);
+    }
+    None
+}
+
+fn is_submitter(tree: &Tree, h: u32) -> bool {
+    let tag = tree.tag_name(h).unwrap_or_default();
+    let ty = tree
+        .get_attribute(h, "type")
+        .map(|t| t.to_ascii_lowercase());
+    tag == "BUTTON" || (tag == "INPUT" && matches!(ty.as_deref(), Some("submit") | Some("image")))
+}
+
+/// Resolve what clicking element `h` does (no JS): follow an `<a href>`, submit
+/// the owning `<form>`, or inert.
+pub fn click_intent(tree: &Tree, h: u32, base: &str) -> ClickIntent {
+    if let Some(href) = ancestor_anchor_href(tree, h) {
+        return ClickIntent::Navigate(resolve(base, &href).unwrap_or(href));
+    }
+    if let Some(form) = ancestor_form(tree, h) {
+        let submitter = is_submitter(tree, h).then_some(h);
+        return ClickIntent::Submit(build_submission(tree, form, base, submitter));
+    }
+    ClickIntent::Inert
 }
 
 /// Build the navigation a form submit produces.

@@ -18,11 +18,13 @@ use view::{Field, FieldType, QueryType, TextMode};
 
 pub const VERSION: &str = "0.1.6";
 
-/// One agent session: the current page URL + parsed tree.
+/// One agent session: the current page URL + parsed tree + nav history.
 #[derive(Default)]
 pub struct Session {
     pub url: String,
     tree: Option<Tree>,
+    back: Vec<String>,
+    forward: Vec<String>,
 }
 
 impl Session {
@@ -42,16 +44,94 @@ impl Session {
             .ok_or_else(|| "no page loaded (call goto first)".to_string())
     }
 
-    async fn goto(&mut self, url: &str) -> Result<Value, String> {
+    fn tree_mut(&mut self) -> Result<&mut Tree, String> {
+        self.tree
+            .as_mut()
+            .ok_or_else(|| "no page loaded (call goto first)".to_string())
+    }
+
+    // Fetch + parse into the session (no history bookkeeping).
+    async fn fetch_into(
+        &mut self,
+        url: &str,
+        method: Option<String>,
+        body: Option<String>,
+    ) -> Result<Value, String> {
         let opts = FetchOptions {
+            method,
+            body,
             allow_non_html: true,
             ..Default::default()
         };
-        let res = fetch_html(url, opts).await.map_err(|e| e.to_string())?;
-        self.load(&res.final_url, &res.html);
-        let title = title_of(self.tree.as_ref().unwrap());
-        Ok(json!({ "url": res.final_url, "status": res.status, "title": title }))
+        let res = fetch_html_with(url, opts).await?;
+        self.load(&res.0, &res.1);
+        Ok(json!({ "url": res.0, "status": res.2, "title": title_of(self.tree.as_ref().unwrap()) }))
     }
+
+    async fn goto(&mut self, url: &str) -> Result<Value, String> {
+        if !self.url.is_empty() && self.url != "about:blank" {
+            self.back.push(self.url.clone());
+        }
+        self.forward.clear();
+        self.fetch_into(url, None, None).await
+    }
+
+    async fn reload(&mut self) -> Result<Value, String> {
+        let url = self.url.clone();
+        self.fetch_into(&url, None, None).await
+    }
+
+    async fn go_back(&mut self) -> Result<Value, String> {
+        let prev = self.back.pop().ok_or("no back history")?;
+        self.forward.push(self.url.clone());
+        self.fetch_into(&prev, None, None).await
+    }
+
+    async fn go_forward(&mut self) -> Result<Value, String> {
+        let next = self.forward.pop().ok_or("no forward history")?;
+        self.back.push(self.url.clone());
+        self.fetch_into(&next, None, None).await
+    }
+
+    // Mutate a control located by selector; returns the new title (or ok).
+    fn mutate<F: FnOnce(&mut Tree, u32)>(&mut self, selector: &str, f: F) -> Result<Value, String> {
+        let tree = self.tree_mut()?;
+        let h = tree
+            .query_selector(selector)
+            .ok_or_else(|| format!("no element matches {selector}"))?;
+        f(tree, h);
+        Ok(json!({ "ok": true }))
+    }
+
+    async fn click(&mut self, selector: &str) -> Result<Value, String> {
+        let base = self.url.clone();
+        let intent = {
+            let tree = self.tree()?;
+            let h = tree
+                .query_selector(selector)
+                .ok_or_else(|| format!("no element matches {selector}"))?;
+            view::click_intent(tree, h, &base)
+        };
+        match intent {
+            view::ClickIntent::Navigate(url) => self.goto(&url).await,
+            view::ClickIntent::Submit(s) => {
+                let method = (s.method != "GET").then_some(s.method);
+                self.back.push(base);
+                self.forward.clear();
+                self.fetch_into(&s.url, method, s.body).await
+            }
+            view::ClickIntent::Inert => Ok(json!({ "action": "inert" })),
+        }
+    }
+}
+
+// Fetch returning (final_url, html, status) — small adapter over net.
+async fn fetch_html_with(
+    url: &str,
+    opts: FetchOptions<'_>,
+) -> Result<(String, String, u16), String> {
+    let res = fetch_html(url, opts).await.map_err(|e| e.to_string())?;
+    Ok((res.final_url, res.html, res.status))
 }
 
 fn title_of(tree: &Tree) -> String {
@@ -87,6 +167,16 @@ pub fn tools() -> Value {
         ("query", "Query by CSS or XPath"),
         ("get_by", "Locate by role/text/label/attr"),
         ("detect", "Lane B (JS-required) heuristic"),
+        ("click", "Click an element (follow link / submit form)"),
+        ("fill", "Fill a control's value"),
+        ("check", "Check a checkbox/radio"),
+        ("uncheck", "Uncheck a checkbox/radio"),
+        ("select_option", "Select a <select> option by value/label"),
+        ("reload", "Re-fetch the current URL"),
+        ("go_back", "Navigate to the previous URL"),
+        ("go_forward", "Navigate forward"),
+        ("get_attribute", "Attribute of the first selector match"),
+        ("is_visible", "Visibility of the first selector match"),
     ];
     let list: Vec<Value> = specs
         .iter()
@@ -110,10 +200,35 @@ fn arg_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
 /// Run a tool by name, returning its result value (the caller wraps it in the
 /// MCP `content` envelope).
 pub async fn call_tool(session: &mut Session, name: &str, args: &Value) -> Result<Value, String> {
+    let sel = || arg_str(args, "selector").ok_or_else(|| format!("{name}: missing 'selector'"));
+    let val = || arg_str(args, "value").unwrap_or("").to_string();
     match name {
         "goto" => {
-            let url = arg_str(args, "url").ok_or("goto: missing 'url'")?;
-            session.goto(url).await
+            session
+                .goto(arg_str(args, "url").ok_or("goto: missing 'url'")?)
+                .await
+        }
+        "click" => session.click(sel()?).await,
+        "reload" => session.reload().await,
+        "go_back" => session.go_back().await,
+        "go_forward" => session.go_forward().await,
+        "fill" => {
+            let (s, v) = (sel()?.to_string(), val());
+            session.mutate(&s, |t, h| view::fill_value(t, h, &v))
+        }
+        "check" => {
+            let s = sel()?.to_string();
+            session.mutate(&s, |t, h| view::set_checked(t, h, true))
+        }
+        "uncheck" => {
+            let s = sel()?.to_string();
+            session.mutate(&s, |t, h| view::set_checked(t, h, false))
+        }
+        "select_option" => {
+            let (s, v) = (sel()?.to_string(), val());
+            session.mutate(&s, |t, h| {
+                view::select_option(t, h, &v);
+            })
         }
         _ => call_read_tool(session, name, args),
     }
@@ -136,8 +251,24 @@ fn call_read_tool(session: &mut Session, name: &str, args: &Value) -> Result<Val
         "query" => tool_query(tree, root, args),
         "get_by" => tool_get_by(tree, args),
         "extract" => tool_extract(tree, &base, args),
+        "get_attribute" => tool_get_attribute(tree, args),
+        "is_visible" => Ok(json!(
+            first(tree, args)?.is_some_and(|h| view::is_visible(tree, h))
+        )),
         _ => Err(format!("unknown tool: {name}")),
     }
+}
+
+// First selector match handle (or None), for accessor tools.
+fn first(tree: &Tree, args: &Value) -> Result<Option<u32>, String> {
+    let sel = arg_str(args, "selector").ok_or("missing 'selector'")?;
+    Ok(tree.query_selector(sel))
+}
+
+fn tool_get_attribute(tree: &Tree, args: &Value) -> Result<Value, String> {
+    let name = arg_str(args, "name").ok_or("get_attribute: missing 'name'")?;
+    let v = first(tree, args)?.and_then(|h| tree.get_attribute(h, name));
+    Ok(json!(v))
 }
 
 fn aria_snapshot_body(tree: &Tree) -> String {
@@ -458,6 +589,71 @@ mod tests {
         assert!(call_tool(&mut s, "query", &json!({})).await.is_err());
         assert!(call_tool(&mut s, "get_by", &json!({})).await.is_err());
         assert!(call_tool(&mut s, "extract", &json!({})).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn action_tools_mutate_and_read() {
+        let mut s = Session::new();
+        s.load(
+            "https://x.test/",
+            "<input id='t'><input id='c' type='checkbox'><a id='x' href='/p'>l</a><div id='d' style='display:none'>x</div>",
+        );
+        // fill + check mutate the session tree
+        call(
+            &mut s,
+            "fill",
+            json!({ "selector": "#t", "value": "typed" }),
+        )
+        .await;
+        call(&mut s, "check", json!({ "selector": "#c" })).await;
+        // accessor reads reflect the mutations
+        assert_eq!(
+            call(
+                &mut s,
+                "get_attribute",
+                json!({ "selector": "#t", "name": "value" })
+            )
+            .await,
+            "typed"
+        );
+        assert_eq!(
+            call(&mut s, "is_visible", json!({ "selector": "#d" })).await,
+            false
+        );
+        assert_eq!(
+            call(&mut s, "is_visible", json!({ "selector": "#x" })).await,
+            true
+        );
+    }
+
+    #[tokio::test]
+    async fn click_link_and_history() {
+        // link click → navigate; go_back returns to the origin.
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut b = [0u8; 512];
+                let _ = sock.read(&mut b).await;
+                let resp = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<title>Dest</title>";
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        let mut s = Session::new();
+        s.load(
+            &format!("http://127.0.0.1:{port}/"),
+            &format!("<a href='http://127.0.0.1:{port}/next'>go</a>"),
+        );
+        let clicked = call_tool(&mut s, "click", &json!({ "selector": "a" }))
+            .await
+            .unwrap();
+        assert_eq!(clicked["title"], "Dest");
+        // go_back to the origin
+        let back = call_tool(&mut s, "go_back", &json!({})).await.unwrap();
+        assert!(back["url"].as_str().unwrap().ends_with("/"));
     }
 
     #[tokio::test]

@@ -30,7 +30,9 @@ pub mod text;
 pub mod visible;
 pub mod xpath;
 
-pub use actions::{build_submission, fill_value, serialize_form, Submission};
+pub use actions::{
+    build_submission, click_intent, fill_value, serialize_form, ClickIntent, Submission,
+};
 pub use aria::{
     accessible_description, accessible_error_message, accessible_name, implicit_role, role_of,
 };

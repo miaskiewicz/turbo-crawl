@@ -447,9 +447,11 @@ pub async fn render_page_with_budget(
 }
 
 async fn run_render(rt: &mut JsRuntime, script: &str) -> Result<(), String> {
-    rt.execute_script("<page>", script.to_string()).map_err(|e| e.to_string())?;
+    rt.execute_script("<page>", script.to_string())
+        .map_err(|e| e.to_string())?;
     drain_event_loop(rt).await?; // promises/microtasks + fetch from the page
-    rt.execute_script("<timers>", "__runTimers()").map_err(|e| e.to_string())?;
+    rt.execute_script("<timers>", "__runTimers()")
+        .map_err(|e| e.to_string())?;
     drain_event_loop(rt).await?; // promises queued by timer callbacks
     Ok(())
 }
