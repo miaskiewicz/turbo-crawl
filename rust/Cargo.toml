@@ -4,6 +4,7 @@ members = [
     "crates/turbo-crawl-core",
     "crates/turbo-crawl-page",
     "crates/turbo-crawl-render",
+    "crates/turbo-crawl-view",
 ]
 
 [workspace.package]
