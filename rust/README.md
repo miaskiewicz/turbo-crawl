@@ -16,10 +16,10 @@ dep (`/Users/.../turbo-dom`); swap to a git/version dep once published.
 |------|-------|--------|
 | **1** | net / cookies / robots / url / frontier / crawl-scheduling — pure logic + HTTP | ✅ |
 | **2** | `Page`/`Navigator` over turbo-dom (fetch+parse, link/title extraction) | ✅ navigator; views (extract/visible/aria/locator/markdown) pending |
-| **3** | JS-execution tier — `deno_core` isolate + ops binding the native DOM | ✅ real `DomBackend` over `rtdom::Tree`; global bootstrap pending |
+| **3** | JS-execution tier — `deno_core` isolate + DOM ops + global bootstrap | ✅ page scripts run + mutate the DOM + virtual timers; `render_html` returns hydrated HTML |
 | glue | napi-rs `.node` addon + thin JS `@playwright/test` shim | later |
 
-43 offline tests across the workspace (`cargo test`).
+47 offline tests across the workspace (`cargo test`).
 
 ## Tier 1 — `turbo-crawl-core`
 
@@ -69,27 +69,34 @@ locator / markdown / …) over the same `Tree` API.
 
 ## Tier 3 — `turbo-crawl-render`
 
-The JS-execution path, end to end over the real DOM:
+The JS-execution path, end to end over the real DOM. **The page's own scripts
+run** on a `deno_core` V8 isolate, mutate the turbo-dom tree in place, and the
+render returns the hydrated HTML — the Lane B contract.
 
 - Boots a **`deno_core` V8 isolate** (true isolate by default — host heap
   unreachable from guest, the security property the old `node:vm` backend lacked).
-- `DomBackend` trait = the native DOM seam. Page JS calls `document.querySelector`
+- `DomBackend` trait = the native DOM seam (read + mutate + serialize). Page JS
   → V8 → `#[op2]` → `DomBackend` → back. No JS-DOM-in-JS-VM indirection; the DOM
   lives in Rust beside the parser.
-- `TreeDom` implements `DomBackend` over `rtdom::Tree` — node ids ARE turbo-dom
-  handles (`u32`), so the bridge is zero-translation. Tested by parsing real HTML
-  and reading it back through page JS.
+- `TreeDom` implements it over `rtdom::Tree` — node ids ARE turbo-dom handles
+  (`u32`), zero-translation. `Tree` sits behind a `RefCell` (page JS mutates;
+  isolate is single-threaded).
+- **Global bootstrap**: `document` (query/create/getElementById/body), an
+  `Element` wrapper (textContent / innerHTML / attributes / appendChild / scoped
+  query), `window`/`self`/`navigator`/`location`/`localStorage`/`console`, and
+  **virtual timers** (`setTimeout`/`requestAnimationFrame`/`queueMicrotask`
+  drained synchronously, ordered by delay — mirrors the JS tier's virtual clock).
+- `fetch` is an **honest throw** ("inert in the render tier") — no silent no-op.
 
 ```rust
-pub trait DomBackend {
-    fn query_selector(&self, selector: &str) -> Option<u32>;
-    fn text_content(&self, node: u32) -> Option<String>;
-    fn get_attribute(&self, node: u32, name: &str) -> Option<String>;
-}
+// render a JS-gated page → hydrated HTML
+let dom = Rc::new(TreeDom::parse(html));
+let hydrated = render_html(dom, page_script)?;
 ```
 
-Still pending (task #7): grow the bootstrap into the full global surface
-(window / navigator / timers / fetch / cookie jar) so the page's own scripts run.
+Still pending: real async (event-loop-driven promises + `fetch` over the tier-1
+net) and the `document.__cookieJar` bridge; `swc` transform (task #8); collapse
+the JS `node:vm`/`isolated-vm` dual backend onto this one isolate.
 
 ## Build / test
 
