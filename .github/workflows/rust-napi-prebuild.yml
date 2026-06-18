@@ -1,0 +1,59 @@
+# Prebuild the turbo-crawl native (Rust) addon as a `.node` per platform, then
+# (on a v* tag) publish @miaskiewicz/turbo-crawl-native with all prebuilt
+# binaries. aarch64-linux builds on a NATIVE arm runner (ubuntu-24.04-arm) — not
+# an x86 cross-compile — so it isn't the slow job gating publish.
+name: rust-napi-prebuild
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+defaults:
+  run:
+    working-directory: rust/crates/turbo-crawl-napi
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.host }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { host: macos-14, target: aarch64-apple-darwin }
+          - { host: macos-13, target: x86_64-apple-darwin }
+          - { host: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+          # native arm (was the slow x86 cross-compile gating publish)
+          - { host: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { host: windows-latest, target: x86_64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "${{ matrix.target }}" }
+      - run: npm install --no-save @napi-rs/cli@^2.18.0
+      - run: npx napi build --platform --release --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bindings-${{ matrix.target }}
+          path: rust/crates/turbo-crawl-napi/turbo-crawl.*.node
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, registry-url: "https://registry.npmjs.org" }
+      - uses: actions/download-artifact@v4
+        with:
+          path: rust/crates/turbo-crawl-napi/artifacts
+      - name: collect prebuilt binaries
+        run: find artifacts -name '*.node' -exec mv {} . \;
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

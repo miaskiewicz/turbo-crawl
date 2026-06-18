@@ -1,0 +1,31 @@
+{
+  "name": "@miaskiewicz/turbo-crawl-native",
+  "version": "0.1.6",
+  "description": "Native (Rust) engine for turbo-crawl — napi-rs addon",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT",
+  "repository": "github:miaskiewicz/turbo-crawl",
+  "files": ["index.js", "index.d.ts", "turbo-crawl.*.node"],
+  "napi": {
+    "name": "turbo-crawl",
+    "triples": {
+      "defaults": true,
+      "additional": [
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-gnu"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "napi build --platform --release --cargo-cwd .",
+    "test": "node __test__/smoke.cjs"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.0"
+  }
+}
