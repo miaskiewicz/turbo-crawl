@@ -6,11 +6,13 @@
 //! integration rides in with that wiring — `robots.rs` is already done.
 
 use crate::frontier::{Frontier, Item};
-use crate::url::{host_of, is_http_url};
+use crate::robots::{RobotsCache, RobotsFetcher};
+use crate::url::{host_of, is_http_url, origin_of};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
+use tokio::sync::Mutex as AsyncMutex;
 
 /// One navigation result. The tier-2 `Page` produces this; tests stub it.
 #[derive(Clone, Debug, Default)]
@@ -27,6 +29,34 @@ pub struct Nav {
 #[async_trait]
 pub trait Navigator: Send + Sync {
     async fn goto(&self, url: &str) -> Result<Nav, String>;
+}
+
+/// robots.txt gate for the crawl driver (object-safe so `CrawlOptions` stays
+/// non-generic). [`SharedRobots`] adapts a [`RobotsCache`].
+#[async_trait]
+pub trait RobotsGate: Send + Sync {
+    async fn allowed(&self, url: &str, ua: &str, now: u64) -> bool;
+    async fn crawl_delay(&self, origin: &str, ua: &str, now: u64) -> Option<f64>;
+}
+
+/// Wraps a [`RobotsCache`] in an async mutex so the shared crawl driver can gate
+/// concurrently (the cache mutates on first fetch per origin).
+pub struct SharedRobots<F: RobotsFetcher>(AsyncMutex<RobotsCache<F>>);
+
+impl<F: RobotsFetcher> SharedRobots<F> {
+    pub fn new(cache: RobotsCache<F>) -> Self {
+        Self(AsyncMutex::new(cache))
+    }
+}
+
+#[async_trait]
+impl<F: RobotsFetcher + Send + Sync> RobotsGate for SharedRobots<F> {
+    async fn allowed(&self, url: &str, ua: &str, now: u64) -> bool {
+        self.0.lock().await.allowed(url, ua, now).await
+    }
+    async fn crawl_delay(&self, origin: &str, ua: &str, now: u64) -> Option<f64> {
+        self.0.lock().await.crawl_delay(origin, ua, now).await
+    }
 }
 
 /// Output record, mirroring the JS crawl record shape (sans the lazy views,
@@ -54,6 +84,9 @@ pub struct CrawlOptions {
     pub retry_budget: u32,
     pub backoff_ms: u64,
     pub allow: Option<AllowFn>,
+    pub user_agent: String,
+    /// robots.txt gate (allow + crawl-delay). `None` = no robots checks.
+    pub robots: Option<Arc<dyn RobotsGate>>,
 }
 
 impl Default for CrawlOptions {
@@ -69,6 +102,8 @@ impl Default for CrawlOptions {
             retry_budget: 2,
             backoff_ms: 200,
             allow: None,
+            user_agent: "turbo-crawl".to_string(),
+            robots: None,
         }
     }
 }
@@ -294,13 +329,52 @@ fn publish(ctx: &Ctx, item: &Item, nav: &Nav) -> bool {
     false
 }
 
+// robots.txt allow gate (true when no robots configured).
+async fn robots_allows(ctx: &Ctx, url: &str) -> bool {
+    match &ctx.opts.robots {
+        Some(r) => r.allowed(url, &ctx.opts.user_agent, now_ms()).await,
+        None => true,
+    }
+}
+
+// Resolve a host's politeness once: max of the configured delay and any robots
+// Crawl-delay (seconds → ms). Cached on the host state (robots consulted once).
+async fn resolve_politeness(ctx: &Ctx, host: &str, url: &str) {
+    let already = ctx
+        .shared
+        .lock()
+        .unwrap()
+        .host_state
+        .get(host)
+        .is_some_and(|s| s.politeness_ms.is_some());
+    if already {
+        return;
+    }
+    let mut ms = ctx.opts.politeness_ms;
+    if let (Some(r), Some(origin)) = (&ctx.opts.robots, origin_of(url)) {
+        if let Some(cd) = r.crawl_delay(&origin, &ctx.opts.user_agent, now_ms()).await {
+            ms = ms.max((cd * 1000.0) as u64);
+        }
+    }
+    ctx.shared
+        .lock()
+        .unwrap()
+        .host_mut(host)
+        .politeness_ms
+        .get_or_insert(ms);
+}
+
 async fn process_item(ctx: &Ctx, item: &Item) -> bool {
     let host = host_of(&item.url).unwrap_or_default();
+    if !robots_allows(ctx, &item.url).await {
+        return false; // disallowed by robots → skip, no record
+    }
     {
         let mut sh = ctx.shared.lock().unwrap();
         sh.host_mut(&host).in_flight += 1;
         sh.active += 1;
     }
+    resolve_politeness(ctx, &host, &item.url).await;
     let stop = match goto_with_retry(ctx, item, &host).await {
         Ok(nav) => publish(ctx, item, &nav),
         Err(rec) => {
@@ -648,6 +722,115 @@ mod tests {
         };
         let recs = crawl(o, Arc::new(YieldSite)).await;
         assert_eq!(recs.len(), 1);
+    }
+
+    struct DenyPrivate;
+    #[async_trait]
+    impl RobotsGate for DenyPrivate {
+        async fn allowed(&self, url: &str, _ua: &str, _now: u64) -> bool {
+            !url.contains("/private")
+        }
+        async fn crawl_delay(&self, _origin: &str, _ua: &str, _now: u64) -> Option<f64> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn robots_gate_skips_disallowed() {
+        let mut pages = HashMap::new();
+        pages.insert(
+            "https://x.test/".to_string(),
+            nav(
+                "https://x.test/",
+                &["https://x.test/ok", "https://x.test/private"],
+            ),
+        );
+        pages.insert(
+            "https://x.test/ok".to_string(),
+            nav("https://x.test/ok", &[]),
+        );
+        pages.insert(
+            "https://x.test/private".to_string(),
+            nav("https://x.test/private", &[]),
+        );
+        let site = Arc::new(Site { pages });
+        let o = CrawlOptions {
+            robots: Some(Arc::new(DenyPrivate)),
+            ..opts(&["https://x.test/"])
+        };
+        let mut recs = crawl(o, site).await;
+        recs.sort_by(|a, b| a.url.cmp(&b.url));
+        let urls: Vec<_> = recs.iter().map(|r| r.url.as_str()).collect();
+        // /private fetched-then-gated out; root + /ok remain
+        assert_eq!(urls, vec!["https://x.test/", "https://x.test/ok"]);
+    }
+
+    struct RobotsStub;
+    #[async_trait]
+    impl crate::robots::RobotsFetcher for RobotsStub {
+        async fn fetch_text(&self, _url: &str) -> Result<(u16, String), ()> {
+            Ok((
+                200,
+                "User-agent: *\nDisallow: /private\nCrawl-delay: 0\n".to_string(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_robots_cache_integration() {
+        // Drive the real RobotsCache through SharedRobots (the adapter the public
+        // API exposes), not just a hand-rolled gate.
+        use crate::robots::RobotsCache;
+        let gate = SharedRobots::new(RobotsCache::new(RobotsStub));
+        let mut pages = HashMap::new();
+        pages.insert(
+            "https://x.test/".to_string(),
+            nav(
+                "https://x.test/",
+                &["https://x.test/ok", "https://x.test/private/p"],
+            ),
+        );
+        pages.insert(
+            "https://x.test/ok".to_string(),
+            nav("https://x.test/ok", &[]),
+        );
+        pages.insert(
+            "https://x.test/private/p".to_string(),
+            nav("https://x.test/private/p", &[]),
+        );
+        let site = Arc::new(Site { pages });
+        let o = CrawlOptions {
+            robots: Some(Arc::new(gate)),
+            ..opts(&["https://x.test/"])
+        };
+        let mut recs = crawl(o, site).await;
+        recs.sort_by(|a, b| a.url.cmp(&b.url));
+        let urls: Vec<_> = recs.iter().map(|r| r.url.as_str()).collect();
+        assert_eq!(urls, vec!["https://x.test/", "https://x.test/ok"]);
+    }
+
+    #[tokio::test]
+    async fn robots_crawl_delay_folds_into_politeness() {
+        // A robots gate advertising a crawl-delay must not break the crawl; the
+        // delay is virtualized via the host politeness gate.
+        struct Delay;
+        #[async_trait]
+        impl RobotsGate for Delay {
+            async fn allowed(&self, _u: &str, _a: &str, _n: u64) -> bool {
+                true
+            }
+            async fn crawl_delay(&self, _o: &str, _a: &str, _n: u64) -> Option<f64> {
+                Some(0.0) // 0s → no real wait, just exercises the fold path
+            }
+        }
+        let mut pages = HashMap::new();
+        pages.insert("https://x.test/".to_string(), nav("https://x.test/", &[]));
+        let site = Arc::new(Site { pages });
+        let o = CrawlOptions {
+            robots: Some(Arc::new(Delay)),
+            ..opts(&["https://x.test/"])
+        };
+        assert_eq!(crawl(o, site).await.len(), 1);
     }
 
     #[tokio::test]
