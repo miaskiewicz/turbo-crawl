@@ -16,6 +16,16 @@ export function evaluate(html: string, script: string): string;
 /** Run the page's own JS (promises/timers/fetch/cookies) → hydrated HTML. */
 export function render(html: string, baseUrl: string, script: string): string;
 
+/** Fetch with an explicit method/body (POST form submit). */
+export function request(url: string, method: string, body?: string): Promise<string>;
+
+// Actions — mutate the DOM and return the new HTML.
+export function fill(html: string, selector: string, value: string): string;
+export function setChecked(html: string, selector: string, on: boolean): string;
+export function selectOption(html: string, selector: string, value: string): string;
+/** Click intent → JSON {action:"navigate"|"submit"|"inert", ...}. */
+export function click(html: string, selector: string, baseUrl: string): string;
+
 export function markdown(html: string, baseUrl: string): string;
 export function text(html: string): string;
 export function title(html: string): string;

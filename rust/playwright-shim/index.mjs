@@ -104,6 +104,41 @@ class Page {
     return native.links(this._html, this._url);
   }
 
+  // --- actions (mutate the cached DOM in place) ---
+  async fill(selector, value) {
+    this._html = native.fill(this._html, selector, value);
+  }
+
+  async check(selector) {
+    this._html = native.setChecked(this._html, selector, true);
+  }
+
+  async uncheck(selector) {
+    this._html = native.setChecked(this._html, selector, false);
+  }
+
+  async selectOption(selector, value) {
+    this._html = native.selectOption(this._html, selector, value);
+  }
+
+  // Click = resolve the no-JS intent: navigate (<a>), submit (<form>), or inert.
+  async click(selector) {
+    const intent = JSON.parse(native.click(this._html, selector, this._url));
+    if (intent.action === "navigate") return this.goto(intent.url);
+    if (intent.action === "submit") return this._submit(intent);
+    return null; // inert (a JS-only handler — nothing to fire without JS)
+  }
+
+  async _submit(intent) {
+    const r =
+      intent.method === "GET"
+        ? JSON.parse(await native.fetchHtml(intent.url))
+        : JSON.parse(await native.request(intent.url, intent.method, intent.body ?? null));
+    this._html = r.html;
+    this._url = r.finalUrl;
+    return { status: () => r.status, url: () => r.finalUrl };
+  }
+
   locator(selector) {
     return new Locator(this, (h) => JSON.parse(native.query(h, selector, "auto")));
   }

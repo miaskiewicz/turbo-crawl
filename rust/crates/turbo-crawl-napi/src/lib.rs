@@ -185,18 +185,105 @@ pub fn render(html: String, base_url: String, script: String) -> Result<String> 
     .map_err(Error::from_reason)
 }
 
+// --- actions (Lane A intent graph) ------------------------------------------
+// Each mutating action parses the HTML, mutates the tree, and returns the new
+// serialized HTML; the shim swaps its cached HTML for the result.
+
+fn first_match(tree: &Tree, selector: &str) -> Result<u32> {
+    tree.query_selector(selector)
+        .ok_or_else(|| Error::from_reason(format!("no element matches {selector}")))
+}
+
+/// Fill a control's value (checkbox/radio toggle on non-empty) → new HTML.
+#[napi]
+pub fn fill(html: String, selector: String, value: String) -> Result<String> {
+    let mut tree = Tree::parse(&html);
+    let h = first_match(&tree, &selector)?;
+    view::fill_value(&mut tree, h, &value);
+    Ok(serialize_inner(&tree, tree.root()))
+}
+
+/// Set/clear a checkbox/radio's checked state → new HTML.
+#[napi]
+pub fn set_checked(html: String, selector: String, on: bool) -> Result<String> {
+    let mut tree = Tree::parse(&html);
+    let h = first_match(&tree, &selector)?;
+    view::set_checked(&mut tree, h, on);
+    Ok(serialize_inner(&tree, tree.root()))
+}
+
+/// Select `<option>`(s) of a `<select>` by value/label → new HTML.
+#[napi]
+pub fn select_option(html: String, selector: String, value: String) -> Result<String> {
+    let mut tree = Tree::parse(&html);
+    let h = first_match(&tree, &selector)?;
+    view::select_option(&mut tree, h, &value);
+    Ok(serialize_inner(&tree, tree.root()))
+}
+
+fn ancestor_anchor_href(tree: &Tree, h: u32) -> Option<String> {
+    let mut cur = Some(h);
+    while let Some(n) = cur {
+        if tree.tag_name(n).as_deref() == Some("A") {
+            if let Some(href) = tree.get_attribute(n, "href") {
+                return Some(href.to_string());
+            }
+        }
+        cur = tree.parent(n);
+    }
+    None
+}
+
+fn ancestor_form(tree: &Tree, h: u32) -> Option<u32> {
+    let mut cur = Some(h);
+    while let Some(n) = cur {
+        if tree.tag_name(n).as_deref() == Some("FORM") {
+            return Some(n);
+        }
+        cur = tree.parent(n);
+    }
+    None
+}
+
+fn is_submitter(tree: &Tree, h: u32) -> bool {
+    let tag = tree.tag_name(h).unwrap_or_default();
+    let ty = tree.get_attribute(h, "type").map(|t| t.to_ascii_lowercase());
+    tag == "BUTTON" || (tag == "INPUT" && matches!(ty.as_deref(), Some("submit") | Some("image")))
+}
+
+/// Resolve what clicking the first `selector` match does (no JS): JSON
+/// `{action:"navigate",url}` for an `<a href>`, `{action:"submit",method,url,
+/// body,contentType}` for a control in a `<form>`, else `{action:"inert"}`.
+#[napi]
+pub fn click(html: String, selector: String, base_url: String) -> Result<String> {
+    let tree = Tree::parse(&html);
+    let h = first_match(&tree, &selector)?;
+    if let Some(href) = ancestor_anchor_href(&tree, h) {
+        let url = turbo_crawl_core::url::resolve(&base_url, &href).unwrap_or(href);
+        return Ok(json!({ "action": "navigate", "url": url }).to_string());
+    }
+    if let Some(form) = ancestor_form(&tree, h) {
+        let submitter = is_submitter(&tree, h).then_some(h);
+        let s = view::build_submission(&tree, form, &base_url, submitter);
+        return Ok(json!({
+            "action": "submit", "method": s.method, "url": s.url,
+            "body": s.body, "contentType": s.content_type,
+        })
+        .to_string());
+    }
+    Ok(json!({ "action": "inert" }).to_string())
+}
+
 // --- async: fetch + crawl ---------------------------------------------------
 
-/// Fetch a URL; returns JSON `{ html, finalUrl, status, redirected }`.
-#[napi]
-pub async fn fetch_html(url: String) -> Result<String> {
+async fn do_fetch(url: &str, method: Option<String>, body: Option<String>) -> Result<String> {
     let opts = FetchOptions {
+        method,
+        body,
         allow_non_html: true,
         ..Default::default()
     };
-    let res = net_fetch(&url, opts)
-        .await
-        .map_err(|e| Error::from_reason(e.to_string()))?;
+    let res = net_fetch(url, opts).await.map_err(|e| Error::from_reason(e.to_string()))?;
     Ok(json!({
         "html": res.html,
         "finalUrl": res.final_url,
@@ -204,6 +291,18 @@ pub async fn fetch_html(url: String) -> Result<String> {
         "redirected": res.redirected,
     })
     .to_string())
+}
+
+/// Fetch a URL (GET); returns JSON `{ html, finalUrl, status, redirected }`.
+#[napi]
+pub async fn fetch_html(url: String) -> Result<String> {
+    do_fetch(&url, None, None).await
+}
+
+/// Fetch with an explicit method/body (e.g. a POST form submission).
+#[napi]
+pub async fn request(url: String, method: String, body: Option<String>) -> Result<String> {
+    do_fetch(&url, Some(method), body).await
 }
 
 fn record_json(r: &Record) -> Value {

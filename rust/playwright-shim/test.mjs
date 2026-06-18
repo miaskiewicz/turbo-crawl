@@ -72,6 +72,57 @@ test("evaluate + render (JS execution, no browser)", async () => {
   assert.equal(await page.locator("p").textContent(), "late");
 });
 
+test("actions: fill / check / selectOption mutate the DOM", async () => {
+  const page = newPage();
+  await page.setContent(
+    "<input id='t'><input id='c' type='checkbox'><select id='s'><option value='a'>A</option><option value='b'>B</option></select>",
+  );
+  await page.fill("#t", "hello");
+  await page.check("#c");
+  await page.selectOption("#s", "b");
+  assert.match(await page.content(), /value="hello"/);
+  assert.match(await page.content(), /id="c"[^>]*checked|checked[^>]*id="c"/);
+  // the select now has b selected (serialized)
+  assert.match(await page.content(), /value="b"[^>]*selected|selected[^>]*value="b"/);
+});
+
+test("click follows a link to a new page", async () => {
+  const linked = "<html><head><title>Dest</title></head><body><p>arrived</p></body></html>";
+  const server = createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "text/html" });
+    res.end(linked);
+  });
+  await new Promise((r) => server.listen(0, r));
+  const port = server.address().port;
+  const page = newPage();
+  // base URL is the server so the relative href resolves there
+  await page.goto(`http://127.0.0.1:${port}/`);
+  await page.setContent(`<a href="http://127.0.0.1:${port}/next">go</a>`);
+  await page.click("a");
+  assert.equal(await page.title(), "Dest");
+  server.close();
+});
+
+test("click submits a GET form", async () => {
+  let seen = "";
+  const server = createServer((req, res) => {
+    seen = req.url;
+    res.writeHead(200, { "content-type": "text/html" });
+    res.end("<html><head><title>Results</title></head><body>ok</body></html>");
+  });
+  await new Promise((r) => server.listen(0, r));
+  const port = server.address().port;
+  const page = newPage();
+  await page.goto(`http://127.0.0.1:${port}/`);
+  await page.setContent(
+    `<form action="http://127.0.0.1:${port}/search" method="get"><input name="q" value="rust"><button>Go</button></form>`,
+  );
+  await page.click("button");
+  assert.equal(await page.title(), "Results");
+  assert.match(seen, /\/search\?q=rust/);
+  server.close();
+});
+
 test("goto over localhost via chromium.launch", async () => {
   const body = "<html><head><title>Live</title></head><body><p>hello</p></body></html>";
   const server = createServer((_req, res) => {
