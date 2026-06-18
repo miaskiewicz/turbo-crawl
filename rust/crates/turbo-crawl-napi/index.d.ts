@@ -12,6 +12,7 @@ export function crawl(optsJson: string): Promise<string>;
 
 export function markdown(html: string, baseUrl: string): string;
 export function text(html: string): string;
+export function title(html: string): string;
 export function html(html: string): string;
 export function links(html: string, baseUrl: string): string[];
 

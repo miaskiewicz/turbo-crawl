@@ -15,7 +15,7 @@ napi-derive = "2"
 turbo-crawl-core = { path = "../turbo-crawl-core" }
 turbo-crawl-page = { path = "../turbo-crawl-page" }
 turbo-crawl-view = { path = "../turbo-crawl-view" }
-turbo-dom-parser = { package = "turbo-dom", version = "0.3.0" }
+turbo-dom-parser = { package = "turbo-dom", version = "0.3.1" }
 serde = "1"
 serde_json = "1"
 

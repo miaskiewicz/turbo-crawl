@@ -15,7 +15,7 @@ use turbo_crawl_page::TurboNavigator;
 use turbo_crawl_view as view;
 use turbo_dom_parser::rtdom::serialize::serialize_inner;
 use turbo_dom_parser::rtdom::Tree;
-use view::{Field, FieldType, QueryType};
+use view::{Field, FieldType, QueryType, TextMode};
 
 #[napi]
 pub fn version() -> String {
@@ -38,6 +38,15 @@ pub fn markdown(html: String, base_url: String) -> String {
 pub fn text(html: String) -> String {
     let tree = Tree::parse(&html);
     view::text(&tree, tree.root())
+}
+
+/// Document `<title>` (raw text — the text view skips TITLE, so read it directly).
+#[napi]
+pub fn title(html: String) -> String {
+    let tree = Tree::parse(&html);
+    tree.query_selector("title")
+        .map(|h| tree.text_content(h).trim().to_string())
+        .unwrap_or_default()
 }
 
 #[napi]
@@ -96,13 +105,34 @@ pub fn query(html: String, selector: String, kind: Option<String>) -> String {
     to_json_string(&view::query(&tree, tree.root(), &selector, ty))
 }
 
+/// Locate by `kind` ("role" | "text" | "label") → JSON `[{ node, text }]`.
+/// `name` filters a role match by accessible name (substring).
+#[napi]
+pub fn get_by(html: String, kind: String, value: String, name: Option<String>) -> String {
+    let tree = Tree::parse(&html);
+    let nm = name.as_deref().map(|n| (n, TextMode::Substring));
+    let hits = match kind.as_str() {
+        "role" => view::by_role(&tree, &value, nm),
+        "text" => view::by_text(&tree, &value, TextMode::Substring),
+        "label" => view::by_label(&tree, &value, TextMode::Substring),
+        _ => Vec::new(),
+    };
+    let out: Vec<Value> = hits
+        .iter()
+        .map(|&h| json!({ "node": h, "text": view::text(&tree, h) }))
+        .collect();
+    Value::Array(out).to_string()
+}
+
 #[napi]
 pub fn extract(html: String, base_url: String, schema_json: String) -> Result<String> {
     let schema_value: Value =
         serde_json::from_str(&schema_json).map_err(|e| Error::from_reason(e.to_string()))?;
     let tree = Tree::parse(&html);
     let schema = parse_schema(&schema_value);
-    Ok(to_json_string(&view::extract_schema(&tree, &schema, &base_url)))
+    Ok(to_json_string(&view::extract_schema(
+        &tree, &schema, &base_url,
+    )))
 }
 
 fn parse_schema(v: &Value) -> BTreeMap<String, Field> {
@@ -135,7 +165,9 @@ pub async fn fetch_html(url: String) -> Result<String> {
         allow_non_html: true,
         ..Default::default()
     };
-    let res = net_fetch(&url, opts).await.map_err(|e| Error::from_reason(e.to_string()))?;
+    let res = net_fetch(&url, opts)
+        .await
+        .map_err(|e| Error::from_reason(e.to_string()))?;
     Ok(json!({
         "html": res.html,
         "finalUrl": res.final_url,
@@ -156,7 +188,11 @@ fn crawl_options(opts: &Value) -> CrawlOptions {
     let start = opts
         .get("start")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     let u = |k: &str, d: u64| opts.get(k).and_then(Value::as_u64).unwrap_or(d);
     CrawlOptions {
@@ -164,7 +200,10 @@ fn crawl_options(opts: &Value) -> CrawlOptions {
         max_pages: u("maxPages", 100) as usize,
         max_depth: u("maxDepth", 3) as usize,
         concurrency: u("concurrency", 4) as usize,
-        same_host_only: opts.get("sameHost").and_then(Value::as_bool).unwrap_or(true),
+        same_host_only: opts
+            .get("sameHost")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
         ..Default::default()
     }
 }

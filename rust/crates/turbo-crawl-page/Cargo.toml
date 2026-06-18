@@ -8,7 +8,7 @@ description = "turbo-crawl tier 2: Page over the turbo-dom Rust parser + Navigat
 
 [dependencies]
 turbo-crawl-core = { path = "../turbo-crawl-core" }
-turbo-dom-parser = { package = "turbo-dom", version = "0.3.0" }
+turbo-dom-parser = { package = "turbo-dom", version = "0.3.1" }
 async-trait = "0.1"
 tokio = { version = "1", features = ["macros", "rt"] }
 

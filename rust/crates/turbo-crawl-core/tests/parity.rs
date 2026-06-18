@@ -25,7 +25,12 @@ const RESOLVE: &[(&str, &str)] = &[
     ("https://x.test/", "https://y.test/z"),
     ("https://x.test/", ""),
 ];
-const HTTP: &[&str] = &["http://x.test", "https://x.test", "mailto:a@b.test", "not a url"];
+const HTTP: &[&str] = &[
+    "http://x.test",
+    "https://x.test",
+    "mailto:a@b.test",
+    "not a url",
+];
 const ROBOTS_TXT: &str = "User-agent: *\nDisallow: /private\nAllow: /private/ok\nCrawl-delay: 3\n";
 const ROBOT_PATHS: &[&str] = &["/private/x", "/private/ok/y", "/public", "/private"];
 
@@ -60,37 +65,63 @@ async fn rust_matches_js_golden() {
 
     // --- url ---
     let canon: Vec<Option<String>> = CANON.iter().map(|u| canonicalize(u)).collect();
-    assert_eq!(canon, arr_str(&g["url"]["canonicalize"]), "canonicalize parity");
+    assert_eq!(
+        canon,
+        arr_str(&g["url"]["canonicalize"]),
+        "canonicalize parity"
+    );
 
     let res: Vec<Option<String>> = RESOLVE.iter().map(|(b, h)| resolve(b, h)).collect();
     assert_eq!(res, arr_str(&g["url"]["resolve"]), "resolve parity");
 
     let http: Vec<bool> = HTTP.iter().map(|u| is_http_url(u)).collect();
-    let want_http: Vec<bool> =
-        g["url"]["isHttpUrl"].as_array().unwrap().iter().map(|x| x.as_bool().unwrap()).collect();
+    let want_http: Vec<bool> = g["url"]["isHttpUrl"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_bool().unwrap())
+        .collect();
     assert_eq!(http, want_http, "isHttpUrl parity");
 
     // --- robots ---
     let mut rc = RobotsCache::new(StubRobots);
     let mut allowed = Vec::new();
     for p in ROBOT_PATHS {
-        allowed.push(rc.allowed(&format!("https://x.test{p}"), "turbo-crawl", 0).await);
+        allowed.push(
+            rc.allowed(&format!("https://x.test{p}"), "turbo-crawl", 0)
+                .await,
+        );
     }
-    let want_allowed: Vec<bool> =
-        g["robots"]["allowed"].as_array().unwrap().iter().map(|x| x.as_bool().unwrap()).collect();
+    let want_allowed: Vec<bool> = g["robots"]["allowed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_bool().unwrap())
+        .collect();
     assert_eq!(allowed, want_allowed, "robots allow parity");
 
     let cd = rc.crawl_delay("https://x.test", "turbo-crawl", 0).await;
-    assert_eq!(cd, Some(g["robots"]["crawlDelay"].as_f64().unwrap()), "crawl-delay parity");
+    assert_eq!(
+        cd,
+        Some(g["robots"]["crawlDelay"].as_f64().unwrap()),
+        "crawl-delay parity"
+    );
 
     // --- cookies ---
     let mut jar = CookieJar::new();
     jar.set_from_response(
         "https://x.test/app",
-        &["a=1; Path=/".to_string(), "b=2; Path=/app; Secure".to_string()],
+        &[
+            "a=1; Path=/".to_string(),
+            "b=2; Path=/app; Secure".to_string(),
+        ],
         0.0,
     );
-    assert_eq!(jar.cookie_header("https://x.test/", 0.0), g["cookies"]["root"], "cookie root parity");
+    assert_eq!(
+        jar.cookie_header("https://x.test/", 0.0),
+        g["cookies"]["root"],
+        "cookie root parity"
+    );
     assert_eq!(
         jar.cookie_header("https://x.test/app/x", 0.0),
         g["cookies"]["appHttps"],
