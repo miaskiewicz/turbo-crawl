@@ -10,7 +10,7 @@ const DEFAULT_MIN_SCRIPTS: usize = 1;
 
 const MOUNTS: &[&str] = &["#root", "#app", "#__next", "[data-reactroot]"];
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Detect {
     pub js_required: bool,
     pub text_length: usize,

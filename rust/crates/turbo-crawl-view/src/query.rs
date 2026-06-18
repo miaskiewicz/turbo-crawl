@@ -17,7 +17,7 @@ pub enum QueryType {
 
 /// One match. `node` is `None` for an XPath trailing-`@attr` value result, where
 /// `value` carries the attribute string and `text` mirrors it.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, serde::Serialize)]
 pub struct Match {
     pub node: Option<u32>,
     pub html: Option<String>,

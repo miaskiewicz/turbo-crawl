@@ -16,7 +16,7 @@ const GLOBAL_KEYS: &[&str] = &[
 ];
 
 /// Mined hydration state. Maps are sorted (BTreeMap) for stable output.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq, serde::Serialize)]
 pub struct Hydration {
     pub next: Option<Value>,
     pub json_ld: Vec<Value>,

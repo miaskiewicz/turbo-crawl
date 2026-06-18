@@ -18,7 +18,7 @@ const INTERACTIVE_SELECTOR: &str = "a[href],button,input,select,textarea,[role=b
 
 /// One `[i]`-addressable interactive element. `node` is the turbo-dom handle (the
 /// JS impl uses a `WeakRef`; here the handle is the stable identity).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Interactive {
     pub i: usize,
     pub tag: String,
