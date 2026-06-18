@@ -12,8 +12,8 @@ deno_core = "0.404"
 # the `v8` crate by its bare name) compiles. Pinned to the exact version deno_core
 # resolves so both share one v8 — the binding installs into deno_core's own context.
 v8 = "=149.4.0"
-turbo-dom-parser = { package = "turbo-dom", version = "0.3.1" }
-turbo-crawl-core = { path = "../turbo-crawl-core", version = "0.1.6" }
+turbo-dom-parser = { package = "turbo-dom", version = "0.3.2" }
+turbo-crawl-core = { path = "../turbo-crawl-core", version = "0.1.11" }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]

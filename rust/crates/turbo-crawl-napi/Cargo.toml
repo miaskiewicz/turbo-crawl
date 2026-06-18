@@ -12,12 +12,12 @@ crate-type = ["cdylib"]
 [dependencies]
 napi = { version = "2", default-features = false, features = ["napi6", "tokio_rt"] }
 napi-derive = "2"
-turbo-crawl-core = { path = "../turbo-crawl-core", version = "0.1.6" }
-turbo-crawl-page = { path = "../turbo-crawl-page", version = "0.1.6" }
-turbo-crawl-view = { path = "../turbo-crawl-view", version = "0.1.6" }
-turbo-crawl-render = { path = "../turbo-crawl-render", version = "0.1.6" }
-turbo-crawl-transform = { path = "../turbo-crawl-transform", version = "0.1.6" }
-turbo-dom-parser = { package = "turbo-dom", version = "0.3.1" }
+turbo-crawl-core = { path = "../turbo-crawl-core", version = "0.1.11" }
+turbo-crawl-page = { path = "../turbo-crawl-page", version = "0.1.11" }
+turbo-crawl-view = { path = "../turbo-crawl-view", version = "0.1.11" }
+turbo-crawl-render = { path = "../turbo-crawl-render", version = "0.1.11" }
+turbo-crawl-transform = { path = "../turbo-crawl-transform", version = "0.1.11" }
+turbo-dom-parser = { package = "turbo-dom", version = "0.3.2" }
 serde = "1"
 serde_json = "1"
 tokio = { version = "1", features = ["rt"] }

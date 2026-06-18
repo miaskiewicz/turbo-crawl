@@ -1,6 +1,6 @@
 {
   "name": "@miaskiewicz/turbo-crawl-native",
-  "version": "0.1.6",
+  "version": "0.1.11",
   "description": "Native (Rust) engine for turbo-crawl — napi-rs addon",
   "main": "index.js",
   "types": "index.d.ts",
