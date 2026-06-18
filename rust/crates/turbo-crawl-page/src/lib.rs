@@ -50,12 +50,23 @@ fn links_of(tree: &Tree, base: &str) -> Vec<String> {
     out
 }
 
-/// The fetch+parse navigator. Holds fetch defaults; one instance is shared
-/// across the crawl (`Arc<dyn Navigator>`).
-#[derive(Default)]
+/// The fetch+parse navigator. Holds fetch defaults + one shared HTTP client so
+/// connections (and TLS sessions) are reused across the whole crawl. One
+/// instance is shared via `Arc<dyn Navigator>`.
 pub struct TurboNavigator {
     pub max_bytes: Option<usize>,
     pub allow_non_html: bool,
+    client: reqwest::Client,
+}
+
+impl Default for TurboNavigator {
+    fn default() -> Self {
+        Self {
+            max_bytes: None,
+            allow_non_html: false,
+            client: turbo_crawl_core::net::build_client(),
+        }
+    }
 }
 
 #[async_trait]
@@ -64,6 +75,7 @@ impl Navigator for TurboNavigator {
         let opts = FetchOptions {
             max_bytes: self.max_bytes,
             allow_non_html: self.allow_non_html,
+            client: Some(&self.client),
             ..Default::default()
         };
         let res = fetch_html(url, opts).await.map_err(|e| e.to_string())?;

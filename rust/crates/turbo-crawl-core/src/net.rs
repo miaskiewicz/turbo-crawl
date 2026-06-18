@@ -66,6 +66,9 @@ pub struct FetchOptions<'a> {
     pub max_redirects: Option<usize>,
     pub jar: Option<&'a mut CookieJar>,
     pub cache: Option<&'a mut ResponseCache>,
+    /// Shared client for connection reuse (see [`build_client`]); built per-call
+    /// when `None`.
+    pub client: Option<&'a reqwest::Client>,
     pub now: f64,
 }
 
@@ -157,6 +160,18 @@ fn build_headers(url: &str, opts: &FetchOptions) -> BTreeMap<String, String> {
 
 fn client(policy: reqwest::redirect::Policy) -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder().redirect(policy).build()
+}
+
+/// A tuned, reusable client (HTTP/2 via ALPN, kept-warm pool, auto-redirect ≤20).
+/// Build one per crawl and pass it through `FetchOptions::client` so connections
+/// (and TLS sessions) are reused across hosts — the dispatcher (port of
+/// `src/dispatcher.mjs`). `Client` is cheap to clone (Arc-shared pool).
+pub fn build_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(20))
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .build()
+        .unwrap_or_default()
 }
 
 fn redirect_location(res: &reqwest::Response) -> Option<String> {
@@ -364,8 +379,11 @@ async fn follow_auto(
     url: &str,
     max_bytes: usize,
 ) -> Result<FetchResult, HttpError> {
-    let cl =
-        client(reqwest::redirect::Policy::limited(20)).map_err(|e| err(e, ErrorCode::Network))?;
+    // Reuse the caller's shared client (pooled connections) when provided.
+    let cl = match opts.client {
+        Some(c) => c.clone(),
+        None => client(reqwest::redirect::Policy::limited(20)).map_err(|e| err(e, ErrorCode::Network))?,
+    };
     let method = opts.method.clone().unwrap_or_else(|| "GET".to_string());
     let headers = build_headers(url, opts);
     let res = send(&cl, &method, url, &headers, &opts.body.clone()).await?;
