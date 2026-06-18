@@ -12,3 +12,4 @@ turbo-crawl-core = { path = "../turbo-crawl-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 regex = "1"
+url = "2"
