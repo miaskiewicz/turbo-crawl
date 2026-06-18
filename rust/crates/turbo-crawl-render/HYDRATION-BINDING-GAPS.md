@@ -14,27 +14,29 @@ property/method a live React/PropelAuth bundle reads during hydration; an `undef
 read becomes a `TypeError` (`X.classList`/`X.toLowerCase` of undefined) that aborts the
 mount.
 
-## STATUS (turbo-test @ 7f63ac1)
+## STATUS (turbo-test @ 3711533)
 
 ✅ **Fixed in the binding** (re-vendored): form-control reflection (`value`/`checked`/
 `valueAsNumber`/`select.value`/`selectedIndex`/`option.value`), `getClientRects`,
 `document.readyState`/`visibilityState`/`hidden`/`elementFromPoint`/`elementsFromPoint`,
-CharacterData methods, Selection/Range, contentEditable.
+CharacterData, Selection/Range, contentEditable, `link.rel`/`media`/`as`, `script.type`,
+`Element.localName`.
 
-🔴 **Still open** (found by driving payroll `/login` to React commit):
+🔴 **Still open** (found by driving payroll `/login` deeper — React now reaches the
+**commit / layout-effects** phase, much further than before):
 
-- **`HTMLLinkElement.rel`** (+ likely `.media`/`.href`/`.as`/`.type`) — IDL property
-  doesn't reflect the `rel` attribute (returns `undefined`). React's
-  `clearContainerSparingly` (run when it clears the hydration container before commit)
-  does `if ("stylesheet" === node.rel.toLowerCase()) continue;` over the container's
-  `<link>` children → `undefined.toLowerCase()` aborts the **app** mount. **This is the
-  current blocker** for the login form rendering. Reflect `rel` (and the sibling link
-  props) like `value`/`checked` already are.
-- **`Element.localName`** (LOW) — returns `undefined`; should be the lowercase tag name.
+- **`Element.removeAttributeNode(attr)`** + **`setAttributeNode(attr)`** — missing.
+  React 18/19's `releaseSingletonInstance` (the `<html>`/`<head>`/`<body>` singleton
+  cleanup during commit) calls `instance.removeAttributeNode(...)` → crashes. **Current
+  blocker.** Needs the Attr-node methods (`getAttributeNode` already exists).
+- **`HTMLAnchorElement` URL decomposition**: `a.origin` / `a.pathname` / `a.host`
+  (+ likely `.protocol`/`.hostname`/`.port`/`.search`/`.hash`) return `undefined`.
+  Reflect them by parsing `href` (the same WHATWG-URL split — `a.href` already works).
 
-(turbo-crawl side, already handled in ENV_BOOTSTRAP: the Shadow-DOM fallback now sets
-`shadowRoot.host` back to the host — Next devtools does `var e = er.host; e.classList…`,
-which was crashing the whole render before the app could mount.)
+(turbo-crawl side, already in ENV_BOOTSTRAP: Shadow-DOM fallback sets `shadowRoot.host`
+back to the host — Next devtools' `var e = er.host; e.classList…` was crashing the whole
+render before the app could mount. With link.rel fixed, the prior `clearContainerSparingly`
+crash is gone.)
 
 ## HIGH — form-control reflection (breaks controlled inputs) — ✅ FIXED in 7f63ac1
 

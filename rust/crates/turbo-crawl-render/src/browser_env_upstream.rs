@@ -1212,6 +1212,16 @@ fn set_node_data(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, value: v8
     with_tree_mut(|t| t.set_text_content(h, &data));
 }
 
+// `Element.localName` — the lowercase local name (rtdom stores tags lowercased). Non-elements have
+// no local name (null). React/Next devtools read node.localName in places.
+fn get_local_name(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8::PropertyCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
+    let Some(h) = handle_of(scope, args.holder()) else { return };
+    match with_tree(|t| t.local_name(h).map(|s| s.to_string())).flatten() {
+        Some(ln) => rv.set(v8::String::new(scope, &ln).unwrap().into()),
+        None => rv.set(v8::null(scope).into()),
+    }
+}
+
 fn get_node_name(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8::PropertyCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
     let Some(h) = handle_of(scope, args.holder()) else { return };
     let (nt, tag) = with_tree(|t| (t.node_type(h), t.tag_name(h))).unwrap_or((1, None));
@@ -1556,6 +1566,7 @@ fn build_el_template<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::
     tmpl_accessor(scope, tmpl, "data", get_node_data, set_node_data);
     tmpl_accessor(scope, tmpl, "nodeValue", get_node_data, set_node_data);
     tmpl_getter(scope, tmpl, "nodeName", get_node_name);
+    tmpl_getter(scope, tmpl, "localName", get_local_name);
     tmpl_getter(scope, tmpl, "childNodes", get_child_nodes);
     tmpl_getter(scope, tmpl, "ownerDocument", get_owner_document);
     tmpl_getter(scope, tmpl, "outerHTML", get_outer_html);

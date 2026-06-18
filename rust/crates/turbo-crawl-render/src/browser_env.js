@@ -279,7 +279,13 @@
     // Reflected IDL attributes on every element: setting el.src / el.href (script/img/link/a — a DOM
     // property) must show as the content attribute so attribute selectors like script[src*="maps"]
     // and getAttribute('src') see it. (Image() defines its own src with onload; that shadows this.)
-    ['src','href'].forEach(function(a){ if (!Object.getOwnPropertyDescriptor(baseProto, a)) { try { Object.defineProperty(baseProto, a, { configurable: true, get: function(){ return this.getAttribute(a) || ''; }, set: function(v){ this.setAttribute(a, v == null ? '' : String(v)); } }); } catch(e){} } });
+    // Reflected string IDL attributes on every element. `rel` is load-bearing: React's
+    // clearContainerSparingly does `node.rel.toLowerCase()` over a container's <link> children during
+    // hydration — undefined there aborts the whole app mount. `as`/`media`/`type` ride the same
+    // pattern (<link rel=preload as=script media=…>, <script type=…>). For inputs `type` is shadowed
+    // per-instance by the text-defaulting control descriptor (applyControlProto), so this is the
+    // fallback for non-control elements. (Image() defines its own src with onload; that shadows.)
+    ['src','href','rel','as','media','type'].forEach(function(a){ if (!Object.getOwnPropertyDescriptor(baseProto, a)) { try { Object.defineProperty(baseProto, a, { configurable: true, get: function(){ return this.getAttribute(a) || ''; }, set: function(v){ this.setAttribute(a, v == null ? '' : String(v)); } }); } catch(e){} } });
     // CharacterData mutation methods (insertData/deleteData/appendData/replaceData/substringData/
     // splitText) are now native rtdom Tree ops bound on every node — see browser_env.rs.
     // input.valueAsNumber — the numeric view of `value`, NaN when non-numeric/empty. MUI Slider's
