@@ -4,6 +4,7 @@
 //! round-trip. The pure helpers below are unit-tested offline; `fetch_html`
 //! itself is the live-IO seam (covered by the integration suite / harness).
 
+use crate::cache::ResponseCache;
 use crate::cookies::CookieJar;
 use bytes::BytesMut;
 use futures_util::StreamExt;
@@ -64,6 +65,7 @@ pub struct FetchOptions<'a> {
     pub allow_non_html: bool,
     pub max_redirects: Option<usize>,
     pub jar: Option<&'a mut CookieJar>,
+    pub cache: Option<&'a mut ResponseCache>,
     pub now: f64,
 }
 
@@ -143,6 +145,11 @@ fn build_headers(url: &str, opts: &FetchOptions) -> BTreeMap<String, String> {
         let cookie = jar.cookie_header(url, opts.now);
         if !cookie.is_empty() {
             h.insert("cookie".into(), cookie);
+        }
+    }
+    if let Some(cache) = &opts.cache {
+        for (k, v) in cache.validators(url) {
+            h.insert(k, v);
         }
     }
     h
@@ -259,23 +266,44 @@ fn gate_html_type(opts: &FetchOptions, res: &reqwest::Response) -> Result<(), Ht
 // Turn a settled response into the FetchResult: gate content-type, then read +
 // charset-decode the body under the byte cap.
 async fn finish(
-    opts: &FetchOptions<'_>,
+    opts: &mut FetchOptions<'_>,
     res: reqwest::Response,
     final_url: String,
     redirected: bool,
     max_bytes: usize,
 ) -> Result<FetchResult, HttpError> {
-    gate_html_type(opts, &res)?;
     let status = res.status().as_u16();
+    // 304 Not Modified → reuse the cached body (server sent none).
+    if status == 304 {
+        if let Some(cache) = &opts.cache {
+            return Ok(FetchResult {
+                html: cache.body(&final_url),
+                final_url,
+                status,
+                redirected,
+            });
+        }
+    }
+    gate_html_type(opts, &res)?;
+    let etag = opt_header(&res, "etag");
+    let last_modified = opt_header(&res, "last-modified");
     let ct = header_value(&res, "content-type");
     let bytes = read_capped(res, max_bytes).await?;
     let charset = detect_charset(&ct, &bytes[..bytes.len().min(1024)]);
+    let html = decode(&bytes, &charset);
+    if let Some(cache) = opts.cache.as_mut() {
+        cache.store(&final_url, etag, last_modified, &html);
+    }
     Ok(FetchResult {
-        html: decode(&bytes, &charset),
+        html,
         final_url,
         status,
         redirected,
     })
+}
+
+fn opt_header(res: &reqwest::Response, name: &str) -> Option<String> {
+    res.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_string)
 }
 
 // State threaded through the manual-follow loop.
@@ -662,6 +690,60 @@ mod io_tests {
         .unwrap();
         assert_eq!(r.status, 302); // no Location → treated as the final response
         assert!(r.html.contains("noloc"));
+    }
+
+    #[tokio::test]
+    async fn conditional_request_304_reuses_cached_body() {
+        // Server: 200 + ETag on a plain GET; 304 (no body) when If-None-Match is sent.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_lowercase();
+                let resp = if req.contains("if-none-match") {
+                    "HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n".to_string()
+                } else {
+                    http(
+                        "200 OK",
+                        &[("Content-Type", "text/html"), ("ETag", "\"v1\"")],
+                        b"<html>fresh</html>",
+                    )
+                    .iter()
+                    .map(|&b| b as char)
+                    .collect()
+                };
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        let u = url(port, "/");
+        let mut cache = ResponseCache::new();
+
+        let r1 = fetch_html(
+            &u,
+            FetchOptions {
+                cache: Some(&mut cache),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(r1.status, 200);
+        assert!(r1.html.contains("fresh"));
+
+        let r2 = fetch_html(
+            &u,
+            FetchOptions {
+                cache: Some(&mut cache),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(r2.status, 304); // revalidated
+        assert!(r2.html.contains("fresh")); // body served from cache
     }
 
     #[tokio::test]
