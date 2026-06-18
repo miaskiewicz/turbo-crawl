@@ -17,7 +17,7 @@ path = "src/main.rs"
 [dependencies]
 turbo-crawl-core = { path = "../turbo-crawl-core" }
 turbo-crawl-view = { path = "../turbo-crawl-view" }
-turbo-dom-parser = { path = "/Users/grzegorzmiaskiewicz/github-flux/turbo-dom", default-features = false, features = ["rust-runtime"] }
+turbo-dom-parser = { package = "turbo-dom", version = "0.3.0" }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt", "io-std", "io-util", "net", "time"] }
 
