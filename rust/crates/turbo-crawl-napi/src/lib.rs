@@ -388,33 +388,56 @@ pub fn click_node(html: String, node: u32, base_url: String) -> String {
 
 // --- async: fetch + crawl ---------------------------------------------------
 
-async fn do_fetch(url: &str, method: Option<String>, body: Option<String>) -> Result<String> {
+async fn do_fetch(
+    url: &str,
+    method: Option<String>,
+    body: Option<String>,
+    cookies: Option<String>,
+) -> Result<String> {
+    let mut jar = cookies
+        .as_deref()
+        .map(turbo_crawl_core::cookies::CookieJar::from_storage_state);
     let opts = FetchOptions {
         method,
         body,
         allow_non_html: true,
+        jar: jar.as_mut(),
         ..Default::default()
     };
     let res = net_fetch(url, opts).await.map_err(|e| Error::from_reason(e.to_string()))?;
+    let cookie_state = jar.as_ref().map(|j| j.storage_state()).unwrap_or_else(|| "[]".to_string());
     Ok(json!({
         "html": res.html,
         "finalUrl": res.final_url,
         "status": res.status,
         "redirected": res.redirected,
+        "cookies": cookie_state,
     })
     .to_string())
 }
 
-/// Fetch a URL (GET); returns JSON `{ html, finalUrl, status, redirected }`.
+/// Fetch a URL (GET); returns JSON `{ html, finalUrl, status, redirected, cookies }`.
 #[napi]
 pub async fn fetch_html(url: String) -> Result<String> {
-    do_fetch(&url, None, None).await
+    do_fetch(&url, None, None, None).await
 }
 
 /// Fetch with an explicit method/body (e.g. a POST form submission).
 #[napi]
 pub async fn request(url: String, method: String, body: Option<String>) -> Result<String> {
-    do_fetch(&url, Some(method), body).await
+    do_fetch(&url, Some(method), body, None).await
+}
+
+/// Fetch carrying a `storageState` cookie string in, and the updated state out
+/// (Set-Cookie ingested) — cookie persistence across navigations.
+#[napi]
+pub async fn fetch_with_cookies(
+    url: String,
+    cookies: String,
+    method: Option<String>,
+    body: Option<String>,
+) -> Result<String> {
+    do_fetch(&url, method, body, Some(cookies)).await
 }
 
 fn record_json(r: &Record) -> Value {

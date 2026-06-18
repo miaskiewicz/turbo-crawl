@@ -191,6 +191,28 @@ test("mock SPA hydrates through the shim (G15)", async () => {
   await expect(page.locator("h1.title")).toHaveText("N7");
 });
 
+test("cookies persist across navigations (G10)", async () => {
+  // /login sets a session cookie; /me echoes the Cookie header it received.
+  const server = createServer((req, res) => {
+    if (req.url === "/login") {
+      res.writeHead(200, { "set-cookie": "sid=secret; Path=/", "content-type": "text/html" });
+      res.end("<title>in</title>");
+    } else {
+      const got = req.headers.cookie ?? "";
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end(`<body><p>cookie:${got}</p></body>`);
+    }
+  });
+  await new Promise((r) => server.listen(0, r));
+  const port = server.address().port;
+  const page = newPage();
+  await page.goto(`http://127.0.0.1:${port}/login`); // receives Set-Cookie
+  await page.goto(`http://127.0.0.1:${port}/me`); // must send it back
+  assert.match(await page.innerText(), /cookie:sid=secret/);
+  assert.equal(page.storageState().length, 1);
+  server.close();
+});
+
 test("goto over localhost via chromium.launch", async () => {
   const body = "<html><head><title>Live</title></head><body><p>hello</p></body></html>";
   const server = createServer((_req, res) => {

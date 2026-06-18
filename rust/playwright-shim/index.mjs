@@ -156,12 +156,22 @@ class Locator {
 class Page {
   _html = "";
   _url = "about:blank";
+  _cookies = "[]"; // storageState JSON, persisted across navigations
 
   async goto(url) {
-    const r = JSON.parse(await native.fetchHtml(url));
+    const r = JSON.parse(await native.fetchWithCookies(url, this._cookies, null, null));
     this._html = r.html;
     this._url = r.finalUrl;
+    this._cookies = r.cookies;
     return { status: () => r.status, url: () => r.finalUrl };
+  }
+
+  // Playwright-ish context storage state (cookie persistence).
+  storageState() {
+    return JSON.parse(this._cookies);
+  }
+  addCookies(cookies) {
+    this._cookies = JSON.stringify(cookies);
   }
 
   // Playwright `setContent` — also the offline test seam.
@@ -236,12 +246,13 @@ class Page {
   }
 
   async _submit(intent) {
-    const r =
-      intent.method === "GET"
-        ? JSON.parse(await native.fetchHtml(intent.url))
-        : JSON.parse(await native.request(intent.url, intent.method, intent.body ?? null));
+    const method = intent.method === "GET" ? null : intent.method;
+    const r = JSON.parse(
+      await native.fetchWithCookies(intent.url, this._cookies, method, intent.body ?? null),
+    );
     this._html = r.html;
     this._url = r.finalUrl;
+    this._cookies = r.cookies;
     return { status: () => r.status, url: () => r.finalUrl };
   }
 

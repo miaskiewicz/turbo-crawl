@@ -19,6 +19,14 @@ export function render(html: string, baseUrl: string, script: string): string;
 /** Fetch with an explicit method/body (POST form submit). */
 export function request(url: string, method: string, body?: string): Promise<string>;
 
+/** Fetch carrying storageState cookies in, updated state out (persistence). */
+export function fetchWithCookies(
+  url: string,
+  cookies: string,
+  method?: string,
+  body?: string,
+): Promise<string>;
+
 // Actions by selector — mutate the DOM and return the new HTML.
 export function fill(html: string, selector: string, value: string): string;
 export function setChecked(html: string, selector: string, on: boolean): string;

@@ -254,6 +254,67 @@ impl CookieJar {
     pub fn size(&self) -> usize {
         self.store.len()
     }
+
+    /// Serialize the jar to a `storageState` JSON string (cross-navigation /
+    /// `context.storageState`). Session cookies (Infinity expiry) → `null`.
+    pub fn storage_state(&self) -> String {
+        let recs: Vec<CookieRecord> = self.store.values().map(CookieRecord::from).collect();
+        serde_json::to_string(&recs).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// Rebuild a jar from a `storage_state` JSON string (best-effort; bad input → empty).
+    pub fn from_storage_state(json: &str) -> Self {
+        let recs: Vec<CookieRecord> = serde_json::from_str(json).unwrap_or_default();
+        let mut jar = CookieJar::new();
+        for r in recs {
+            let c: Cookie = r.into();
+            jar.store.insert(key(&c.domain, &c.path, &c.name), c);
+        }
+        jar
+    }
+}
+
+// Serializable record (Infinity expiry is not valid JSON → Option/None = session).
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct CookieRecord {
+    name: String,
+    value: String,
+    domain: String,
+    path: String,
+    secure: bool,
+    http_only: bool,
+    same_site: String,
+    expires_at: Option<f64>,
+}
+
+impl From<&Cookie> for CookieRecord {
+    fn from(c: &Cookie) -> Self {
+        CookieRecord {
+            name: c.name.clone(),
+            value: c.value.clone(),
+            domain: c.domain.clone(),
+            path: c.path.clone(),
+            secure: c.secure,
+            http_only: c.http_only,
+            same_site: c.same_site.clone(),
+            expires_at: c.expires_at.is_finite().then_some(c.expires_at),
+        }
+    }
+}
+
+impl From<CookieRecord> for Cookie {
+    fn from(r: CookieRecord) -> Self {
+        Cookie {
+            name: r.name,
+            value: r.value,
+            domain: r.domain,
+            path: r.path,
+            secure: r.secure,
+            http_only: r.http_only,
+            same_site: r.same_site,
+            expires_at: r.expires_at.unwrap_or(f64::INFINITY),
+        }
+    }
 }
 
 // Re-parse a Set-Cookie line, returning the cookie plus its raw lifetime
@@ -536,6 +597,24 @@ mod tests {
         j.set_from_response("https://x.test/foo", &["a=1; Path=/foo".to_string()], 0.0);
         // request path doesn't start with the cookie path → excluded (outer false)
         assert_eq!(j.cookie_header("https://x.test/bar", 0.0), "");
+    }
+
+    #[test]
+    fn storage_state_round_trip() {
+        let mut j = CookieJar::new();
+        j.set_from_response("https://x.test/app", &["sid=abc; Path=/; Secure".to_string()], 0.0);
+        j.add("k", "v", "x.test", "/", None); // session cookie (Infinity)
+        let state = j.storage_state();
+        let j2 = CookieJar::from_storage_state(&state);
+        assert_eq!(j2.size(), 2);
+        // secure cookie still secure-gated; session cookie still sent
+        assert_eq!(j2.cookie_header("https://x.test/app", 0.0), "sid=abc; k=v");
+        assert_eq!(j2.cookie_header("http://x.test/", 0.0), "k=v"); // sid is Secure
+    }
+
+    #[test]
+    fn from_bad_storage_state_is_empty() {
+        assert_eq!(CookieJar::from_storage_state("not json").size(), 0);
     }
 
     #[test]
