@@ -1,38 +1,33 @@
 #!/usr/bin/env bash
-# turbo-crawl pre-commit gate (pure ESM JS).
-#   JS : oxlint (lint) -> biome (format, auto-fix + re-stage) -> cc-check (cc<6) -> tsgo (typecheck)
-# Enable once with:  git config core.hooksPath .githooks  (or: npm install / npm run prepare)
+# turbo-crawl pre-commit gate. The engine is Rust (see rust/ — gated by `cargo test
+# / clippy / fmt`, run via `npm run check`). The only JS left is the thin launcher
+# (cli.js/index.js) + the dev harness, so this hook just lints/formats staged JS.
+# Enable once with:  git config core.hooksPath .githooks  (or: npm run prepare)
 set -uo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT" || exit 1
 
-CC_MAX="${CC_MAX:-5}"
 status=0
 fail() { echo "  ✖ $1"; status=1; }
 
-# --- collect staged files (added/copied/modified) ---
-# Vendored files are byte-for-byte upstream copies (e.g. the turbo-test DOM binding
+# Vendored files are byte-for-byte upstream copies (the turbo-test DOM binding
 # `browser_env.js`) — never lint/reformat them (re-vendoring overwrites them, and
 # oxlint/biome ignore configs don't apply to explicitly-passed paths, so filter here).
 VENDORED='(^|/)browser_env\.js$'
 staged="$(git diff --cached --name-only --diff-filter=ACM | grep -vE "$VENDORED" || true)"
 js_files="$(echo "$staged"  | grep -E '\.(mjs|js|cjs)$'             || true)"
 fmt_files="$(echo "$staged" | grep -E '\.(mjs|js|cjs|json|jsonc)$' || true)"
-cc_files="$(echo "$staged"  | grep -E '^(src|mcp|adapters)/.*\.mjs$' || true)"
-ts_files="$(echo "$staged"  | grep -E '\.(d\.ts|ts)$'               || true)"
 
 have() { command -v "$1" >/dev/null 2>&1; }
 runjs() { if have npx; then npx --no-install "$@"; else return 127; fi; }
 
 if [ -n "$js_files" ] || [ -n "$fmt_files" ]; then
   echo "• JS gates"
-
   # 1. oxlint
   if [ -n "$js_files" ]; then
     runjs oxlint $js_files || fail "oxlint reported problems"
   fi
-
   # 2. biome format (auto-fix, then re-stage)
   if [ -n "$fmt_files" ]; then
     if runjs biome format --write $fmt_files; then
@@ -40,18 +35,6 @@ if [ -n "$js_files" ] || [ -n "$fmt_files" ]; then
     else
       fail "biome formatting failed"
     fi
-  fi
-
-  # 3. cyclomatic complexity (cc < 6)
-  if [ -n "$cc_files" ]; then
-    echo "$cc_files" | node scripts/cc-check.cjs --max "$CC_MAX" || fail "complexity gate (cc < $((CC_MAX + 1)))"
-  fi
-fi
-
-# 4. typecheck the public type surface with tsgo (Go-native, fast) — falls back to tsc
-if [ -n "$ts_files" ] || [ -n "$js_files" ]; then
-  if ! runjs tsgo --noEmit -p tsconfig.json; then
-    runjs tsc --noEmit -p tsconfig.json || fail "TypeScript typecheck"
   fi
 fi
 

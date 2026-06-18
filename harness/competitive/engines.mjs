@@ -16,21 +16,6 @@ async function browserAvailable(launcher) {
   }
 }
 
-// turbo-crawl façade — optionally render JS via the fast/secure tier. Fetches
-// leniently (allowNonHtml) so a routine can read JSON/API responses like a browser.
-async function loadTurboCrawl(jsMode) {
-  const { chromium } = await import("../../playwright/index.mjs");
-  const { fetchHtml: rawFetch } = await import("../../src/net.mjs");
-  const lenient = (url, opts = {}) => rawFetch(url, { allowNonHtml: true, ...opts });
-  let fetchHtml = lenient;
-  if (jsMode) {
-    const { jsRenderer } = await import("../../src/index.mjs");
-    fetchHtml = jsRenderer({ mode: jsMode, fetchHtml: lenient }).fetchHtml;
-  }
-  // launch(opts) on the façade forwards opts to the Page (fetchHtml passthrough).
-  return { launch: (opts) => chromium.launch({ ...opts, fetchHtml }) };
-}
-
 async function loadReal(name) {
   const pw = await import("playwright");
   const launcher = pw[name];
@@ -53,24 +38,11 @@ async function loadPkgChromium(pkg) {
 }
 
 // Candidate engines, in report order. `headless` engines take launch opts.
-// turbo-crawl runs in three modes — no-JS (Lane A), fast JS (in-proc vm), and
-// secure JS (isolated-vm) — each a separate engine to compare against Chromium.
+// turbo-crawl is the native Rust engine (napi addon): no-js (Lane A) and js (the
+// deno_core V8 render tier). The rest are real browsers, compared against Chromium.
 const CANDIDATES = [
-  { name: "turbo-crawl (no-js)", oracle: false, load: () => loadTurboCrawl(null), headless: false },
-  {
-    name: "turbo-crawl (js-fast)",
-    oracle: false,
-    load: () => loadTurboCrawl("fast"),
-    headless: false,
-  },
-  {
-    name: "turbo-crawl (js-secure)",
-    oracle: false,
-    load: () => loadTurboCrawl("secure"),
-    headless: false,
-  },
-  { name: "turbo-rust (no-js)", oracle: false, load: () => loadTurboRust(null), headless: false },
-  { name: "turbo-rust (js)", oracle: false, load: () => loadTurboRust("js"), headless: false },
+  { name: "turbo-crawl (no-js)", oracle: false, load: () => loadTurboRust(null), headless: false },
+  { name: "turbo-crawl (js)", oracle: false, load: () => loadTurboRust("js"), headless: false },
   { name: "chromium", oracle: true, load: () => loadReal("chromium"), headless: true },
   { name: "firefox", oracle: false, load: () => loadReal("firefox"), headless: true },
   { name: "webkit", oracle: false, load: () => loadReal("webkit"), headless: true },

@@ -118,52 +118,7 @@ function cheerioLinks($, baseUrl, host, allow) {
 
 const sleep = (n) => new Promise((r) => setTimeout(r, n));
 
-// ── turbo-crawl ────────────────────────────────────────────────────────────
-// One implementation for all three turbo-crawl flavors; `render` picks the JS
-// tier (null = no-js Lane A). Uses the real Crawler with a schema so item
-// counting goes through turbo-crawl's own extraction.
-async function turboCrawl(target, opts, render) {
-  const { Crawler, jsRenderer } = await import("../../src/index.mjs");
-  const schema = {
-    items: { selector: target.itemSelector, attr: target.itemAttr, list: true },
-  };
-  let renderer = null;
-  const crawlerOpts = {
-    start: target.start,
-    maxPages: opts.pages,
-    maxDepth: Number.POSITIVE_INFINITY,
-    concurrency: CONCURRENCY,
-    perHostConcurrency: CONCURRENCY,
-    politenessMs: POLITENESS_MS,
-    sameHostOnly: true,
-    schema,
-  };
-  if (target.allow) crawlerOpts.allow = target.allow;
-  if (render) {
-    renderer = jsRenderer({ mode: render });
-    // Execute page JS for every fetch so client-rendered content is present
-    // before extraction (the no-js gate would otherwise skip a page that has a
-    // server-rendered shell). followRequests:false keeps us off XHR side-quests.
-    crawlerOpts.fetchHtml = renderer.fetchHtml;
-    crawlerOpts.followRequests = false;
-  }
-
-  let pages = 0;
-  let items = 0;
-  const t0 = process.hrtime.bigint();
-  try {
-    for await (const rec of new Crawler(crawlerOpts)) {
-      pages++;
-      const got = rec.extracted?.items;
-      if (Array.isArray(got)) items += got.length;
-    }
-  } finally {
-    await renderer?.close();
-  }
-  return { pages, items, ms: ms(t0) };
-}
-
-// ── turbo-rust: the whole crawl runs in Rust via the napi addon ──────────────
+// ── turbo-crawl: the whole crawl runs in Rust via the napi addon ─────────────
 // `native.crawl` does the BFS, fetch (pooled client), parse, same-host gate, and
 // per-page item count (itemSelector) entirely in Rust — only the JSON result
 // crosses to Node. Same page cap / concurrency / politeness as every other engine.
@@ -534,13 +489,6 @@ export const CRAWLERS = [
     name: "turbo-crawl (no-js)",
     set: "nojs",
     turbo: true,
-    available: () => Promise.resolve(true),
-    crawl: (target, opts) => turboCrawl(target, opts, null),
-  },
-  {
-    name: "turbo-rust (no-js)",
-    set: "nojs",
-    turbo: true,
     available: () => Promise.resolve(loadTurboRustNative() != null),
     crawl: turboRustCrawl,
   },
@@ -590,22 +538,7 @@ export const CRAWLERS = [
 
   // ── Set B: JS-executing ─────────────────────────────────────────────────────
   {
-    name: "turbo-crawl (js-fast)",
-    set: "js",
-    turbo: true,
-    available: () => canImport("esbuild"),
-    crawl: (target, opts) => turboCrawl(target, opts, "fast"),
-  },
-  {
-    name: "turbo-crawl (js-secure)",
-    set: "js",
-    turbo: true,
-    // secure tier needs isolated-vm; skip cleanly if absent.
-    available: () => canImport("isolated-vm"),
-    crawl: (target, opts) => turboCrawl(target, opts, "secure"),
-  },
-  {
-    name: "turbo-rust (js)",
+    name: "turbo-crawl (js)",
     set: "js",
     turbo: true,
     available: () => Promise.resolve(loadTurboRustNative() != null),

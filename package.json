@@ -1,67 +1,26 @@
 {
   "name": "@miaskiewicz/turbo-crawl",
   "version": "0.2.0",
-  "description": "Native-speed, browserless web crawler for AI agents — fetch + parse + extract on turbo-dom, no headless browser. Indexed interactive elements, link graph, accessibility tree, markdown, structured extraction, and an MCP interface.",
+  "description": "Native-speed, browserless web crawler + MCP server for AI agents. A standalone Rust engine (turbo-dom + a V8 JS-render tier) — fetch + parse + extract + run page JS with no headless browser. This npm package is a thin launcher that spawns the native binary.",
   "license": "MIT",
-  "type": "module",
-  "main": "src/index.mjs",
-  "types": "index.d.ts",
+  "main": "index.js",
   "exports": {
-    ".": {
-      "types": "./index.d.ts",
-      "import": "./src/index.mjs"
-    },
-    "./mcp": {
-      "import": "./mcp/server.mjs"
-    },
-    "./playwright": {
-      "import": "./playwright/index.mjs"
-    },
-    "./playwright/expect": {
-      "import": "./playwright/expect.mjs",
-      "require": "./playwright/expect.mjs"
-    },
-    "./playwright/test": {
-      "import": "./playwright/test.mjs"
-    },
-    "./playwright/register": {
-      "import": "./playwright/register.mjs"
-    },
-    "./package.json": "./package.json",
-    "./render": {
-      "import": "./src/render/index.mjs"
-    }
+    ".": "./index.js",
+    "./package.json": "./package.json"
   },
   "bin": {
-    "turbo-crawl-mcp": "mcp/server.mjs"
+    "turbo-crawl-mcp": "cli.js"
   },
-  "files": [
-    "src/**/*.mjs",
-    "mcp/**/*.mjs",
-    "playwright/**/*.mjs",
-    "index.d.ts",
-    "LICENSE",
-    "README.md",
-    "CHANGELOG.md"
-  ],
+  "files": ["bin", "cli.js", "index.js", "LICENSE", "README.md", "CHANGELOG.md"],
   "scripts": {
-    "test": "node --test 'test/*.test.mjs'",
-    "test:cov": "node --test --experimental-test-coverage --test-coverage-include='src/**' 'test/*.test.mjs'",
     "lint": "oxlint",
-    "lint:fix": "oxlint --fix",
     "format": "biome format --write .",
     "format:check": "biome format .",
-    "cc": "git ls-files src mcp playwright | grep -E '\\.mjs$' | node scripts/cc-check.cjs --max 5",
-    "typecheck": "tsgo --noEmit -p tsconfig.json",
-    "check": "npm run lint && npm run format:check && npm run cc && npm run typecheck && npm test",
-    "bench": "node bench/extract.mjs && node bench/crawl.mjs",
-    "bench:extract": "node bench/extract.mjs",
-    "bench:crawl": "node bench/crawl.mjs",
+    "check": "npm run lint && npm run format:check && cd rust && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check",
     "prepare": "git config core.hooksPath .githooks || true",
     "harness": "node harness/competitive/run.mjs",
     "harness:js": "node harness/competitive/run.mjs js-quotes",
-    "prepublishOnly": "npm run check",
-    "hotpath": "node harness/hotpath/run.mjs",
+    "hotpath": "node harness/hotpath/rust-hotpath.mjs",
     "crawl-bench": "node harness/crawlers/run.mjs",
     "crawl-bench:js": "node harness/crawlers/run.mjs --set=js"
   },
@@ -79,6 +38,7 @@
     "headless",
     "browserless",
     "extraction",
+    "rust",
     "fast"
   ],
   "repository": {
@@ -93,20 +53,9 @@
   "engines": {
     "node": ">=20"
   },
-  "dependencies": {
-    "@miaskiewicz/turbo-dom": "^0.2.5",
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "esbuild": "^0.25.0 || ^0.28.0",
-    "undici": "^8.5.0"
-  },
   "devDependencies": {
     "@biomejs/biome": "^1.9.0",
-    "@typescript/native-preview": "^7.0.0-dev.20260616.1",
     "oxlint": "^0.11.0",
-    "playwright": "^1.61.0",
-    "typescript": "^5.9.3"
-  },
-  "optionalDependencies": {
-    "isolated-vm": "^6.0.0"
+    "playwright": "^1.61.0"
   }
 }

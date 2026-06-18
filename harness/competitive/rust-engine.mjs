@@ -10,9 +10,38 @@
 // makes the engine skip cleanly instead of crashing the whole harness.
 
 import { createRequire } from "node:module";
-import { extractScriptsFromHtml } from "../../src/render/scripts.mjs";
 
 const require = createRequire(import.meta.url);
+
+// Self-contained classic-<script> scanner (tolerant regex; the render tier
+// re-parses properly). Returns inline code or an absolute external `src`.
+const SCRIPT_RE = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi;
+const CLASSIC_TYPES = new Set(["", "text/javascript", "application/javascript", "module"]);
+function attrValue(attrs, name) {
+  const m = new RegExp(`\\b${name}\\s*=\\s*("([^"]*)"|'([^']*)'|([^\\s"'>]+))`, "i").exec(attrs);
+  return m ? (m[2] ?? m[3] ?? m[4]) : null;
+}
+function extractScriptsFromHtml(html, baseUrl) {
+  const out = [];
+  for (const m of html.matchAll(SCRIPT_RE)) {
+    const type = (attrValue(m[1], "type") ?? "").toLowerCase();
+    if (!CLASSIC_TYPES.has(type)) continue;
+    const module = type === "module";
+    const src = attrValue(m[1], "src");
+    if (src) {
+      let url = src;
+      try {
+        url = new URL(src, baseUrl).href;
+      } catch {
+        /* keep raw */
+      }
+      out.push({ url, module });
+    } else {
+      out.push({ code: m[2], module });
+    }
+  }
+  return out;
+}
 
 // Concatenate the page's executable classic scripts (inline code + fetched
 // external `src`) in source order — mirrors `src/render` so the deno_core tier
