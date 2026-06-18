@@ -188,6 +188,106 @@ class __NoopObserver {
 globalThis.MutationObserver = __NoopObserver;
 globalThis.IntersectionObserver = __NoopObserver;
 globalThis.ResizeObserver = __NoopObserver;
+// MessageChannel — React 18's scheduler drains its work queue by posting to a
+// MessagePort and running the handler on the other port's onmessage. Route the
+// message through the timer queue (setTimeout 0) so the hydration pump drains it;
+// without this, React's scheduled mount/hydration never runs.
+globalThis.MessageChannel = class MessageChannel {
+  constructor() {
+    const p1 = { onmessage: null, close() {}, start() {}, addEventListener() {}, removeEventListener() {} };
+    const p2 = { onmessage: null, close() {}, start() {}, addEventListener() {}, removeEventListener() {} };
+    p1.postMessage = (data) => globalThis.setTimeout(() => { if (typeof p2.onmessage === "function") p2.onmessage({ data, target: p2 }); }, 0);
+    p2.postMessage = (data) => globalThis.setTimeout(() => { if (typeof p1.onmessage === "function") p1.onmessage({ data, target: p1 }); }, 0);
+    this.port1 = p1;
+    this.port2 = p2;
+  }
+};
+globalThis.MessagePort = function MessagePort() {};
+// performance — React/Next read performance.now() for timing/scheduling.
+globalThis.performance = globalThis.performance || {
+  now: () => Date.now(),
+  timeOrigin: 0,
+  mark() {}, measure() {}, clearMarks() {}, clearMeasures() {},
+  getEntries: () => [], getEntriesByName: () => [], getEntriesByType: () => [],
+};
+// Encoding/crypto/base64 web globals deno_core doesn't ship but app bundles use.
+if (typeof globalThis.TextEncoder === "undefined") {
+  globalThis.TextEncoder = class TextEncoder {
+    get encoding() { return "utf-8"; }
+    encode(str = "") {
+      str = String(str);
+      const b = [];
+      for (let i = 0; i < str.length; i++) {
+        let c = str.charCodeAt(i);
+        if (c < 0x80) b.push(c);
+        else if (c < 0x800) b.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
+        else if (c >= 0xd800 && c <= 0xdbff) {
+          const c2 = str.charCodeAt(++i);
+          const cp = 0x10000 + ((c & 0x3ff) << 10) + (c2 & 0x3ff);
+          b.push(0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3f), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+        } else b.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
+      }
+      return new Uint8Array(b);
+    }
+    encodeInto(str, u8) {
+      const e = this.encode(str);
+      u8.set(e.subarray(0, u8.length));
+      return { read: str.length, written: Math.min(e.length, u8.length) };
+    }
+  };
+}
+if (typeof globalThis.TextDecoder === "undefined") {
+  globalThis.TextDecoder = class TextDecoder {
+    constructor(enc) { this.encoding = enc || "utf-8"; }
+    decode(buf) {
+      if (!buf) return "";
+      const b = buf instanceof Uint8Array ? buf : new Uint8Array(buf.buffer || buf);
+      let s = "", i = 0;
+      while (i < b.length) {
+        const c = b[i++];
+        if (c < 0x80) s += String.fromCharCode(c);
+        else if (c < 0xe0) s += String.fromCharCode(((c & 0x1f) << 6) | (b[i++] & 0x3f));
+        else if (c < 0xf0) s += String.fromCharCode(((c & 0xf) << 12) | ((b[i++] & 0x3f) << 6) | (b[i++] & 0x3f));
+        else {
+          const cp = ((c & 0x7) << 18) | ((b[i++] & 0x3f) << 12) | ((b[i++] & 0x3f) << 6) | (b[i++] & 0x3f);
+          const cc = cp - 0x10000;
+          s += String.fromCharCode(0xd800 + (cc >> 10), 0xdc00 + (cc & 0x3ff));
+        }
+      }
+      return s;
+    }
+  };
+}
+if (typeof globalThis.crypto === "undefined" || !globalThis.crypto.getRandomValues) {
+  const __rb = (n) => { let x = 0; for (let i = 0; i < n.length; i++) { x = (x * 1103515245 + 12345) & 0x7fffffff; n[i] = (Date.now() ^ x ^ (i * 2654435761)) & 0xff; } return n; };
+  globalThis.crypto = globalThis.crypto || {};
+  globalThis.crypto.getRandomValues = (arr) => __rb(arr);
+  globalThis.crypto.randomUUID = () => {
+    const h = [];
+    for (let i = 0; i < 16; i++) h.push((((Date.now() + i) * 9301 + 49297) % 256).toString(16).padStart(2, "0"));
+    return `${h.slice(0,4).join("")}-${h.slice(4,6).join("")}-4${h[6].slice(1)}-${h[8]}${h[9]}-${h.slice(10,16).join("")}`;
+  };
+}
+if (typeof globalThis.btoa === "undefined") {
+  const __B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  globalThis.btoa = (s) => {
+    s = String(s); let out = "";
+    for (let i = 0; i < s.length; i += 3) {
+      const a = s.charCodeAt(i), b = s.charCodeAt(i + 1), c = s.charCodeAt(i + 2);
+      const n = (a << 16) | ((isNaN(b) ? 0 : b) << 8) | (isNaN(c) ? 0 : c);
+      out += __B64[(n >> 18) & 63] + __B64[(n >> 12) & 63] + (isNaN(b) ? "=" : __B64[(n >> 6) & 63]) + (isNaN(c) ? "=" : __B64[n & 63]);
+    }
+    return out;
+  };
+  globalThis.atob = (s) => {
+    s = String(s).replace(/=+$/, ""); let out = "";
+    for (let i = 0, bits = 0, val = 0; i < s.length; i++) {
+      val = (val << 6) | __B64.indexOf(s[i]); bits += 6;
+      if (bits >= 8) { bits -= 8; out += String.fromCharCode((val >> bits) & 0xff); }
+    }
+    return out;
+  };
+}
 // History API (single virtual entry; updates location.href).
 globalThis.history = {
   state: null,

@@ -718,6 +718,47 @@ fn set_class_name(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, value: v
     with_tree_mut(|t| t.set_attribute(h, "class", &v));
 }
 
+// `element.contentEditable` IDL property — reflects the `contenteditable` content attribute as the
+// enumerated string 'true' | 'false' | 'plaintext-only' | 'inherit'. Lexical reads this property
+// (NOT the attribute) to decide the root is editable and to wire up its beforeinput pipeline; with
+// it missing (undefined) Lexical treats the editor as non-editable and never emits onChange.
+fn get_content_editable(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8::PropertyCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
+    let Some(h) = handle_of(scope, args.holder()) else { return };
+    let attr = with_tree(|t| attr_get(t, h, "contenteditable")).flatten();
+    let out = match attr.as_deref() {
+        Some("") | Some("true") => "true",
+        Some("false") => "false",
+        Some("plaintext-only") => "plaintext-only",
+        _ => "inherit",
+    };
+    rv.set(v8::String::new(scope, out).unwrap().into());
+}
+
+fn set_content_editable(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, value: v8::Local<v8::Value>, args: v8::PropertyCallbackArguments, _rv: v8::ReturnValue<()>) {
+    let Some(h) = handle_of(scope, args.holder()) else { return };
+    let v = value.to_rust_string_lossy(scope);
+    with_tree_mut(|t| t.set_attribute(h, "contenteditable", &v));
+}
+
+// `element.isContentEditable` — true when the element itself is editable (contenteditable=""|"true")
+// or it inherits editability from an ancestor.
+fn get_is_content_editable(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8::PropertyCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
+    let Some(mut h) = handle_of(scope, args.holder()) else { return };
+    let mut editable = false;
+    loop {
+        match with_tree(|t| attr_get(t, h, "contenteditable")).flatten().as_deref() {
+            Some("") | Some("true") | Some("plaintext-only") => { editable = true; break; }
+            Some("false") => { editable = false; break; }
+            _ => {}
+        }
+        match with_tree(|t| NodeRef::new(t, h).parent().map(|p| p.handle()).filter(|&ph| t.node_type(ph) == 1)).flatten() {
+            Some(p) => h = p,
+            None => break,
+        }
+    }
+    rv.set(v8::Boolean::new(scope, editable).into());
+}
+
 fn get_parent_node(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8::PropertyCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
     let Some(h) = handle_of(scope, args.holder()) else { return };
     let found = with_tree(|t| NodeRef::new(t, h).parent().map(|x| x.handle())).flatten();
@@ -1385,6 +1426,8 @@ fn build_el_template<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::
     tmpl_accessor(scope, tmpl, "textContent", get_text_content, set_text_content);
     tmpl_accessor(scope, tmpl, "id", get_id, set_id);
     tmpl_accessor(scope, tmpl, "className", get_class_name, set_class_name);
+    tmpl_accessor(scope, tmpl, "contentEditable", get_content_editable, set_content_editable);
+    tmpl_getter(scope, tmpl, "isContentEditable", get_is_content_editable);
 
     // Node-type constants on every node (`node.TEXT_NODE === 3`, …). dom-accessibility-api compares
     // `node.nodeType === node.TEXT_NODE`, so without these the accessible-name walk skips all text

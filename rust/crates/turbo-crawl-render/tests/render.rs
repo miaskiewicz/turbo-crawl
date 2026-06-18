@@ -159,6 +159,53 @@ fn document_current_script_is_present_for_webpack() {
     );
 }
 
+// Web globals deno_core lacks but app bundles use (TextEncoder/Decoder round-trip,
+// crypto.getRandomValues, btoa/atob). A bundle touching any of these mid-hydration
+// would otherwise crash with "X is not defined".
+#[test]
+fn encoding_crypto_base64_globals_present() {
+    let out = run_with_dom(
+        "<body></body>",
+        r#"
+        const enc = new TextEncoder().encode("héllo");
+        const back = new TextDecoder().decode(enc);
+        const rnd = new Uint8Array(4); crypto.getRandomValues(rnd);
+        JSON.stringify({ roundtrip: back, bytes: enc.length, uuid: typeof crypto.randomUUID(), b64: btoa("hi"), un: atob(btoa("hi")) });
+        "#,
+    )
+    .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["roundtrip"], "héllo", "{out}");
+    assert_eq!(v["bytes"], 6, "héllo is 6 UTF-8 bytes: {out}");
+    assert_eq!(v["b64"], "aGk=", "{out}");
+    assert_eq!(v["un"], "hi", "{out}");
+}
+
+// React 18's scheduler drains its work queue via a MessageChannel (port2.postMessage
+// → port1.onmessage). Without it, scheduled work (the hydration/mount the entry
+// queues) never runs and nothing paints. MessageChannel must route a message to the
+// other port's onmessage, drained by the timer/hydration pump.
+#[test]
+fn message_channel_drives_scheduled_work() {
+    let html = render_html(
+        "<body><div id='root'></div></body>",
+        r#"
+        const ch = new MessageChannel();
+        ch.port1.onmessage = () => {
+          const i = document.createElement('input');
+          i.setAttribute('data-testid', 'scheduled');
+          document.getElementById('root').appendChild(i);
+        };
+        ch.port2.postMessage(null); // schedule work — must reach port1.onmessage
+        "#,
+    )
+    .unwrap();
+    assert!(
+        html.contains(r#"data-testid="scheduled""#),
+        "MessageChannel must deliver to the other port's onmessage: {html}"
+    );
+}
+
 // --- hydration (the headline tier-3 capability) -----------------------------
 #[test]
 fn page_script_hydrates_then_serializes() {

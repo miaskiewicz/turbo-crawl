@@ -98,7 +98,18 @@
     var st = el && el.style;
     if (st) { for (var k in st) { if (k.indexOf('__') !== 0 && Object.prototype.hasOwnProperty.call(st, k) && typeof st[k] !== 'function') setProp(k, st[k]); } }
     if (decl.display == null) decl.display = '';
-    if (decl.visibility == null) decl.visibility = '';
+    // `visibility` is an INHERITED property: a child with no explicit visibility takes the parent's
+    // computed value. testing-library / dom-accessibility-api rely on this — they treat an element
+    // as inaccessible when getComputedStyle(el).visibility === 'hidden', expecting a hidden ancestor
+    // to have propagated down (rather than walking ancestors themselves). Without inheritance a
+    // button inside a `visibility: hidden` container stayed query-visible (e.g. getAllByRole counted
+    // a hidden section toggle). display is NOT inherited, so it is left as-is.
+    if (decl.visibility == null || decl.visibility === '') {
+      var pv = '';
+      var par = el && el.parentElement;
+      if (par) { try { pv = g.getComputedStyle(par).visibility || ''; } catch(e){} }
+      decl.visibility = pv;
+    }
     if (decl.opacity == null) decl.opacity = '';
     return decl;
   };
@@ -271,6 +282,19 @@
     // property) must show as the content attribute so attribute selectors like script[src*="maps"]
     // and getAttribute('src') see it. (Image() defines its own src with onload; that shadows this.)
     ['src','href'].forEach(function(a){ if (!Object.getOwnPropertyDescriptor(baseProto, a)) { try { Object.defineProperty(baseProto, a, { configurable: true, get: function(){ return this.getAttribute(a) || ''; }, set: function(v){ this.setAttribute(a, v == null ? '' : String(v)); } }); } catch(e){} } });
+    // CharacterData mutation methods on text/comment nodes (data is the native node-data accessor).
+    // userEvent's contenteditable typing path inserts characters via textNode.insertData(); Range
+    // splits text via splitText(). Both operate on `this.data` (rtdom's text storage).
+    if (!baseProto.insertData) baseProto.insertData = function(offset, data){ var s = this.data || ''; offset = offset|0; this.data = s.slice(0, offset) + String(data) + s.slice(offset); };
+    if (!baseProto.deleteData) baseProto.deleteData = function(offset, count){ var s = this.data || ''; offset = offset|0; this.data = s.slice(0, offset) + s.slice(offset + (count|0)); };
+    if (!baseProto.appendData) baseProto.appendData = function(data){ this.data = (this.data || '') + String(data); };
+    if (!baseProto.replaceData) baseProto.replaceData = function(offset, count, data){ var s = this.data || ''; offset = offset|0; this.data = s.slice(0, offset) + String(data) + s.slice(offset + (count|0)); };
+    if (!baseProto.substringData) baseProto.substringData = function(offset, count){ var s = this.data || ''; offset = offset|0; return s.slice(offset, offset + (count|0)); };
+    if (!baseProto.splitText) baseProto.splitText = function(offset){ var s = this.data || ''; offset = offset|0; var rest = s.slice(offset); this.data = s.slice(0, offset); var n = this.ownerDocument.createTextNode(rest); if (this.parentNode) this.parentNode.insertBefore(n, this.nextSibling); return n; };
+    // input.valueAsNumber — the numeric view of `value`, NaN when non-numeric/empty. MUI Slider's
+    // hidden range input reads event.target.valueAsNumber in its change handler to derive the new
+    // value; without it the value came through as null. (number/range inputs only; others give NaN.)
+    if (!Object.getOwnPropertyDescriptor(baseProto, 'valueAsNumber')) { try { Object.defineProperty(baseProto, 'valueAsNumber', { configurable: true, get: function(){ var v = this.value; if (v == null || v === '') return NaN; var n = Number(v); return isNaN(n) ? NaN : n; }, set: function(n){ this.value = (n == null || isNaN(n)) ? '' : String(n); } }); } catch(e){} }
     // getElementsByTagName / getElementsByClassName / getElementsByName over querySelectorAll. The
     // native binding ships querySelector(All) only; libs (jQuery's load-time support probe does
     // el.getElementsByTagName('input')[0].checked) need these. Add to the shared element prototype
@@ -512,7 +536,63 @@
       if (!Object.getOwnPropertyDescriptor(d, 'fullscreenElement')) { try { Object.defineProperty(d, 'fullscreenElement', { configurable: true, writable: true, value: null }); } catch(e){} }
     } catch(e){}
   })();
-  d.createRange = function(){ return { setStart:function(){}, setEnd:function(){}, selectNodeContents:function(){}, collapse:function(){}, getClientRects:function(){return [];}, getBoundingClientRect:function(){return {x:0,y:0,top:0,left:0,right:0,bottom:0,width:0,height:0};}, createContextualFragment:function(html){ var f=d.createDocumentFragment(); var t=d.createElement("div"); t.innerHTML=html; while(t.firstChild) f.appendChild(t.firstChild); return f; }, cloneRange:function(){return d.createRange();}, detach:function(){}, commonAncestorContainer: d.body }; };
+  // ---- Range + Selection (real model over rtdom) ----------------------------------------------
+  // The no-op stubs were enough for libraries that merely construct a Range, but contenteditable
+  // editors (Lexical) and userEvent's contenteditable typing path REQUIRE a working selection:
+  // userEvent.click sets the caret (createRange → setStart/End → selection.addRange), then on each
+  // keypress userEvent reads selection.getRangeAt(0) to decide whether to emit `beforeinput`. With
+  // a dead selection getInputRange() returns nothing and no input events fire, so onChange never
+  // runs. This implements the slice of Range/Selection those paths exercise.
+  function __zeroRect(){ return { x:0,y:0,top:0,left:0,right:0,bottom:0,width:0,height:0,toJSON:function(){return this;} }; }
+  function __nodeIndex(n){ var p=n.parentNode; if(!p) return 0; var i=0,c=p.firstChild; while(c&&c!==n){ i++; c=c.nextSibling; } return i; }
+  function __ancestry(n){ var a=[]; while(n){ a.push(n); n=n.parentNode; } return a; } // node … root
+  // Compare boundary points (ca,oa) vs (cb,ob) in document order: -1 before, 0 equal, 1 after.
+  function __cmp(ca,oa,cb,ob){
+    if(ca===cb) return oa<ob?-1:oa>ob?1:0;
+    var A=__ancestry(ca), B=__ancestry(cb);
+    // walk B looking for a node whose ancestry includes it → common ancestor
+    for(var i=0;i<A.length;i++){ var j=B.indexOf(A[i]); if(j>=0){
+      var anc=A[i];
+      // child of anc on A's side (or ca itself if A[i-1])
+      var childA=i>0?A[i-1]:null, childB=j>0?B[j-1]:null;
+      if(childA===null) return oa<=__nodeIndex(childB)?-1:1;     // ca IS the common ancestor
+      if(childB===null) return __nodeIndex(childA)<ob?-1:1;       // cb IS the common ancestor
+      var ia=__nodeIndex(childA), ib=__nodeIndex(childB);
+      return ia<ib?-1:ia>ib?1:0;
+    }}
+    return 0; // disconnected
+  }
+  function __commonAncestor(a,b){ var A=__ancestry(a); var n=b; while(n){ if(A.indexOf(n)>=0) return n; n=n.parentNode; } return d; }
+  function Range(){ this.startContainer=d; this.startOffset=0; this.endContainer=d; this.endOffset=0; }
+  Object.defineProperties(Range.prototype, {
+    collapsed:{ get:function(){ return this.startContainer===this.endContainer && this.startOffset===this.endOffset; } },
+    commonAncestorContainer:{ get:function(){ return __commonAncestor(this.startContainer, this.endContainer); } },
+  });
+  Range.prototype.setStart=function(n,o){ this.startContainer=n; this.startOffset=o|0; if(__cmp(this.startContainer,this.startOffset,this.endContainer,this.endOffset)>0){ this.endContainer=n; this.endOffset=o|0; } };
+  Range.prototype.setEnd=function(n,o){ this.endContainer=n; this.endOffset=o|0; if(__cmp(this.startContainer,this.startOffset,this.endContainer,this.endOffset)>0){ this.startContainer=n; this.startOffset=o|0; } };
+  Range.prototype.setStartBefore=function(n){ this.setStart(n.parentNode, __nodeIndex(n)); };
+  Range.prototype.setStartAfter=function(n){ this.setStart(n.parentNode, __nodeIndex(n)+1); };
+  Range.prototype.setEndBefore=function(n){ this.setEnd(n.parentNode, __nodeIndex(n)); };
+  Range.prototype.setEndAfter=function(n){ this.setEnd(n.parentNode, __nodeIndex(n)+1); };
+  Range.prototype.collapse=function(toStart){ if(toStart){ this.endContainer=this.startContainer; this.endOffset=this.startOffset; } else { this.startContainer=this.endContainer; this.startOffset=this.endOffset; } };
+  Range.prototype.selectNode=function(n){ this.setStartBefore(n); this.setEndAfter(n); };
+  Range.prototype.selectNodeContents=function(n){ this.startContainer=n; this.startOffset=0; this.endContainer=n; this.endOffset=(n.nodeType===3?(n.data||'').length:(n.childNodes?n.childNodes.length:0)); };
+  Range.prototype.cloneRange=function(){ var r=new Range(); r.startContainer=this.startContainer; r.startOffset=this.startOffset; r.endContainer=this.endContainer; r.endOffset=this.endOffset; return r; };
+  Range.prototype.comparePoint=function(n,o){ if(__cmp(n,o,this.startContainer,this.startOffset)<0) return -1; if(__cmp(n,o,this.endContainer,this.endOffset)>0) return 1; return 0; };
+  Range.prototype.isPointInRange=function(n,o){ return this.comparePoint(n,o)===0; };
+  Range.prototype.compareBoundaryPoints=function(how,other){ return __cmp(this.startContainer,this.startOffset,other.startContainer,other.startOffset); };
+  Range.prototype.insertNode=function(node){ var c=this.startContainer, o=this.startOffset; if(c.nodeType===3){ var txt=c.data||''; var after=c.splitText?c.splitText(o):null; c.parentNode.insertBefore(node, after||c.nextSibling); } else { var ref=c.childNodes?c.childNodes[o]:null; c.insertBefore(node, ref||null); } };
+  Range.prototype.deleteContents=function(){ if(this.collapsed) return; var sc=this.startContainer; if(sc===this.endContainer && sc.nodeType===3){ var t=sc.data||''; if(sc.deleteData) sc.deleteData(this.startOffset, this.endOffset-this.startOffset); else sc.data=t.slice(0,this.startOffset)+t.slice(this.endOffset); this.endOffset=this.startOffset; this.endContainer=sc; return; } var ca=this.commonAncestorContainer; var kids=ca.childNodes?Array.prototype.slice.call(ca.childNodes):[]; for(var i=0;i<kids.length;i++){ var k=kids[i]; if(this.comparePoint(k,0)===0 && this.comparePoint(k, (k.nodeType===3?(k.data||'').length:(k.childNodes?k.childNodes.length:0)))===0 && k.parentNode){ k.parentNode.removeChild(k); } } this.collapse(true); };
+  Range.prototype.cloneContents=function(){ var f=d.createDocumentFragment(); return f; };
+  Range.prototype.extractContents=function(){ var f=this.cloneContents(); this.deleteContents(); return f; };
+  Range.prototype.surroundContents=function(node){ this.insertNode(node); };
+  Range.prototype.getClientRects=function(){ return []; };
+  Range.prototype.getBoundingClientRect=function(){ return __zeroRect(); };
+  Range.prototype.createContextualFragment=function(html){ var f=d.createDocumentFragment(); var t=d.createElement('div'); t.innerHTML=html; while(t.firstChild) f.appendChild(t.firstChild); return f; };
+  Range.prototype.detach=function(){};
+  Range.prototype.toString=function(){ var sc=this.startContainer; if(sc===this.endContainer && sc.nodeType===3){ return (sc.data||'').slice(this.startOffset, this.endOffset); } return ''; };
+  d.createRange=function(){ var r=new Range(); r.startContainer=d.body||d; r.endContainer=d.body||d; return r; };
+  if(g.Range===undefined) g.Range=Range;
   if (!d.getRootNode) d.getRootNode = function(){ return d; };
   // document.write / writeln: parse the written markup and append it to <body>. Real browsers splice
   // at the parser position; our scripts run post-parse, so appending is the faithful no-JS-engine
@@ -523,6 +603,36 @@
     if (!d.writeln) d.writeln = function(){ docWrite(Array.prototype.join.call(arguments, '') + '\n'); };
   }
   if (g.__addGetElems) { g.__addGetElems(d); try { delete g.__addGetElems; } catch(e){} }
-  if (!d.getSelection) d.getSelection = function(){ return { removeAllRanges:function(){}, addRange:function(){}, getRangeAt:function(){return d.createRange();}, rangeCount:0, toString:function(){return "";} }; };
-  if (!g.getSelection) g.getSelection = d.getSelection;
+  // ---- Selection (one live instance per document) ---------------------------------------------
+  (function(){
+    var ranges = [];
+    var firing = false;
+    function fireSelectionChange(){ if(firing) return; firing=true; try { var ev = { type:'selectionchange', bubbles:false, cancelable:false, target:d, currentTarget:null }; if (d.dispatchEvent) d.dispatchEvent(ev); } catch(e){} firing=false; }
+    var sel = {
+      get rangeCount(){ return ranges.length; },
+      get anchorNode(){ return ranges.length?ranges[0].startContainer:null; },
+      get anchorOffset(){ return ranges.length?ranges[0].startOffset:0; },
+      get focusNode(){ return ranges.length?ranges[0].endContainer:null; },
+      get focusOffset(){ return ranges.length?ranges[0].endOffset:0; },
+      get isCollapsed(){ return ranges.length?ranges[0].collapsed:true; },
+      get type(){ return ranges.length?(ranges[0].collapsed?'Caret':'Range'):'None'; },
+      getRangeAt:function(i){ if(i>=ranges.length) throw new Error('IndexSizeError'); return ranges[i]; },
+      addRange:function(r){ ranges=[r]; fireSelectionChange(); },
+      removeAllRanges:function(){ if(ranges.length){ ranges=[]; fireSelectionChange(); } else ranges=[]; },
+      empty:function(){ this.removeAllRanges(); },
+      removeRange:function(r){ var i=ranges.indexOf(r); if(i>=0){ ranges.splice(i,1); fireSelectionChange(); } },
+      collapse:function(node,offset){ if(!node){ this.removeAllRanges(); return; } var r=d.createRange(); r.setStart(node,offset|0); r.collapse(true); ranges=[r]; fireSelectionChange(); },
+      collapseToStart:function(){ if(ranges.length){ ranges[0].collapse(true); fireSelectionChange(); } },
+      collapseToEnd:function(){ if(ranges.length){ ranges[0].collapse(false); fireSelectionChange(); } },
+      extend:function(node,offset){ if(!ranges.length){ this.collapse(node,offset); return; } ranges[0].setEnd(node,offset|0); fireSelectionChange(); },
+      setBaseAndExtent:function(an,ao,fn,fo){ var r=d.createRange(); if(__cmp(an,ao|0,fn,fo|0)<=0){ r.setStart(an,ao|0); r.setEnd(fn,fo|0); } else { r.setStart(fn,fo|0); r.setEnd(an,ao|0); } ranges=[r]; fireSelectionChange(); },
+      selectAllChildren:function(node){ var r=d.createRange(); r.selectNodeContents(node); ranges=[r]; fireSelectionChange(); },
+      containsNode:function(node, partial){ if(!ranges.length) return false; var r=ranges[0]; var a=r.comparePoint(node,0), b=r.comparePoint(node,(node.nodeType===3?(node.data||'').length:(node.childNodes?node.childNodes.length:0))); return partial ? (a<=0&&b>=0) : (a===0&&b===0); },
+      deleteFromDocument:function(){ if(ranges.length) ranges[0].deleteContents(); },
+      modify:function(){},
+      toString:function(){ return ranges.length?ranges[0].toString():''; },
+    };
+    d.getSelection = function(){ return sel; };
+    if (!g.getSelection) g.getSelection = function(){ return sel; };
+  })();
 })();
