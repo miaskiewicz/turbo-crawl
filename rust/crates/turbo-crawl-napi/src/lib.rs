@@ -21,7 +21,7 @@ use view::{Field, FieldType, QueryType, TextMode};
 
 #[napi]
 pub fn version() -> String {
-    "0.1.11".to_string()
+    "0.2.0".to_string()
 }
 
 fn to_json_string<T: serde::Serialize>(v: &T) -> String {

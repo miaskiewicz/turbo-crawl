@@ -13,7 +13,7 @@ deno_core = "0.404"
 # resolves so both share one v8 — the binding installs into deno_core's own context.
 v8 = "=149.4.0"
 turbo-dom-parser = { package = "turbo-dom", version = "0.3.2" }
-turbo-crawl-core = { path = "../turbo-crawl-core", version = "0.1.11" }
+turbo-crawl-core = { path = "../turbo-crawl-core", version = "0.2.0" }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]

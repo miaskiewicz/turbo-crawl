@@ -44,28 +44,28 @@ happy-dom). turbo-crawl is unusual on four axes at once:
    browser anywhere in the stack.
 3. **Its own DOM, not a browser's.** turbo-dom is a native + WASM HTML parser
    with a lazy copy-on-write DOM — native-speed parse, no pixels/layout/IPC.
-4. **A V8 isolate to run page JS + re-render.** The `secure` JS tier executes
-   page (or your own) JavaScript inside a real V8 isolate (`isolated-vm`) —
-   capped heap, no ambient host access — against a WASM DOM, then re-renders.
-   Most JS-capable crawlers instead drive a full headless browser, or run page
-   scripts in-process with a fake DOM that offers **no real security isolation**
-   (Node's `vm` is [explicitly not a security
+4. **A V8 isolate to run page JS + re-render.** Page (or your own) JavaScript runs
+   inside a real V8 isolate (a `deno_core` runtime — host heap unreachable from the
+   guest, with a runaway-execution budget) against the native rtdom DOM, then
+   re-renders. Most JS-capable crawlers instead drive a full headless browser, or
+   run page scripts in-process with a fake DOM that offers **no real security
+   isolation** (Node's `vm` is [explicitly not a security
    boundary](https://nodejs.org/api/vm.html); cf. happy-dom
    [CVE-2025-61927](https://github.com/capricorn86/happy-dom/wiki/JavaScript-Evaluation-Warning)).
    Running hostile page JS in a true isolate against a lightweight DOM is rare.
 
-See [SPEC.md](./SPEC.md) for the design and [STATUS.md](./STATUS.md) for current
-capabilities.
+See [CHANGELOG.md](./CHANGELOG.md) for what shipped and
+[rust/README.md](./rust/README.md) for the engine internals.
 
-Status: **v0.1.11 — working** ([npm](https://www.npmjs.com/package/@miaskiewicz/turbo-crawl)).
+Status: **v0.2.0 — working** ([npm](https://www.npmjs.com/package/@miaskiewicz/turbo-crawl)).
 Page + interaction, hardened networking (cookies / `document.cookie` bridge /
 robots + crawl-delay / charset / size + redirect caps, HTTP/2 + DNS-cache
 dispatcher, 304 conditional-request cache), crawl orchestration (`Crawler` +
 one-shot `crawlSite`) and a `batch` URL-list runner, structured extraction,
 CSS+XPath query, a Playwright compat façade with **events / network / routing /
-persistent context state**, a no-Chromium JS-execution render tier with
-**re-enterable live-heap `evalJs`/`injectJs` + a DOM-history trail**, and a
-60-tool MCP server. ~100% line coverage (`npm run test:cov`); benchmarked against
+persistent context state**, a no-Chromium JS render tier (a true V8 isolate over
+the native DOM) with **re-enterable live-heap `evalJs`/`injectJs` + a DOM-history
+trail**, and a 60-tool MCP server. ~100% line coverage (`npm run test:cov`); benchmarked against
 other crawlers (above); a Playwright differential test (SPEC §14) bounds
 representation drift when Chromium is installed (dev-only).
 
@@ -75,7 +75,7 @@ representation drift when Chromium is installed (dev-only).
 npm install @miaskiewicz/turbo-crawl
 ```
 
-Pure ESM, Node ≥ 20.
+Node ≥ 20. Ships a native engine (prebuilt per-platform binaries, no build step).
 
 ## Drive a page (no browser)
 
@@ -137,11 +137,11 @@ const recs = await crawlSite({
   sameHost: true,
   allow: "/blog/",        // URL regex to keep
   deny: "\\?utm",         // URL regex to skip
-  mode: "fast",           // "no-js" (default) | "fast" | "secure" — JS-gated pages render
+  mode: "js",             // "no-js" (default) | "js" — JS-gated pages render in a V8 isolate
 });
 
 // fan out over a known URL list with a chosen execution mode
-const out = await batch([url1, url2, url3], { mode: "secure", view: "markdown" });
+const out = await batch([url1, url2, url3], { mode: "js", view: "markdown" });
 ```
 
 `Crawler` is the engine (streaming); `crawlSite` is a one-shot collect over it;
@@ -168,12 +168,10 @@ npx turbo-crawl-mcp          # stdio MCP server (60 tools), e.g.:
 # direct:      fetch_json, fetch_raw
 ```
 
-`render`/`set_mode` switch the Page to the `fast`/`secure` JS tier; then `eval_js`
-and `inject_js` run against the **live render heap** (page globals, handlers) and
-each mutation appends to a DOM-history trail readable via `latest_dom`/
-`dom_history`. (`eval_js`/`inject_js` on the no-JS path run in a `node:vm` over the
-parsed DOM behind a best-effort guard — **not** a security sandbox; use `mode:
-secure` for untrusted JS.)
+`render`/`set_mode` switch the Page into the JS render tier (a true V8 isolate over
+the native DOM); then `eval_js` and `inject_js` run against the **live render heap**
+(page globals, handlers) and each mutation appends to a DOM-history trail readable
+via `latest_dom`/`dom_history`.
 
 Or embed: `import { createServer } from "@miaskiewicz/turbo-crawl/mcp"`.
 
@@ -216,7 +214,7 @@ engine — **nothing loads playwright or chromium**:
 ```js
 import { chromium, expect } from "@miaskiewicz/turbo-crawl/playwright";
 
-const browser = await chromium.launch({ mode: "fast" });   // run page JS
+const browser = await chromium.launch({ mode: "js" });   // run page JS in a V8 isolate
 const ctx = await browser.newContext({ storageState });     // reuse auth
 const page = await ctx.newPage();
 
@@ -242,7 +240,7 @@ Locators (`getByRole/Text/Label/Placeholder/TestId/AltText/Title` — all accept
 `setExtraHTTPHeaders`), and **persistent context state** (cookie jar +
 `localStorage`/`sessionStorage` across navigations, `addCookies`/`cookies`/
 `storageState`) all work — events/routes/storage require a JS mode (`launch({ mode:
-"fast" | "secure" })`); without one the façade stays Lane A and still emits
+"js" })`); without one the façade stays Lane A and still emits
 navigation request/response events. Genuinely pixel-only APIs (`screenshot`,
 `pdf`, `hover`) throw a clear "no-browser engine" error.
 
@@ -258,7 +256,7 @@ regardless of any page-fixture swap).
 ```js
 import { test, expect } from "@miaskiewicz/turbo-crawl/playwright";
 
-test.use({ mode: "fast", baseURL: "http://localhost:3000" }); // omit mode → Lane A
+test.use({ mode: "js", baseURL: "http://localhost:3000" }); // omit mode → Lane A
 
 test.describe("auth", () => {
   test.beforeEach(async ({ page }) => page.goto("/login"));
@@ -350,22 +348,20 @@ turbo-crawl ships **no browser**. For pages that need JavaScript:
 1. **Hydration state (now):** `page.hydrationState()` mines the data frameworks
    embed server-side (`__NEXT_DATA__`, JSON-LD, `__APOLLO_STATE__`, …) — zero JS,
    covers most "SPAs".
-2. **JS-execution tier:** run the page's own scripts on turbo-dom — Chromium-free
-   — and extract from the *rendered* DOM. Two backends:
+2. **JS-execution tier:** run the page's own scripts in a true **V8 isolate** over
+   the native DOM — Chromium-free — and extract from the *rendered* DOM:
 
 ```js
 import { jsRenderer, Page, Crawler } from "@miaskiewicz/turbo-crawl";
 
-// "secure" (default): true V8 isolate (isolated-vm) on turbo-dom's WASM parser.
-// Safe for open-web/hostile pages. "fast": in-process vm + native parser, for
-// local/trusted targets only.
-const { fetchHtml, close } = jsRenderer({ mode: "secure" });
+// page JS runs in a V8 isolate (host heap unreachable from the guest; budgeted).
+const { fetchHtml, close } = jsRenderer();
 const page = new Page({ fetchHtml });
 await page.goto("https://some-spa.example");   // scripts run; DOM is populated
 page.links(); page.markdown(); page.query("h1");
 
 // or auto-escalate only shell-only pages during a crawl:
-new Crawler({ start, fallback: jsRenderer({ mode: "secure" }).fetchHtml });
+new Crawler({ start, fallback: jsRenderer().fetchHtml });
 ```
 
 The render tier is **re-enterable**: bind it to a Page and `evalJs`/`injectJs` run
@@ -373,7 +369,7 @@ against the **live render heap** (page globals, event handlers, React state) —
 a re-parsed snapshot — while each mutation appends to a DOM-history trail:
 
 ```js
-const renderer = jsRenderer({ mode: "secure" });
+const renderer = jsRenderer();
 const page = new Page({ fetchHtml: renderer.fetchHtml }).setRenderer(renderer);
 await page.goto("https://some-spa.example");
 
@@ -383,20 +379,12 @@ await page.latestDom();    // serialized DOM after the click
 await page.domHistory();   // [render, …, post-click] snapshots, in order
 ```
 
-On the no-JS path, `evalJs`/`injectJs` run in a `node:vm` over the parsed DOM
-behind a best-effort token guard — **not a security boundary** (Node's `vm` isn't
-one). Run untrusted JS with `mode: "secure"`, where the V8 isolate contains it.
-
-Classic + **ESM-module** scripts run (modules bundled via esbuild, honoring
-`<script type="importmap">`), and page-initiated **`fetch`** *and*
-**`XMLHttpRequest`** are bridged to the host net layer (cookies/UA), so
-client-only data loads render. URLs the page fetches are recorded — `page.requests()`,
-and `new Crawler({ fallback, followRequests: true })` feeds them into the frontier.
-`esbuild` ships as a dependency (pure-Go prebuilt, no native build). The `secure`
-backend additionally needs the **optional** native `isolated-vm` — `npm i
-isolated-vm`; without it `mode:"secure"` throws an actionable error (it never
-silently downgrades to the unsandboxed `fast` backend). See
-[docs/js-execution-tier.md](./docs/js-execution-tier.md).
+Page JS runs in the V8 isolate; `evalJs`/`injectJs` execute against that **live
+render heap** (page globals, event handlers, framework state), and page-initiated
+**`fetch`** *and* **`XMLHttpRequest`** are bridged to the host net layer
+(cookies/UA), so client-only data loads render. URLs the page fetches are recorded
+— `page.requests()`, and `new Crawler({ fallback, followRequests: true })` feeds
+them into the frontier.
 
 `detectJsRequired(document)` flags shell-only pages, and `Crawler` accepts a
 generic `{ fallback: fetchHtml }` to route them to whatever renderer you plug in.
@@ -411,43 +399,35 @@ generic `{ fallback: fetchHtml }` to route them to whatever renderer you plug in
 
 `harness/competitive/` runs the **same Playwright script** on turbo-crawl and a
 fleet of real browsers, scoring output **parity** against a Chromium oracle and
-timing each. `npm run harness`. The **Rust** port runs here too — `turbo-rust
-(no-js)` and `turbo-rust (js)` drive the same routines through the napi addon
-(turbo-dom + the `deno_core` render tier), **no Chromium**. Median ms over 8 runs
-(live network), parity is each engine's observations vs the Chromium oracle:
+timing each. `npm run harness`. turbo-crawl drives every routine through its native
+engine — turbo-dom + a `deno_core` V8 render tier for page JS — with **no Chromium**.
+Median ms over 8 runs (live network), parity is each engine's observations vs the
+Chromium oracle:
 
 | engine | wikipedia | js-quotes | parity |
 |---|---|---|---|
-| turbo-crawl (no-JS) *(JS impl)* | 156 | — *(needs JS)* | ✓ |
-| turbo-crawl (js-fast) *(JS impl)* | 345 | 275 | ✓ |
-| turbo-crawl (js-secure) *(JS impl)* | 297 | 257 | ✓ |
-| **turbo-rust (no-JS)** *(Rust)* | **142** | — *(needs JS)* | ✓ |
-| **turbo-rust (js)** *(Rust)* | —‡ | **132** | ✓ |
+| **turbo-crawl (no-JS)** | **142** | — *(needs JS)* | ✓ |
+| **turbo-crawl (JS)** | —‡ | **132** | ✓ |
 | chromium *(oracle)* | 932 | 933 | — |
 | firefox | 727 | 925 | ✓ |
 | webkit | 1232 | 964 | ✓ |
 
 Every engine produces the **same observations** as Chromium / Firefox / WebKit
-(parity ✓). The **pure-Rust** engine is now the **fastest in the table** on both
-axes: `turbo-rust (no-js)` runs the Wikipedia click-through in **142 ms** —
-**~6.6× faster than Chromium** (932), ahead of the mature JS impl (156) — and
-`turbo-rust (js)` **runs the real jQuery on `quotes.toscrape.com/js`** (the same
-10 quotes Chromium extracts) in **132 ms, ~7× faster than Chromium** (933) and
-~2× faster than the JS-tier (257/275), via a true V8 isolate over a native rtdom
-DOM, no Chromium process. The per-call overhead the napi engine once carried is
-gone: a **process-shared pooled HTTP client** (connection/TLS reuse across pages),
-a **thread-persistent V8 isolate** whose **DOM install is reused across same-page
-`page.evaluate`s** (parse once per page, ~0.5 ms/call after), an **external-script
-cache** (jQuery fetched once, not per page), a **per-thread parse cache** so
-multiple views of one page (links + markdown + extract — the real crawl shape)
-parse it once (~4 ms → ~1 ms per extra view), and a back-forward snapshot cache so
-`goBack` restores instead of re-fetching. A Rust criterion microbench
-(`cargo bench -p turbo-crawl-view`) + a napi hotspot profiler
-(`harness/hotpath/rust-hotpath.mjs`) track these.
+(parity ✓) — and turbo-crawl is the **fastest in the table** on both axes. The
+Wikipedia click-through runs in **142 ms** (**~6.6× faster than Chromium**, 932),
+and the **real jQuery on `quotes.toscrape.com/js`** — the same 10 quotes Chromium
+extracts — in **132 ms** (**~7× faster than Chromium**, 933), inside a true V8
+isolate over a native rtdom DOM, **no Chromium process**. It stays network-bound
+via a **pooled HTTP client** (connection/TLS reuse across pages), a **persistent V8
+isolate** whose **DOM install is reused across same-page `page.evaluate`s** (parse
+once per page, ~0.5 ms/call after), an **external-script cache** (jQuery fetched
+once, not per page), a **per-page parse cache**, and a back-forward snapshot cache
+so `goBack` restores instead of re-fetching. Profilers: `cargo bench -p
+turbo-crawl-view` (Rust microbench) + `harness/hotpath/rust-hotpath.mjs`.
 
-‡ js-mode executes the *page's own* scripts; on a server-rendered page like
-Wikipedia that over-runs (use `no-js` there — 142 ms, 4/4). The `form` routine is
-omitted this run (httpbin.org was returning 503/timeouts for every engine).
+‡ JS mode runs the *page's own* scripts; on a server-rendered page like Wikipedia
+that over-runs (use no-JS there — 142 ms, 4/4). The `form` routine is omitted this
+run (httpbin.org was returning 503/timeouts for every engine).
 
 The harness auto-detects installed engines (`firefox`/`webkit`, and anti-detect
 browsers like `playwright-extra`/`patchright`/`rebrowser-playwright`); see
@@ -465,29 +445,28 @@ crawl-bench`):
 | crawler | runtime model | items | median ms | pages/s |
 |---|---|---|---|---|
 | crawlee `CheerioCrawler` | Node | 339 | 2767 | 7.2 |
-| **turbo-crawl (no-js)** | **Node, browserless** | 316 | 3261 | **6.1** |
-| **turbo-rust (no-js)** | **Rust napi, browserless** | 339 | 3375 | **5.9** |
+| **turbo-crawl (no-js)** | **native Rust, browserless** | 339 | 3271 | **6.1** |
 | spider-rs | Rust + N-API | 194 | 3486 | 5.7 |
 | got + cheerio (hand-rolled) | Node | 339 | 5590 | 3.6 |
 | node-crawler (`crawler`) | Node | 339 | 49624 | 0.4 |
 | Scrapy | Python *(subprocess)* | 246 | 49270 | 0.4 |
 | Colly | Go *(subprocess)* | 320 | 45664 | 0.4 |
 
-**Head-to-head, turbo-rust vs CheerioCrawler** (the closest competitor) — the
-**same** 20-page crawl, `maxConcurrency = 2`, median of 5 warm runs
+**Head-to-head vs CheerioCrawler** (the closest competitor) — the **same** 20-page
+crawl, `maxConcurrency = 2`, median of 5 warm runs
 (`node harness/crawlers/head-to-head.mjs`). With throttling **off** (raw engine
-speed — the truest apples-to-apples, since the two *throttle models* differ) the
-pure-Rust crawler is clearly ahead:
+speed — the truest apples-to-apples, since the two *throttle models* differ)
+turbo-crawl is clearly ahead:
 
 | engine | politeness | median ms | pages/s |
 |---|---|---|---|
-| **turbo-rust (no-js)** | none (raw) | **1977** | **10.1** |
+| **turbo-crawl (no-js)** | none (raw) | **1977** | **10.1** |
 | crawlee CheerioCrawler | none (raw) | 2748 | 7.3 |
 | crawlee CheerioCrawler | 150 ms rate | 2634 | 7.6 |
-| **turbo-rust (no-js)** | 150 ms (strict) | 3307 | 6.0 |
+| **turbo-crawl (no-js)** | 150 ms (strict) | 3307 | 6.0 |
 
-Raw, **turbo-rust is ~1.4× faster**. Under the "150 ms politeness" rows it looks
-slower only because turbo-rust's per-host gate is a **strict** interval (it really
+Raw, **turbo-crawl is ~1.4× faster**. Under the "150 ms politeness" rows it looks
+slower only because turbo-crawl's per-host gate is a **strict** interval (it really
 waits 150 ms between requests), whereas crawlee's `maxRequestsPerMinute` is a
 lenient sliding window that lets a short 20-page burst through near-raw. Same
 content (339 items), no browser.
@@ -496,9 +475,9 @@ At equal politeness the multi-engine wall-clock is **network-bound**, so the
 in-process crawlers cluster together: turbo-crawl sits in the **top tier** alongside
 the dedicated speed engines (crawlee, spider-rs) and ahead of a hand-rolled
 got+cheerio loop — while extracting equivalent content and running **no
-browser**. The **pure-Rust** `turbo-rust (no-js)` (the whole BFS — fetch, parse,
-same-host gate, per-page item count — runs in Rust via the napi addon) lands right
-alongside the JS engine, and **~13× ahead of Scrapy / Colly**. The heavyweight
+browser**. turbo-crawl runs the whole BFS — fetch, parse, same-host gate, per-page
+item count — in its native Rust engine, and is **~13× ahead of Scrapy / Colly**.
+The heavyweight
 engines trail ~15×: Scrapy and Colly pay a fresh
 process startup per crawl (the harness shells out to their CLIs), and
 node-crawler's per-request overhead is high. turbo-dom's raw parse advantage
@@ -510,30 +489,24 @@ every engine in this table, the *same* turbo-crawl also runs Playwright scripts
 ### JS-executing crawlers — turbo-crawl vs real browsers
 
 The other set targets `quotes.toscrape.com/js`, where quotes are built
-client-side (a non-JS crawler sees ~0). Here turbo-crawl's JS tiers run the
-page's own scripts — `js-fast` in an in-process `vm`, `js-secure` in a true V8
-isolate — against turbo-dom, while every competitor drives a **real headless
-Chromium** (`npm run crawl-bench:js`, 10 pages, median of 3):
+client-side (a non-JS crawler sees ~0). turbo-crawl runs the page's own scripts in
+a true V8 isolate over its native DOM, while every competitor drives a **real
+headless Chromium** (`npm run crawl-bench:js`, 10 pages, median of 3):
 
 | crawler | JS engine | items | median ms | pages/s |
 |---|---|---|---|---|
-| **turbo-rust (js)** | **Rust napi, V8 isolate, no browser** | 100 | **2989** | **3.35** |
-| **turbo-crawl (js-secure)** | **V8 isolate, no browser** | 90 | 4086 | 2.5 |
-| **turbo-crawl (js-fast)** | **in-proc vm, no browser** | 100 | 4430 | 2.3 |
+| **turbo-crawl (JS)** | **V8 isolate, no browser** | 100 | **2989** | **3.35** |
 | crawlee `PuppeteerCrawler` | headless Chromium | 100 | 5074 | 2.0 |
 | crawlee `PlaywrightCrawler` | headless Chromium | 100 | 6173 | 1.6 |
 | puppeteer-cluster | headless Chromium | 100 | 17062 | 0.6 |
 
-The **pure-Rust** `turbo-rust (js)` — each page's own scripts run in a true V8
-isolate over the native rtdom DOM (the same path that renders
-`quotes.toscrape.com/js`, with external scripts cached across pages) — is the
-**fastest engine here**, extracting the same 100 quotes a real browser does at
-**~2× the JS-tier's rate and ~2–6× faster than the browser-driving crawlers**, no
-Chromium process. Every turbo engine executes the **same page JavaScript** and
-extracts the **same quotes** as a real browser, honoring the 150 ms politeness
-delay. The `js-secure` row does this inside a **hardened V8 isolate** — most crawlers
-that run page JS either drive a full browser (this table) or use an in-process
-fake DOM with no real isolation. See
+turbo-crawl runs each page's own scripts in a **true V8 isolate** over the native
+rtdom DOM (the same path that renders `quotes.toscrape.com/js`, external scripts
+cached across pages) — the **fastest engine here**, extracting the same 100 quotes
+a real browser does **~2–6× faster than the browser-driving crawlers**, with no
+Chromium process and honoring the 150 ms politeness delay. Running page JS in a
+true isolate against a lightweight DOM is rare — most crawlers either drive a full
+browser (this table) or use an in-process fake DOM with no real isolation. See
 [harness/crawlers/README.md](./harness/crawlers/README.md) — competitors
 auto-detect and missing ones are skipped; install them with
 `npm i -D @spider-rs/spider-rs crawlee cheerio got crawler` (+ `brew install

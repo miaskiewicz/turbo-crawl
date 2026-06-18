@@ -20,7 +20,7 @@ use turbo_dom_parser::rtdom::serialize::serialize_inner;
 use turbo_dom_parser::rtdom::Tree;
 use view::{Field, FieldType, QueryType, TextMode};
 
-pub const VERSION: &str = "0.1.11";
+pub const VERSION: &str = "0.2.0";
 
 /// One agent session: the current page URL + parsed tree + nav history, plus the
 /// browser-ish state agents expect (UA / extra headers / cookie jar / JS mode) and

@@ -8,7 +8,7 @@ description = "turbo-crawl tier 2 views: text / xpath / query over the turbo-dom
 
 [dependencies]
 turbo-dom-parser = { package = "turbo-dom", version = "0.3.2" }
-turbo-crawl-core = { path = "../turbo-crawl-core", version = "0.1.11" }
+turbo-crawl-core = { path = "../turbo-crawl-core", version = "0.2.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 regex = "1"

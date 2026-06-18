@@ -1,82 +1,61 @@
-# Publishing `@miaskiewicz/turbo-crawl`
+# Publishing turbo-crawl
 
-turbo-crawl is **pure ESM JavaScript** — there is nothing to compile, no native
-binaries, and no per-platform build matrix. Publishing is therefore a single
-gate-then-publish step.
+turbo-crawl ships from **one `v*` git tag**, which fires three GitHub Actions
+workflows in parallel — there are now native artifacts, not just JS:
 
-The package ships only:
+| Workflow | Publishes | Where | Auth secret |
+|---|---|---|---|
+| `release.yml` | `@miaskiewicz/turbo-crawl` (the JS package — `src`/`mcp`/`playwright` `.mjs` + `index.d.ts`) | npm | `NPM_TOKEN` |
+| `rust-napi-prebuild.yml` | `@miaskiewicz/turbo-crawl-native` (the napi addon — prebuilt `.node` per platform) | npm | `NPM_TOKEN` |
+| `rust-crates-publish.yml` | the Rust crates, in dep order: `core → view → page → render → mcp` | crates.io | `CARGO_REGISTRY_TOKEN` |
 
-- `src/**/*.mjs`, `mcp/**/*.mjs`, `playwright/**/*.mjs`
-- `index.d.ts`, `LICENSE`, `README.md`, `SPEC.md`
+All three trigger on `push: tags: ['v*']`, so a single tag publishes everything.
+(The `turbo-crawl-napi` cdylib and `turbo-crawl-transform` crate are not published
+to crates.io — they're built into the native npm package.)
 
-Everything else (`test/`, `harness/`, `bench/`, `docs/`, `scripts/`,
-`node_modules/`, lockfile) is excluded by the `files` allowlist in
-`package.json`. Verify with `npm pack --dry-run` before any release.
+## The one rule: every version string must match the tag
 
-## Automated release (recommended)
+There is no single source of truth, so the bump must be applied everywhere before
+tagging, or a workflow ships a mismatched version. Bump to the SAME `X.Y.Z`:
 
-Releases are cut by the `Release` GitHub Actions workflow
-(`.github/workflows/release.yml`), which fires on any `v*` tag.
+- `package.json` → `"version"`
+- `src/index.mjs` → `export const version`
+- `mcp/server.mjs` → `new Server({ … version: "X.Y.Z" })`
+- `rust/Cargo.toml` → `[workspace.package] version` **and** every crate's path-dep
+  `version = "X.Y.Z"` (core/view/page/render/mcp/napi Cargo.toml)
+- `rust/crates/turbo-crawl-core/src/lib.rs` + `turbo-crawl-mcp/src/lib.rs` → `VERSION`
+- `rust/crates/turbo-crawl-napi/src/lib.rs` → `version()` and its `package.json`
+- `README.md` status line
 
-1. Bump the version in `package.json` (e.g. `0.1.0` → `0.1.1`). Keep it in sync
-   with the tag you are about to push.
+Sanity check (should print nothing): `grep -rn "<old-version>" package.json
+src/index.mjs mcp/server.mjs rust/ README.md | grep -v /target/`.
 
-   ```sh
-   npm version patch   # or: minor | major — also creates the matching git tag
-   ```
+## Cut a release
 
-   (`npm version` updates `package.json`, commits, and creates the `vX.Y.Z`
-   tag in one step. If you bump by hand, create the tag yourself.)
+1. Bump all the version strings above to `X.Y.Z` (keep them identical).
+2. Green gate locally: `npm run check` (JS) and `cd rust && cargo test --workspace
+   && cargo clippy --workspace --all-targets && cargo fmt --check`.
+3. Add the new version's entry to `CHANGELOG.md`.
+4. Commit (`chore(release): vX.Y.Z`), tag (`git tag -a vX.Y.Z -m vX.Y.Z`), push the
+   commit **and** the tag (`git push origin <branch> && git push origin vX.Y.Z`).
+5. The three workflows run their gates and publish. Verify after CI:
+   - `npm view @miaskiewicz/turbo-crawl version`
+   - `npm view @miaskiewicz/turbo-crawl-native version`
+   - the crate pages on crates.io (`turbo-crawl-core`, …)
 
-2. Push the commit and the tag:
-
-   ```sh
-   git push origin main
-   git push origin vX.Y.Z
-   ```
-
-3. The `Release` workflow then:
-   - checks out the tagged commit,
-   - sets up Node 22 with the npm registry,
-   - runs `npm ci`,
-   - runs the full gate (`npm run check` — lint + format + cc + tsgo + test),
-   - publishes with `npm publish --access public --provenance`.
-
-   Authentication uses the **`NPM_TOKEN`** repository secret (already
-   configured) via `NODE_AUTH_TOKEN`. Provenance is signed using the workflow's
-   OIDC token (`id-token: write`).
-
-You can also trigger the workflow manually from the Actions tab
-(`workflow_dispatch`) — useful for re-running a failed publish on an existing
-tag.
-
-## Manual fallback
-
-If CI is unavailable, publish locally:
-
-```sh
-npm run check                      # gate must be green
-npm publish --access public        # prepublishOnly re-runs `npm run check`
-```
-
-You must be authenticated to npm (`npm whoami`) with publish rights to the
-`@miaskiewicz` scope. `prepublishOnly` runs `npm run check` automatically, so a
-broken tree cannot be published.
+Publishing is **outward-facing + irreversible** (npm + crates.io versions can't be
+reused) — only cut a tag when a release is intended. CI re-runs the gate before
+publishing, so a red tree can't ship. Rust crate publishing is new as of v0.2.0.
 
 ## Notes
 
-- `publishConfig.access` is `public`, so the scoped package publishes publicly
-  without extra flags.
-- The heavy browser packages used only by the competitive harness
-  (`playwright`, `patchright`, `playwright-extra`, `rebrowser-playwright`,
-  `puppeteer-extra-plugin-stealth`) are **not** committed dependencies. Install
-  them ad-hoc if you want to run `npm run harness`:
-
-  ```sh
-  npm i -D playwright patchright playwright-extra rebrowser-playwright puppeteer-extra-plugin-stealth
-  ```
-
-- `esbuild` is a regular dependency (pure-Go prebuilt; JS-render module bundling).
-  `isolated-vm` is an `optionalDependency` (native; only the `secure` render
-  backend needs it). Neither is required for the core fetch/parse/extract/crawl
-  flow; `mode:"secure"` throws an actionable error if `isolated-vm` is absent.
+- The JS package's `files` allowlist ships only `src`/`mcp`/`playwright` `.mjs` +
+  `index.d.ts` + `LICENSE` + `README.md` + `CHANGELOG.md`. Verify with `npm pack
+  --dry-run`. `test/`, `harness/`, `bench/`, `docs/`, `rust/` are excluded.
+- The native npm package's per-platform binaries are built by the prebuild matrix
+  (native `aarch64` runner); the loader in `rust/crates/turbo-crawl-napi/index.js`
+  resolves the right `.node` at require time.
+- crates publish in dependency order so each dependent resolves its just-published
+  dep; path deps carry an explicit `version` so crates.io accepts them.
+- Browser packages used only by the competitive harness (`playwright`, `crawlee`,
+  …) are not committed deps — install ad-hoc to run the harness.

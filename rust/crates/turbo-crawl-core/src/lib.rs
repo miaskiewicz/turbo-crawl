@@ -26,4 +26,4 @@ pub mod url;
 pub use reqwest;
 
 /// Library version — kept in lockstep with `package.json` per the release rules.
-pub const VERSION: &str = "0.1.11";
+pub const VERSION: &str = "0.2.0";

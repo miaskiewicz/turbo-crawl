@@ -8,8 +8,9 @@ browser. Playwright/Chromium appear **only as dev tooling** (oracle + harness).
 
 Read this before changing code. Module-level reference docs live in
 [`docs/modules/`](./docs/modules/) (one file per source module); architecture and
-plans are in [`SPEC.md`](./SPEC.md), [`STATUS.md`](./STATUS.md), and
-[`docs/js-execution-tier.md`](./docs/js-execution-tier.md).
+plans are in [`README.md`](./README.md), [`CHANGELOG.md`](./CHANGELOG.md), and the
+Rust engine docs [`rust/README.md`](./rust/README.md) +
+[`rust/HEADLESS-HYDRATION.md`](./rust/HEADLESS-HYDRATION.md).
 
 ## Stack & layout
 
@@ -138,8 +139,8 @@ cut a release tag when the user explicitly asks to "ship"/"publish"/"release".
 - **Per-module reference:** [`docs/modules/`](./docs/modules/) — networking
   (net/cookies/robots/url), orchestration (page/crawl/frontier/detect), extraction
   & interaction (extract/visible/actions/aria/dom-ops/locator), views
-  (markdown/ax/aria-snapshot/text/schema/query/xpath/hydration), render tier
-  (render-*), agent surfaces (mcp, playwright-compat).
-- **Design / status:** [`SPEC.md`](./SPEC.md), [`STATUS.md`](./STATUS.md),
-  [`docs/js-execution-tier.md`](./docs/js-execution-tier.md).
+  (markdown/ax/aria-snapshot/text/schema/query/xpath/hydration), agent surfaces
+  (mcp, playwright-compat).
+- **Engine + status:** [`README.md`](./README.md), [`CHANGELOG.md`](./CHANGELOG.md),
+  [`rust/README.md`](./rust/README.md), [`rust/HEADLESS-HYDRATION.md`](./rust/HEADLESS-HYDRATION.md).
 - **Harness:** [`harness/competitive/README.md`](./harness/competitive/README.md).
