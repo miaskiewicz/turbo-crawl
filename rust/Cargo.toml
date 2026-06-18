@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/turbo-crawl-core",
+    "crates/turbo-crawl-napi",
     "crates/turbo-crawl-mcp",
     "crates/turbo-crawl-page",
     "crates/turbo-crawl-render",
