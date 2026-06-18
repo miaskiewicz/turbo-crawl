@@ -114,8 +114,35 @@ impl DomBackend for TreeDom {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{render_html, run_with_dom};
+    use crate::{render_html, render_html_async, run_with_dom};
     use std::rc::Rc;
+
+    #[tokio::test]
+    async fn async_promise_hydration_resolves() {
+        let dom = Rc::new(TreeDom::parse(
+            "<html><body><div id='app'></div></body></html>",
+        ));
+        // Hydrate via a microtask + an awaited timer — both must resolve before
+        // serialization (the event-loop-driven path).
+        let html = render_html_async(
+            dom,
+            r#"
+            Promise.resolve().then(() => {
+              document.getElementById('app').innerHTML = '<p>micro</p>';
+            });
+            (async () => {
+              await new Promise((r) => setTimeout(r, 5));
+              const s = document.createElement('span');
+              s.textContent = 'awaited';
+              document.getElementById('app').appendChild(s);
+            })();
+            "#,
+        )
+        .await
+        .unwrap();
+        assert!(html.contains("<p>micro</p>"), "got: {html}");
+        assert!(html.contains("<span>awaited</span>"), "got: {html}");
+    }
 
     #[test]
     fn reads_real_parsed_dom() {

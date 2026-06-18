@@ -258,6 +258,27 @@ pub fn render_html(backend: Backend, script: &str) -> Result<String, String> {
     Ok(backend.document_html())
 }
 
+async fn drain_event_loop(rt: &mut JsRuntime) -> Result<(), String> {
+    rt.run_event_loop(deno_core::PollEventLoopOptions::default())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Like [`render_html`] but drives deno_core's event loop, so a page script that
+/// hydrates asynchronously (`Promise`/`async`-`await`/microtasks, and timer
+/// callbacks that themselves await) resolves before serialization. This is the
+/// fidelity step real SPA frameworks need.
+pub async fn render_html_async(backend: Backend, script: &str) -> Result<String, String> {
+    let mut rt = make_runtime(backend.clone())?;
+    rt.execute_script("<page>", script.to_string())
+        .map_err(|e| e.to_string())?;
+    drain_event_loop(&mut rt).await?; // resolve promises/microtasks from the page
+    rt.execute_script("<timers>", "__runTimers()")
+        .map_err(|e| e.to_string())?;
+    drain_event_loop(&mut rt).await?; // resolve promises queued by timer callbacks
+    Ok(backend.document_html())
+}
+
 fn read_string(rt: &mut JsRuntime, global: v8::Global<v8::Value>) -> Result<String, String> {
     let context = rt.main_context();
     let scope = v8::HandleScope::new(rt.v8_isolate());

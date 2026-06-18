@@ -3,7 +3,7 @@
 
 pub mod dom;
 pub mod tree_backend;
-pub use dom::{render_html, run_with_dom, DomBackend};
+pub use dom::{render_html, render_html_async, run_with_dom, DomBackend};
 pub use tree_backend::TreeDom;
 
 use deno_core::{v8, JsRuntime, RuntimeOptions};
