@@ -432,6 +432,18 @@
     if (typeof g.HTMLAnchorElement !== 'function') g.HTMLAnchorElement = function(){};
     var anchorProto = Object.create(baseProto);
     anchorProto.click = function(){ try { var C = g.MouseEvent || g.PointerEvent || g.Event; this.dispatchEvent(new C('click', { bubbles: true, cancelable: true })); } catch(e){} };
+    // HTMLHyperlinkElementUtils — origin/protocol/host/hostname/port/pathname/search/hash decomposed
+    // from href (resolved against the document base). React/Next read anchorEl.origin during render;
+    // undefined → "Cannot read properties of undefined (reading 'origin')". href already reflects.
+    (function(){
+      var anchorBase = function(){ return (g.location && g.location.href) || 'http://localhost/'; };
+      var parse = function(el){ try { return new g.URL(el.href || '', anchorBase()); } catch(e){ return null; } };
+      ['origin','protocol','host','hostname','port','pathname','search','hash','username','password'].forEach(function(p){
+        Object.defineProperty(anchorProto, p, { configurable: true,
+          get: function(){ var u = parse(this); if (!u) return p === 'pathname' ? '/' : ''; var v = u[p]; return v == null ? '' : v; },
+          set: function(v){ var u = parse(this); if (!u) return; try { u[p] = v; this.href = u.href; } catch(e){} } });
+      });
+    })();
     g.HTMLAnchorElement.prototype = anchorProto;
     // Apply the control interface prototype + own value/checked to an element by its tag. Used by
     // createElement AND cloneNode (clones must keep type/value/checked/selected accessors — e.g.

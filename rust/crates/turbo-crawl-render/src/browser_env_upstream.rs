@@ -408,6 +408,35 @@ fn el_get_attribute_node(scope: &mut v8::PinScope, args: v8::FunctionCallbackArg
     }
 }
 
+// setAttributeNode(attr) / removeAttributeNode(attr) — operate on an Attr node (the plain object
+// el_get_attribute_node returns: { name, value, … }). React's releaseSingletonInstance resets the
+// <html>/<head>/<body> singletons during commit via instance.removeAttributeNode(attributes[i]);
+// without these it throws "removeAttributeNode is not a function" and aborts the commit.
+fn attr_name_value(scope: &mut v8::PinScope, v: v8::Local<v8::Value>) -> Option<(String, String)> {
+    let o = v.to_object(scope)?;
+    let name = get_str_prop(scope, o, "name").or_else(|| get_str_prop(scope, o, "nodeName"))?;
+    let value = get_str_prop(scope, o, "value").or_else(|| get_str_prop(scope, o, "nodeValue")).unwrap_or_default();
+    if name.is_empty() { None } else { Some((name, value)) }
+}
+fn el_set_attribute_node(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let Some(h) = handle_of(scope, args.this()) else { return };
+    if let Some((name, value)) = attr_name_value(scope, args.get(0)) {
+        let is_html = with_tree(|t| t.namespace_id(h) == 0).unwrap_or(true);
+        let key = if is_html { name.to_ascii_lowercase() } else { name };
+        with_tree_mut(|t| t.set_attribute(h, &key, &value));
+    }
+    rv.set(v8::null(scope).into()); // replaced Attr (none modeled) → null
+}
+fn el_remove_attribute_node(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let Some(h) = handle_of(scope, args.this()) else { return };
+    if let Some((name, _)) = attr_name_value(scope, args.get(0)) {
+        with_tree_mut(|t| t.remove_attribute(h, &name));
+        let lower = name.to_ascii_lowercase();
+        if lower != name { with_tree_mut(|t| t.remove_attribute(h, &lower)); }
+    }
+    rv.set(args.get(0)); // spec returns the removed Attr
+}
+
 fn el_has_attribute(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
     let Some(h) = handle_of(scope, args.this()) else { return };
     let name = arg_str(scope, &args, 0);
@@ -1515,6 +1544,8 @@ fn build_el_template<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::
     tmpl_method(scope, tmpl, "setAttribute", el_set_attribute);
     tmpl_method(scope, tmpl, "getAttribute", el_get_attribute);
     tmpl_method(scope, tmpl, "getAttributeNode", el_get_attribute_node);
+    tmpl_method(scope, tmpl, "setAttributeNode", el_set_attribute_node);
+    tmpl_method(scope, tmpl, "removeAttributeNode", el_remove_attribute_node);
     tmpl_method(scope, tmpl, "hasAttribute", el_has_attribute);
     tmpl_method(scope, tmpl, "removeAttribute", el_remove_attribute);
     tmpl_method(scope, tmpl, "querySelector", el_query_selector);

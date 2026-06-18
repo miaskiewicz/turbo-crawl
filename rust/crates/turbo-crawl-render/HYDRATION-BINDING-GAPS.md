@@ -14,6 +14,23 @@ property/method a live React/PropelAuth bundle reads during hydration; an `undef
 read becomes a `TypeError` (`X.classList`/`X.toLowerCase` of undefined) that aborts the
 mount.
 
+## STATUS (turbo-test @ 4dddaed) — all DOM/element gaps closed
+
+✅ Every binding gap found by driving payroll `/login` is now fixed + vendored:
+form-control reflection, `getClientRects`, document state APIs, `link.rel`/`media`/`as`,
+`script.type`, `localName`, `Element.removeAttributeNode`/`setAttributeNode`, and
+`HTMLAnchorElement` URL decomposition (`origin`/`pathname`/`host`/…). The app now boots
+and runs **all the way into React** with no `ReferenceError`/`TypeError`.
+
+🟡 **Remaining is NOT a DOM gap — it's the app's auth/network flow.** React reaches the
+client and the PropelAuth provider issues a session-check request, then waits for it to
+resolve before rendering the login form. Headless, that async doesn't settle (the auth
+round-trip / its long-lived connection), so React spins before first paint (0 inputs).
+This is environmental (PropelAuth backend + auth semantics), not a turbo-test or
+turbo-crawl engine gap — the engine drives the real bundle end to end.
+
+---
+
 ## STATUS (turbo-test @ 3711533)
 
 ✅ **Fixed in the binding** (re-vendored): form-control reflection (`value`/`checked`/
