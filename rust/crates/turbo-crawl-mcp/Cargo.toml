@@ -17,7 +17,10 @@ path = "src/main.rs"
 [dependencies]
 turbo-crawl-core = { path = "../turbo-crawl-core", version = "0.1.11" }
 turbo-crawl-view = { path = "../turbo-crawl-view", version = "0.1.11" }
+turbo-crawl-page = { path = "../turbo-crawl-page", version = "0.1.11" }
+turbo-crawl-render = { path = "../turbo-crawl-render", version = "0.1.11" }
 turbo-dom-parser = { package = "turbo-dom", version = "0.3.2" }
+async-trait = "0.1"
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt", "io-std", "io-util", "net", "time"] }
 

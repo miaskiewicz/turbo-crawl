@@ -19,7 +19,7 @@ turbo-dom is consumed from **crates.io** as the `turbo-dom-parser` crate
 | `turbo-crawl-render` | Tier 3 — `deno_core` isolate + the rtdom↔V8 DOM binding (JS execution / hydration) |
 | `turbo-crawl-transform` | swc TS/JSX → classic JS for the render tier |
 | `turbo-crawl-napi` | the `.node` addon — in-process bridge from the core to Node (+ stateful `Session`) |
-| `turbo-crawl-mcp` | stdio JSON-RPC MCP server (stateful session, action + read tools) |
+| `turbo-crawl-mcp` | stdio JSON-RPC MCP server — native binary, full 60-tool surface (parity with the JS server) over a stateful session |
 
 `cargo test` runs the full offline suite across the workspace (200+ tests);
 `cargo clippy --workspace --all-targets` and `cargo fmt` are clean.

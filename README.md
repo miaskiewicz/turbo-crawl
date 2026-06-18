@@ -190,11 +190,11 @@ cargo build --release -p turbo-crawl-mcp --manifest-path rust/Cargo.toml
 claude mcp add turbo-crawl -- "$PWD/rust/target/release/turbo-crawl-mcp"
 ```
 
-Both speak newline-delimited JSON-RPC 2.0 over stdio. The JS server exposes the full
-60-tool surface; the native Rust binary is one process (no Node, no Chromium) exposing
-the ported core subset (~23 tools — navigation, reads, interaction, crawl) and is
-growing toward parity. Verify with `claude mcp list`. To scope it to one project
-instead of globally, add `--scope project` (writes
+Both speak newline-delimited JSON-RPC 2.0 over stdio and expose the **same 60-tool
+surface** (navigation, reads, interaction, accessors, render/JS, cookies/headers,
+`crawl`/`batch`); the native Rust binary is one process — no Node, no Chromium.
+Verify with `claude mcp list`. To scope it to one project instead of globally, add
+`--scope project` (writes
 `.mcp.json` in the repo) or commit a `.mcp.json`:
 
 ```json
