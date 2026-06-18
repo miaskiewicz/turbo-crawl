@@ -194,6 +194,10 @@ class __NoopObserver {
 globalThis.MutationObserver = __NoopObserver;
 globalThis.IntersectionObserver = __NoopObserver;
 globalThis.ResizeObserver = __NoopObserver;
+// NOTE: getComputedStyle + matchMedia are provided by the vendored browser_env.js
+// (a jsdom-style getComputedStyle the Playwright shim's cssValue/visibility reads,
+// and a matchMedia stub). Do NOT redefine them here — ENV_BOOTSTRAP runs AFTER the
+// binding, so an override would clobber the real ones and break the shim.
 // MessageChannel — React 18's scheduler drains its work queue by posting to a
 // MessagePort and running the handler on the other port's onmessage. Route the
 // message through the timer queue (setTimeout 0) so the hydration pump drains it;
@@ -424,8 +428,15 @@ if (typeof globalThis.btoa === "undefined") {
   };
 }
 // ReadableStream — the RSC client reads the flight payload as a stream. A queue-backed
-// impl supporting start/pull/cancel + getReader().read() {value,done}; enough for the
-// "wrap a buffer/array and read it" use the hydration path needs.
+// impl supporting start/pull/cancel + getReader().read() {value,done}.
+//
+// CRITICAL for streaming producers (Next's RSC flight): the controller is filled
+// ASYNCHRONOUSLY — `enqueue` is called as `__next_f` rows arrive and `close` fires on
+// DOMContentLoaded, both LATER than the first `read()`. So a `read()` that finds the
+// queue empty-but-open must NOT report EOF — it must PARK until the next enqueue/close.
+// (Returning {done:true} there truncates the flight payload mid-stream → React keeps
+// retrying the desynced reader → the render never converges.) Parked reads are held in
+// `_waiters` and settled by enqueue/close/error.
 if (typeof globalThis.ReadableStream === "undefined") {
   globalThis.ReadableStream = class ReadableStream {
     constructor(source = {}, _strategy) {
@@ -434,10 +445,19 @@ if (typeof globalThis.ReadableStream === "undefined") {
       this._err = null;
       this._source = source || {};
       this._locked = false;
+      this._waiters = []; // pending {resolve,reject} for reads that outran the producer
+      const settleNext = () => {
+        if (!this._waiters.length) return false;
+        if (this._q.length) { this._waiters.shift().resolve({ value: this._q.shift(), done: false }); return true; }
+        if (this._err) { this._waiters.shift().reject(this._err); return true; }
+        if (this._closed) { this._waiters.shift().resolve({ value: undefined, done: true }); return true; }
+        return false;
+      };
+      const drain = () => { while (settleNext()) {} };
       const c = {
-        enqueue: (chunk) => this._q.push(chunk),
-        close: () => { this._closed = true; },
-        error: (e) => { this._err = e; this._closed = true; },
+        enqueue: (chunk) => { this._q.push(chunk); drain(); },
+        close: () => { this._closed = true; drain(); },
+        error: (e) => { this._err = e; this._closed = true; drain(); },
         get desiredSize() { return 1; },
       };
       this._ctrl = c;
@@ -457,7 +477,9 @@ if (typeof globalThis.ReadableStream === "undefined") {
           await pump();
           if (self._q.length) return { value: self._q.shift(), done: false };
           if (self._err) throw self._err;
-          return { value: undefined, done: true };
+          if (self._closed) return { value: undefined, done: true };
+          // Empty but still open: park until enqueue/close/error settles us.
+          return new Promise((resolve, reject) => self._waiters.push({ resolve, reject }));
         },
         releaseLock() { self._locked = false; },
         async cancel(r) { self._closed = true; if (typeof self._source.cancel === "function") await self._source.cancel(r); },
@@ -601,6 +623,12 @@ globalThis.__execScriptEl = async function (el) {
   if (!el || el.__tcDone) return;
   el.__tcDone = true; // mark before await so a re-entrant pump round can't double-run
   const get = (n) => (typeof el.getAttribute === "function" ? el.getAttribute(n) : null);
+  // Module-capable browsers SKIP `<script nomodule>` (they run the module build
+  // instead). We support module scripts, so honor it: otherwise we force-run a
+  // page's legacy polyfill bundle (e.g. Next's core-js `polyfill-nomodule`), which
+  // overwrites native Promise/queueMicrotask with impls whose microtask scheduler
+  // is inert in this env — promises never settle and the render never commits.
+  if (get("nomodule") !== null || get("noModule") !== null) return;
   if (!__EXECUTABLE_TYPES.has((get("type") || "").toLowerCase())) return; // JSON/data blocks etc.
   const src = get("src");
   try {

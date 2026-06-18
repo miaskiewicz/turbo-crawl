@@ -224,6 +224,40 @@ async fn readable_stream_and_abort_controller_present() {
     );
 }
 
+// RSC flight is a STREAMING producer: the controller is enqueued/closed LATER than the
+// first read() (flight rows arrive as `__next_f` pushes; close fires on DOMContentLoaded).
+// A read() that hits an empty-but-OPEN stream must PARK until the next enqueue/close —
+// returning {done:true} there truncates the flight mid-stream and the render never
+// converges. This drives the producer from a timer AFTER the reader has already parked.
+#[tokio::test]
+async fn readable_stream_parks_for_async_producer() {
+    let html = render_page(
+        "<body><div id='root'></div></body>",
+        "about:blank",
+        r#"
+        (async () => {
+          let ctrl;
+          const rs = new ReadableStream({ start(c) { ctrl = c; } }); // empty at start
+          // Producer runs on later turns, AFTER read() has parked on the empty stream.
+          setTimeout(() => ctrl.enqueue("one"), 0);
+          setTimeout(() => ctrl.enqueue("two"), 0);
+          setTimeout(() => ctrl.close(), 0);
+          const reader = rs.getReader();
+          const parts = [];
+          for (;;) { const { value, done } = await reader.read(); if (done) break; parts.push(value); }
+          document.getElementById('root').setAttribute('data-parts', parts.join(','));
+        })();
+        "#,
+    )
+    .await
+    .unwrap();
+    assert!(
+        html.contains(r#"data-parts="one,two""#),
+        "reader must park on an empty-open stream and resume on later enqueue/close, \
+         not report EOF early: {html}"
+    );
+}
+
 // crypto.subtle.digest (real SHA-256), BroadcastChannel, and WebSocket — auth SDKs
 // (PropelAuth) + analytics use these during hydration. WebSocket must not hang/throw.
 #[tokio::test]
@@ -478,6 +512,43 @@ async fn dynamic_script_injection_runs_and_fires_onload() {
         out.contains(r#"data-chunk="true""#),
         "the injected chunk's own code must have executed: {out}"
     );
+}
+
+// Module-capable runtimes (us, every modern browser) SKIP `<script nomodule>` and
+// run the module build instead. The hydration pump must honor this: a page's legacy
+// polyfill bundle (e.g. Next's core-js `polyfill-nomodule`) overwrites native
+// Promise/queueMicrotask with impls whose microtask scheduler is inert here, so
+// running it makes the page's promises never settle and the render never converges.
+// Both spellings appear in the wild: `nomodule` (HTML) and `noModule` (Next's
+// server-rendered serialization of the React `noModule` prop).
+#[tokio::test]
+async fn nomodule_scripts_are_skipped() {
+    for attr in ["nomodule", "noModule=\"\""] {
+        let html = format!(
+            r#"<body><div id="root"></div>
+              <script {attr}>
+                const bad = document.createElement('input');
+                bad.setAttribute('data-testid', 'nomodule-ran');
+                document.getElementById('root').appendChild(bad);
+              </script>
+              <script>
+                const ok = document.createElement('input');
+                ok.setAttribute('data-testid', 'module-ran');
+                document.getElementById('root').appendChild(ok);
+              </script></body>"#
+        );
+        let out = render_hydrate(&html, "https://example.test/")
+            .await
+            .unwrap();
+        assert!(
+            !out.contains(r#"data-testid="nomodule-ran""#),
+            "[{attr}] nomodule script must NOT run: {out}"
+        );
+        assert!(
+            out.contains(r#"data-testid="module-ran""#),
+            "[{attr}] the non-nomodule script must still run: {out}"
+        );
+    }
 }
 
 // --- network: fetch / XHR over the tier-1 stack -----------------------------
