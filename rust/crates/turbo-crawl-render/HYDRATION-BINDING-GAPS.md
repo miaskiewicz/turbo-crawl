@@ -14,7 +14,29 @@ property/method a live React/PropelAuth bundle reads during hydration; an `undef
 read becomes a `TypeError` (`X.classList`/`X.toLowerCase` of undefined) that aborts the
 mount.
 
-## HIGH — form-control reflection (breaks controlled inputs)
+## STATUS (turbo-test @ 7f63ac1)
+
+✅ **Fixed in the binding** (re-vendored): form-control reflection (`value`/`checked`/
+`valueAsNumber`/`select.value`/`selectedIndex`/`option.value`), `getClientRects`,
+`document.readyState`/`visibilityState`/`hidden`/`elementFromPoint`/`elementsFromPoint`,
+CharacterData methods, Selection/Range, contentEditable.
+
+🔴 **Still open** (found by driving payroll `/login` to React commit):
+
+- **`HTMLLinkElement.rel`** (+ likely `.media`/`.href`/`.as`/`.type`) — IDL property
+  doesn't reflect the `rel` attribute (returns `undefined`). React's
+  `clearContainerSparingly` (run when it clears the hydration container before commit)
+  does `if ("stylesheet" === node.rel.toLowerCase()) continue;` over the container's
+  `<link>` children → `undefined.toLowerCase()` aborts the **app** mount. **This is the
+  current blocker** for the login form rendering. Reflect `rel` (and the sibling link
+  props) like `value`/`checked` already are.
+- **`Element.localName`** (LOW) — returns `undefined`; should be the lowercase tag name.
+
+(turbo-crawl side, already handled in ENV_BOOTSTRAP: the Shadow-DOM fallback now sets
+`shadowRoot.host` back to the host — Next devtools does `var e = er.host; e.classList…`,
+which was crashing the whole render before the app could mount.)
+
+## HIGH — form-control reflection (breaks controlled inputs) — ✅ FIXED in 7f63ac1
 
 React controlled components read `el.value`/`el.checked` on every render; reading
 `undefined` then doing `.toLowerCase()`/comparisons throws and kills the render.

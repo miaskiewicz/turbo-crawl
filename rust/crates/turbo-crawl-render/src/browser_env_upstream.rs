@@ -202,6 +202,133 @@ fn el_remove_child(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments
     rv.set(args.get(0));
 }
 
+// ---- CharacterData methods (text/comment nodes) ----------------------------------------------
+fn arg_usize(scope: &mut v8::PinScope, args: &v8::FunctionCallbackArguments, i: i32) -> usize {
+    let n = args.get(i).integer_value(scope).unwrap_or(0);
+    if n < 0 { 0 } else { n as usize }
+}
+fn el_insert_data(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
+    let Some(h) = handle_of(scope, args.this()) else { return };
+    let off = arg_usize(scope, &args, 0);
+    let data = arg_str(scope, &args, 1);
+    with_tree_mut(|t| t.insert_data(h, off, &data));
+}
+fn el_delete_data(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
+    let Some(h) = handle_of(scope, args.this()) else { return };
+    let off = arg_usize(scope, &args, 0);
+    let count = arg_usize(scope, &args, 1);
+    with_tree_mut(|t| t.delete_data(h, off, count));
+}
+fn el_append_data(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
+    let Some(h) = handle_of(scope, args.this()) else { return };
+    let data = arg_str(scope, &args, 0);
+    with_tree_mut(|t| t.append_data(h, &data));
+}
+fn el_replace_data(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
+    let Some(h) = handle_of(scope, args.this()) else { return };
+    let off = arg_usize(scope, &args, 0);
+    let count = arg_usize(scope, &args, 1);
+    let data = arg_str(scope, &args, 2);
+    with_tree_mut(|t| t.replace_data(h, off, count, &data));
+}
+fn el_substring_data(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let Some(h) = handle_of(scope, args.this()) else { return };
+    let off = arg_usize(scope, &args, 0);
+    let count = arg_usize(scope, &args, 1);
+    let s = with_tree(|t| t.substring_data(h, off, count)).unwrap_or_default();
+    rv.set(v8::String::new(scope, &s).unwrap().into());
+}
+fn el_split_text(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let Some(h) = handle_of(scope, args.this()) else { return };
+    let off = arg_usize(scope, &args, 0);
+    let Some(new_h) = with_tree_mut(|t| t.split_text(h, off)) else { return };
+    let node = wrap(scope, new_h);
+    rv.set(node.into());
+}
+
+// rtdom's native style cascade (turbo-dom `cascade::computed_style`) resolves a property's computed
+// value WITH inheritance for the inherited set (color, visibility, font-*, …). getComputedStyle's
+// JS cascade only sees an element's OWN matched rules + inline style, so an inherited property like
+// `visibility: hidden` set on an ancestor never reached descendants — testing-library then treated a
+// hidden subtree as query-visible. JS getComputedStyle calls this for those inherited properties.
+// (The result is version-cached on the Tree, so repeated calls within a render are cheap.)
+fn el_cascade_prop(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let Some(h) = handle_of(scope, args.this()) else { return };
+    let name = arg_str(scope, &args, 0);
+    let val = with_tree(|t| turbo_dom_parser::rtdom::cascade::computed_style(t, h).get(&name).cloned())
+        .flatten()
+        .unwrap_or_default();
+    rv.set(v8::String::new(scope, &val).unwrap().into());
+}
+
+// Resolve a run of variadic (Node | string) arguments [start..] into handles, turning bare strings
+// into text nodes (per the ChildNode/ParentNode spec). Used by before/after/replaceWith/etc.
+fn resolve_nodes(scope: &mut v8::PinScope, args: &v8::FunctionCallbackArguments, start: i32) -> Vec<Handle> {
+    let mut out = Vec::new();
+    for i in start..args.length() {
+        let v = args.get(i);
+        if let Some(h) = v.to_object(scope).and_then(|o| handle_of(scope, o)) {
+            out.push(h);
+        } else if !v.is_null_or_undefined() {
+            let s = v.to_rust_string_lossy(scope);
+            if let Some(h) = with_tree_mut(|t| t.create_text_node(&s)) {
+                out.push(h);
+            }
+        }
+    }
+    out
+}
+fn el_before(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
+    let Some(h) = handle_of(scope, args.this()) else { return };
+    let nodes = resolve_nodes(scope, &args, 0);
+    with_tree_mut(|t| t.before(h, &nodes));
+}
+fn el_after(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
+    let Some(h) = handle_of(scope, args.this()) else { return };
+    let nodes = resolve_nodes(scope, &args, 0);
+    with_tree_mut(|t| t.after(h, &nodes));
+}
+fn el_replace_with(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
+    let Some(h) = handle_of(scope, args.this()) else { return };
+    let nodes = resolve_nodes(scope, &args, 0);
+    with_tree_mut(|t| t.replace_with(h, &nodes));
+}
+fn el_replace_children(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
+    let Some(h) = handle_of(scope, args.this()) else { return };
+    let nodes = resolve_nodes(scope, &args, 0);
+    with_tree_mut(|t| t.replace_children(h, &nodes));
+}
+fn el_insert_adjacent_element(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let Some(h) = handle_of(scope, args.this()) else { return };
+    let pos = arg_str(scope, &args, 0);
+    let Some(el) = arg_handle(scope, &args, 1) else { return };
+    let ok = with_tree_mut(|t| t.insert_adjacent_element(h, &pos, el)).unwrap_or(false);
+    if ok { rv.set(args.get(1)); } else { rv.set(v8::null(scope).into()); }
+}
+fn el_insert_adjacent_html(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
+    let Some(h) = handle_of(scope, args.this()) else { return };
+    let pos = arg_str(scope, &args, 0);
+    let html = arg_str(scope, &args, 1);
+    with_tree_mut(|t| t.insert_adjacent_html(h, &pos, &html));
+}
+fn el_toggle_attribute(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let Some(h) = handle_of(scope, args.this()) else { return };
+    let name = arg_str(scope, &args, 0).to_ascii_lowercase();
+    let force = if args.length() > 1 && !args.get(1).is_undefined() {
+        Some(args.get(1).boolean_value(scope))
+    } else { None };
+    let present = with_tree_mut(|t| t.toggle_attribute(h, &name, force)).unwrap_or(false);
+    rv.set(v8::Boolean::new(scope, present).into());
+}
+fn el_get_attribute_ns(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
+    let Some(h) = handle_of(scope, args.this()) else { return };
+    let local = arg_str(scope, &args, 1);
+    match with_tree(|t| t.get_attribute_ns(h, None, &local)).flatten() {
+        Some(s) => rv.set(v8::String::new(scope, &s).unwrap().into()),
+        None => rv.set(v8::null(scope).into()),
+    }
+}
+
 fn el_insert_before(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue) {
     let Some(parent) = handle_of(scope, args.this()) else { return };
     let Some(child) = arg_handle(scope, &args, 0) else { return };
@@ -1399,6 +1526,24 @@ fn build_el_template<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::
     tmpl_method(scope, tmpl, "click", el_click);
     tmpl_method(scope, tmpl, "scrollIntoView", el_scroll_into_view);
     tmpl_method(scope, tmpl, "getBoundingClientRect", el_get_bounding_client_rect);
+    // CharacterData (text/comment node) mutation — native over rtdom's text storage.
+    tmpl_method(scope, tmpl, "insertData", el_insert_data);
+    tmpl_method(scope, tmpl, "deleteData", el_delete_data);
+    tmpl_method(scope, tmpl, "appendData", el_append_data);
+    tmpl_method(scope, tmpl, "replaceData", el_replace_data);
+    tmpl_method(scope, tmpl, "substringData", el_substring_data);
+    tmpl_method(scope, tmpl, "splitText", el_split_text);
+    // native cascade lookup (inherited-property resolution) used by getComputedStyle.
+    tmpl_method(scope, tmpl, "__cascadeProp", el_cascade_prop);
+    // ChildNode / ParentNode manipulation + insertAdjacent* + toggleAttribute + getAttributeNS (native).
+    tmpl_method(scope, tmpl, "before", el_before);
+    tmpl_method(scope, tmpl, "after", el_after);
+    tmpl_method(scope, tmpl, "replaceWith", el_replace_with);
+    tmpl_method(scope, tmpl, "replaceChildren", el_replace_children);
+    tmpl_method(scope, tmpl, "insertAdjacentElement", el_insert_adjacent_element);
+    tmpl_method(scope, tmpl, "insertAdjacentHTML", el_insert_adjacent_html);
+    tmpl_method(scope, tmpl, "toggleAttribute", el_toggle_attribute);
+    tmpl_method(scope, tmpl, "getAttributeNS", el_get_attribute_ns);
 
     tmpl_getter(scope, tmpl, "tagName", get_tag_name);
     tmpl_getter(scope, tmpl, "parentNode", get_parent_node);

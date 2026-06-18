@@ -131,7 +131,7 @@ globalThis.__runTimers = (max = 100000) => {
     n++;
     __timers.sort((a, b) => a.delay - b.delay);
     const t = __timers.shift();
-    try { t.fn(...t.args); } catch (e) { Deno.core.print("timer error: " + e + "\n"); }
+    try { t.fn(...t.args); } catch (e) { Deno.core.print("timer error: " + (e && e.stack ? e.stack : e) + "\n"); }
   }
   return n; // count fired — lets the hydration pump detect quiescence
 };
@@ -552,7 +552,10 @@ globalThis.__pendingWork = () =>
   const addShadow = (el) => {
     if (el && typeof el.attachShadow !== "function") {
       el.attachShadow = function () {
-        try { this.shadowRoot = this; } catch (_e) {}
+        // Light-DOM fallback: the root IS the host. Set `.host` back to the host
+        // (itself) too — code reads `shadowRoot.host` to get the host element back
+        // (Next devtools: `var e = er.host; e.classList…`); without it that's undefined.
+        try { this.shadowRoot = this; this.host = this; } catch (_e) {}
         return this;
       };
     }

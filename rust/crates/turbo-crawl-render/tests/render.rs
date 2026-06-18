@@ -171,6 +171,8 @@ fn attach_shadow_falls_back_to_light_dom() {
         const host = document.createElement('div'); // React creates the shadow host
         document.getElementById('host').appendChild(host);
         const root = host.attachShadow({ mode: 'open' });
+        // code reads shadowRoot.host to get the host back (Next devtools theme code)
+        root.host.setAttribute('data-host-ok', '1');
         const input = document.createElement('input');
         input.setAttribute('data-testid', 'shadow-input');
         root.appendChild(input);
@@ -180,6 +182,10 @@ fn attach_shadow_falls_back_to_light_dom() {
     assert!(
         html.contains(r#"data-testid="shadow-input""#),
         "content rendered into a shadow root must reach the serialized light DOM: {html}"
+    );
+    assert!(
+        html.contains(r#"data-host-ok="1""#),
+        "shadowRoot.host must point back to the host element: {html}"
     );
 }
 

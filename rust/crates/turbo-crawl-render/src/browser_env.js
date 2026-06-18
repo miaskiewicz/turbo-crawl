@@ -98,18 +98,16 @@
     var st = el && el.style;
     if (st) { for (var k in st) { if (k.indexOf('__') !== 0 && Object.prototype.hasOwnProperty.call(st, k) && typeof st[k] !== 'function') setProp(k, st[k]); } }
     if (decl.display == null) decl.display = '';
-    // `visibility` is an INHERITED property: a child with no explicit visibility takes the parent's
-    // computed value. testing-library / dom-accessibility-api rely on this — they treat an element
-    // as inaccessible when getComputedStyle(el).visibility === 'hidden', expecting a hidden ancestor
-    // to have propagated down (rather than walking ancestors themselves). Without inheritance a
-    // button inside a `visibility: hidden` container stayed query-visible (e.g. getAllByRole counted
-    // a hidden section toggle). display is NOT inherited, so it is left as-is.
-    if (decl.visibility == null || decl.visibility === '') {
-      var pv = '';
-      var par = el && el.parentElement;
-      if (par) { try { pv = g.getComputedStyle(par).visibility || ''; } catch(e){} }
-      decl.visibility = pv;
+    // `visibility` is INHERITED: a child with no explicit visibility takes the parent's computed
+    // value. testing-library / dom-accessibility-api rely on this — they treat an element as
+    // inaccessible when getComputedStyle(el).visibility === 'hidden', expecting a hidden ancestor to
+    // have propagated down. The JS cascade above only sees this element's own rules, so we defer to
+    // rtdom's native cascade (cascade::computed_style) which resolves inheritance. display is NOT
+    // inherited, so it is left as the element's own value.
+    if ((decl.visibility == null || decl.visibility === '') && el && typeof el.__cascadeProp === 'function') {
+      try { decl.visibility = el.__cascadeProp('visibility') || ''; } catch(e){}
     }
+    if (decl.visibility == null) decl.visibility = '';
     if (decl.opacity == null) decl.opacity = '';
     return decl;
   };
@@ -282,19 +280,15 @@
     // property) must show as the content attribute so attribute selectors like script[src*="maps"]
     // and getAttribute('src') see it. (Image() defines its own src with onload; that shadows this.)
     ['src','href'].forEach(function(a){ if (!Object.getOwnPropertyDescriptor(baseProto, a)) { try { Object.defineProperty(baseProto, a, { configurable: true, get: function(){ return this.getAttribute(a) || ''; }, set: function(v){ this.setAttribute(a, v == null ? '' : String(v)); } }); } catch(e){} } });
-    // CharacterData mutation methods on text/comment nodes (data is the native node-data accessor).
-    // userEvent's contenteditable typing path inserts characters via textNode.insertData(); Range
-    // splits text via splitText(). Both operate on `this.data` (rtdom's text storage).
-    if (!baseProto.insertData) baseProto.insertData = function(offset, data){ var s = this.data || ''; offset = offset|0; this.data = s.slice(0, offset) + String(data) + s.slice(offset); };
-    if (!baseProto.deleteData) baseProto.deleteData = function(offset, count){ var s = this.data || ''; offset = offset|0; this.data = s.slice(0, offset) + s.slice(offset + (count|0)); };
-    if (!baseProto.appendData) baseProto.appendData = function(data){ this.data = (this.data || '') + String(data); };
-    if (!baseProto.replaceData) baseProto.replaceData = function(offset, count, data){ var s = this.data || ''; offset = offset|0; this.data = s.slice(0, offset) + String(data) + s.slice(offset + (count|0)); };
-    if (!baseProto.substringData) baseProto.substringData = function(offset, count){ var s = this.data || ''; offset = offset|0; return s.slice(offset, offset + (count|0)); };
-    if (!baseProto.splitText) baseProto.splitText = function(offset){ var s = this.data || ''; offset = offset|0; var rest = s.slice(offset); this.data = s.slice(0, offset); var n = this.ownerDocument.createTextNode(rest); if (this.parentNode) this.parentNode.insertBefore(n, this.nextSibling); return n; };
+    // CharacterData mutation methods (insertData/deleteData/appendData/replaceData/substringData/
+    // splitText) are now native rtdom Tree ops bound on every node — see browser_env.rs.
     // input.valueAsNumber — the numeric view of `value`, NaN when non-numeric/empty. MUI Slider's
     // hidden range input reads event.target.valueAsNumber in its change handler to derive the new
     // value; without it the value came through as null. (number/range inputs only; others give NaN.)
     if (!Object.getOwnPropertyDescriptor(baseProto, 'valueAsNumber')) { try { Object.defineProperty(baseProto, 'valueAsNumber', { configurable: true, get: function(){ var v = this.value; if (v == null || v === '') return NaN; var n = Number(v); return isNaN(n) ? NaN : n; }, set: function(n){ this.value = (n == null || isNaN(n)) ? '' : String(n); } }); } catch(e){} }
+    // Element.getClientRects() — no layout engine, so mirror getBoundingClientRect's zero rect as a
+    // single-entry DOMRectList-ish (with .item). Libs do getClientRects()[0] / .length; [] would NPE.
+    if (!baseProto.getClientRects) baseProto.getClientRects = function(){ var r = this.getBoundingClientRect ? this.getBoundingClientRect() : { x:0,y:0,top:0,left:0,right:0,bottom:0,width:0,height:0 }; var list = [r]; list.item = function(i){ return list[i] || null; }; return list; };
     // getElementsByTagName / getElementsByClassName / getElementsByName over querySelectorAll. The
     // native binding ships querySelector(All) only; libs (jQuery's load-time support probe does
     // el.getElementsByTagName('input')[0].checked) need these. Add to the shared element prototype
@@ -533,7 +527,19 @@
       if (g.HTMLDocument) g.HTMLDocument.prototype = docProto;
       if (typeof baseProto.requestFullscreen !== 'function') baseProto.requestFullscreen = function(){ return Promise.resolve(); };
       if (typeof docProto.exitFullscreen !== 'function') docProto.exitFullscreen = function(){ return Promise.resolve(); };
-      if (!Object.getOwnPropertyDescriptor(d, 'fullscreenElement')) { try { Object.defineProperty(d, 'fullscreenElement', { configurable: true, writable: true, value: null }); } catch(e){} }
+      // NB: define these directly (NOT guarded by Object.getOwnPropertyDescriptor) — the all-Rust
+      // DOM's NON_MASKING name interceptor intercepts every absent property (returns undefined), so
+      // getOwnPropertyDescriptor synthesizes a truthy descriptor and a `if (!descriptor)` guard would
+      // wrongly skip the define. A real own accessor still shadows the interceptor once defined.
+      try { Object.defineProperty(d, 'fullscreenElement', { configurable: true, writable: true, value: null }); } catch(e){}
+      // Document lifecycle/visibility — our document is always fully parsed and "foregrounded".
+      // Components gate hydration / effects on these (readyState === 'complete', visibilityState).
+      try { Object.defineProperty(d, 'readyState', { configurable: true, get: function(){ return 'complete'; } }); } catch(e){}
+      try { Object.defineProperty(d, 'visibilityState', { configurable: true, get: function(){ return 'visible'; } }); } catch(e){}
+      try { Object.defineProperty(d, 'hidden', { configurable: true, get: function(){ return false; } }); } catch(e){}
+      // No hit-testing without layout → elementFromPoint(s) resolve to nothing.
+      d.elementFromPoint = function(){ return null; };
+      d.elementsFromPoint = function(){ return []; };
     } catch(e){}
   })();
   // ---- Range + Selection (real model over rtdom) ----------------------------------------------
