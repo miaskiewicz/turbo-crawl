@@ -4,7 +4,8 @@
 //! the lib binary, and the two platform initializations must not share a process.
 
 use turbo_crawl_render::{
-    render_html, render_html_async, render_page, render_page_with_budget, run_with_dom,
+    render_html, render_html_async, render_hydrate, render_page, render_page_with_budget,
+    run_with_dom,
 };
 
 // --- reads over a real parsed DOM -------------------------------------------
@@ -288,6 +289,37 @@ fn document_write_appends_to_body() {
     assert!(
         html.contains(">one<") && html.contains(">two<"),
         "got: {html}"
+    );
+}
+
+// The SPA differentiator: webpack's `__webpack_require__.e` injects a <script src>
+// chunk at runtime and waits for its `onload` before mounting the app. A node DOM
+// that only appends the <script> never runs it → the loader hangs → nothing paints.
+// render_hydrate must FETCH + EXECUTE the injected chunk and fire onload, so the
+// form (login-email-input) the onload builds actually renders.
+#[tokio::test]
+async fn dynamic_script_injection_runs_and_fires_onload() {
+    let port = spawn_json_server("globalThis.__chunkRan = true;").await;
+    let html = r#"<body><div id="root"></div>
+      <script>
+        const s = document.createElement('script');
+        s.src = '/chunk.js';
+        s.onload = () => {
+          const i = document.createElement('input');
+          i.setAttribute('data-testid', 'login-email-input');
+          i.setAttribute('data-chunk', String(globalThis.__chunkRan === true));
+          document.getElementById('root').appendChild(i);
+        };
+        document.head.appendChild(s);
+      </script></body>"#;
+    let out = render_hydrate(html, &base(port)).await.unwrap();
+    assert!(
+        out.contains(r#"data-testid="login-email-input""#),
+        "injected chunk's onload must run and render the form: {out}"
+    );
+    assert!(
+        out.contains(r#"data-chunk="true""#),
+        "the injected chunk's own code must have executed: {out}"
     );
 }
 

@@ -433,6 +433,13 @@ class Page {
     this._html = native.render(this._html, this._url, script);
     return this._html;
   }
+  // Hydrate: run the page's OWN scripts (inline + dynamically-injected chunks) the
+  // way a browser does — fetch+execute each <script>, fire onload, drain to quiescence
+  // — so a real SPA bundle mounts. The locator/expect surface then sees the live DOM.
+  async hydrate() {
+    this._html = await native.hydrate(this._html, this._url);
+    return this._html;
+  }
   async addInitScript(script, arg) {
     // No reload pipeline to inject before; run it now over the current DOM.
     this._context._initScripts.push(evalSource(script, arg));
@@ -901,15 +908,14 @@ class LocatorExpect extends BaseExpect {
     this._ok(c === n, `expected count ${n}, got ${c}`);
   }
   async toHaveText(s) {
-    const t = ((await this._snap()).text ?? "").trim();
-    this._ok(matchText(s, t), `expected text ${s}, got "${t}"`);
+    const t = normWs((await this._snap()).text ?? "");
+    const pass = s instanceof RegExp ? s.test(t) : t === normWs(s);
+    this._ok(pass, `expected text ${s}, got "${t}"`);
   }
   async toContainText(s) {
-    const t = (await this._snap()).text ?? "";
-    this._ok(
-      s instanceof RegExp ? s.test(t) : t.includes(s),
-      `expected text to contain "${s}", got "${t}"`,
-    );
+    const t = normWs((await this._snap()).text ?? "");
+    const pass = s instanceof RegExp ? s.test(t) : t.includes(normWs(s));
+    this._ok(pass, `expected text to contain "${s}", got "${t}"`);
   }
   async toHaveValue(value) {
     const got = (await this._snap()).value ?? "";
@@ -1139,6 +1145,8 @@ function matchText(expected, got) {
   if (Array.isArray(expected)) return expected.some((e) => matchText(e, got));
   return got === expected;
 }
+// Playwright normalizes whitespace in text assertions (nbsp→space, collapse, trim).
+const normWs = (s) => String(s).replace(/ /g, " ").replace(/\s+/g, " ").trim();
 const json = (x) => {
   try {
     return JSON.stringify(x);

@@ -16,6 +16,12 @@ export function evaluate(html: string, script: string): string;
 /** Run the page's own JS (promises/timers/fetch/cookies) → hydrated HTML. */
 export function render(html: string, baseUrl: string, script: string): string;
 
+/** Hydrate by running the page's OWN scripts (inline + dynamically-injected chunks)
+ * the way a browser does — fetch+execute each, fire onload, drain to quiescence — so
+ * a real SPA bundle mounts. Async (Promise): must not block Node's event loop, since
+ * chunk fetches may hit a same-process server. */
+export function hydrate(html: string, baseUrl: string): Promise<string>;
+
 /** Transform TS/JSX source → classic JS (swc). */
 export function transform(src: string, ts: boolean, jsx: boolean): string;
 /** Transform a TS/JSX bundle then render it → hydrated HTML. */

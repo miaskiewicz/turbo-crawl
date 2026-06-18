@@ -67,7 +67,21 @@ thread_local! {
 
 /// Interceptor getter (debug only): fall through for known/symbol names; record + return undefined
 /// for anything unimplemented.
-fn missing_getter(scope: &mut v8::PinScope, name: v8::Local<v8::Name>, _args: v8::PropertyCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) -> v8::Intercepted {
+fn missing_getter(scope: &mut v8::PinScope, name: v8::Local<v8::Name>, args: v8::PropertyCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) -> v8::Intercepted {
+    // V8 inline-cache hazard with NON_MASKING interceptors: once a load site reads a property while
+    // it is ABSENT (we intercept → undefined), V8 may cache "this site goes to the interceptor" and
+    // keep routing there EVEN AFTER the property is later added as a real own property — masking it
+    // (reads return undefined though getOwnPropertyNames/hasOwnProperty see it). React stores
+    // `node.__reactFiber$…`/`__reactProps$…` exactly this way: it reads the key (miss → IC poisoned)
+    // before precaching the fiber, then later reads it again and gets undefined → it walks up to the
+    // wrong ancestor, so delegated onClick/onChange never fire (only after a prior render primed the
+    // IC — a brutal Heisenbug). Guard: when the interceptor fires, first look for a REAL property
+    // (interceptors bypassed). If one exists, return IT — so a poisoned IC still yields the truth.
+    let this = args.holder();
+    if let Some(real) = this.get_real_named_property(scope, name) {
+        rv.set(real);
+        return v8::Intercepted::kYes;
+    }
     let key = name.to_rust_string_lossy(scope);
     // symbols (Symbol.toPrimitive, Symbol.iterator, …) + known names → fall through.
     if key.starts_with("Symbol(") || KNOWN.contains(&key.as_str()) {

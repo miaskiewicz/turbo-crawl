@@ -127,11 +127,13 @@ globalThis.cancelAnimationFrame = globalThis.clearTimeout;
 globalThis.queueMicrotask = (fn) => globalThis.setTimeout(fn, 0);
 globalThis.__runTimers = (max = 100000) => {
   let n = 0;
-  while (__timers.length && n++ < max) {
+  while (__timers.length && n < max) {
+    n++;
     __timers.sort((a, b) => a.delay - b.delay);
     const t = __timers.shift();
     try { t.fn(...t.args); } catch (e) { Deno.core.print("timer error: " + e + "\n"); }
   }
+  return n; // count fired — lets the hydration pump detect quiescence
 };
 // NOTE: getElementsByTagName/ClassName/Name, lastChild/previous*/nextElementSibling,
 // and document.write/writeln are provided by the vendored binding (browser_env.js,
@@ -299,6 +301,67 @@ try {
     globalThis.document.currentScript = __cs;
   }
 } catch (_e) {}
+
+// --- hydration pump: the browser's script-loading model -----------------------
+// Real SPAs (Next.js/webpack) don't ship their code inline — they BOOT a tiny
+// runtime that injects more <script src> chunks at runtime and waits for each
+// chunk's `onload` before continuing (webpack's `__webpack_require__.e`). A node
+// DOM that merely *appends* the <script> node never runs it, so the loader
+// promise hangs and the app never mounts. So: execute each <script> element once
+// (inline → eval in global scope; external → fetch its src then eval), and fire
+// load/error so the loader resolves. `__hydrate()` drives this to quiescence.
+const __EXECUTABLE_TYPES = new Set(["", "text/javascript", "application/javascript", "module"]);
+function __fireScriptEvent(el, kind, err) {
+  const ev = { type: kind, target: el, currentTarget: el, error: err };
+  try { const h = kind === "load" ? el.onload : el.onerror; if (typeof h === "function") h.call(el, ev); } catch (_e) {}
+  try { if (typeof el.dispatchEvent === "function") el.dispatchEvent(ev); } catch (_e) {}
+}
+globalThis.__execScriptEl = async function (el) {
+  if (!el || el.__tcDone) return;
+  el.__tcDone = true; // mark before await so a re-entrant pump round can't double-run
+  const get = (n) => (typeof el.getAttribute === "function" ? el.getAttribute(n) : null);
+  if (!__EXECUTABLE_TYPES.has((get("type") || "").toLowerCase())) return; // JSON/data blocks etc.
+  const src = get("src");
+  try {
+    let code;
+    if (src) {
+      const abs = new URL(src, globalThis.location.href).href;
+      const res = await fetch(abs);
+      if (!res.ok) { __fireScriptEvent(el, "error"); return; }
+      code = await res.text();
+    } else {
+      code = el.textContent || el.text || "";
+    }
+    // Set document.currentScript to THIS element during execution, like a browser.
+    // Turbopack/webpack chunk runtimes do `TURBOPACK.push([document.currentScript, …])`
+    // to correlate each chunk with the element that loaded it — a single static
+    // currentScript makes every chunk look identical and the module graph never
+    // resolves. Restore the prior value after (nested injects during eval).
+    let __prevCs;
+    try { __prevCs = globalThis.document.currentScript; globalThis.document.currentScript = el; } catch (_e) {}
+    try {
+      (0, eval)(code); // classic-script semantics: run in global scope
+    } finally {
+      try { globalThis.document.currentScript = __prevCs; } catch (_e) {}
+    }
+    __fireScriptEvent(el, "load");
+  } catch (e) {
+    __fireScriptEvent(el, "error", e);
+    Deno.core.print("script error (" + (src || "inline") + "): " + e + "\n");
+  }
+};
+// Run every not-yet-run <script> in DOM order, drain timers, repeat while new
+// scripts appear or timers keep firing. Bounded by maxRounds (+ the render budget).
+globalThis.__hydrate = async function (maxRounds = 300) {
+  for (let round = 0; round < maxRounds; round++) {
+    let ranScript = false;
+    for (const el of Array.prototype.slice.call(document.querySelectorAll("script"))) {
+      if (!el.__tcDone) { ranScript = true; await globalThis.__execScriptEl(el); }
+    }
+    const ranTimers = globalThis.__runTimers(100000) > 0;
+    if (!ranScript && !ranTimers) break;
+  }
+};
 })();"##;
 
 fn make_runtime(base: &str) -> JsRuntime {
@@ -478,6 +541,60 @@ async fn run_async(
     rt.execute_script("<timers>", "__runTimers()")
         .map_err(|e| e.to_string())?;
     drain_event_loop(rt).await?; // promises queued by timer callbacks
+    Ok(crate::browser_env::document_html())
+}
+
+/// Hydrate a page by running ITS OWN scripts the way a browser does — execute each
+/// `<script>` (inline + dynamically-injected chunks), fetching + running external
+/// `src` and firing `onload` so a webpack-style chunk loader resolves and the app
+/// mounts. No bundle concatenation by the caller, no framework runtime from us: the
+/// page's own bundle drives itself. Bounded by [`DEFAULT_RENDER_BUDGET_MS`].
+pub async fn render_hydrate(html: &str, base: &str) -> Result<String, String> {
+    render_hydrate_with_budget(html, base, DEFAULT_RENDER_BUDGET_MS).await
+}
+
+/// [`render_hydrate`] with an explicit execution budget (ms) + runaway watchdog.
+pub async fn render_hydrate_with_budget(
+    html: &str,
+    base: &str,
+    budget_ms: u64,
+) -> Result<String, String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let mut rt = make_runtime(base);
+    let handle = rt.v8_isolate().thread_safe_handle();
+    let done = Arc::new(AtomicBool::new(false));
+    let watch = done.clone();
+    let watchdog = std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        while !watch.load(Ordering::Relaxed) {
+            if start.elapsed() >= std::time::Duration::from_millis(budget_ms) {
+                handle.terminate_execution();
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    });
+
+    let result = run_hydrate(&mut rt, html, base).await;
+    done.store(true, Ordering::Relaxed);
+    let _ = watchdog.join();
+    let out = result.map_err(|e| budget_msg(&e, budget_ms));
+    crate::browser_env::reset();
+    out
+}
+
+async fn run_hydrate(rt: &mut JsRuntime, html: &str, base: &str) -> Result<String, String> {
+    install_dom(rt, html, base)?;
+    // __hydrate() returns a promise that resolves once scripts + timers quiesce;
+    // the event loop pumps the chunk fetches it awaits.
+    rt.execute_script("<hydrate>", "globalThis.__tcHydrate = __hydrate();")
+        .map_err(|e| e.to_string())?;
+    drain_event_loop(rt).await?;
+    rt.execute_script("<timers>", "__runTimers()")
+        .map_err(|e| e.to_string())?;
+    drain_event_loop(rt).await?;
     Ok(crate::browser_env::document_html())
 }
 

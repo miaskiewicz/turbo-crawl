@@ -208,6 +208,47 @@ pub fn render(html: String, base_url: String, script: String) -> Result<String> 
     .map_err(Error::from_reason)
 }
 
+/// Hydrate a page by running ITS OWN scripts (inline + dynamically-injected chunks)
+/// the way a browser does — backs a JS-mode `goto` that drives a real SPA bundle to
+/// mount, with no caller-side script concatenation.
+///
+/// ASYNC (returns a Promise): hydration fetches chunks over the network, and a same
+/// process server (a test's localhost app) can only answer while Node's event loop is
+/// free — so this must NOT block it. The render runs on a libuv worker thread (its own
+/// current-thread tokio runtime + the non-`Send` V8 isolate, both created and dropped
+/// there), and the Promise resolves with the hydrated HTML.
+pub struct HydrateTask {
+    html: String,
+    base_url: String,
+}
+
+#[napi]
+impl Task for HydrateTask {
+    type Output = String;
+    type JsValue = String;
+
+    fn compute(&mut self) -> Result<String> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        rt.block_on(turbo_crawl_render::render_hydrate(
+            &self.html,
+            &self.base_url,
+        ))
+        .map_err(Error::from_reason)
+    }
+
+    fn resolve(&mut self, _env: Env, output: String) -> Result<String> {
+        Ok(output)
+    }
+}
+
+#[napi]
+pub fn hydrate(html: String, base_url: String) -> AsyncTask<HydrateTask> {
+    AsyncTask::new(HydrateTask { html, base_url })
+}
+
 /// Transform TS/JSX page source → classic JS (swc) so a bundle written in
 /// TS/JSX runs under the render tier. Pass `ts`/`jsx` for the input syntax.
 #[napi]
