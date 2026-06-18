@@ -733,10 +733,13 @@ function makeResponse(r) {
 class BrowserContext {
   constructor(opts = {}) {
     this._cookies = JSON.stringify(opts.storageState?.cookies ?? []);
-    this._baseURL = opts.baseURL ?? null;
+    // `playwright.config` `use: { baseURL, testIdAttribute }` isn't read by the
+    // shim runner, so the register step maps it in via env (TURBO_SHIM_*).
+    this._baseURL = opts.baseURL ?? process.env.TURBO_SHIM_BASE_URL ?? null;
     this._headers = opts.extraHTTPHeaders ?? {};
     this._viewport = opts.viewport ?? { width: 1280, height: 720 };
-    this._testIdAttribute = opts.testIdAttribute ?? "data-testid";
+    this._testIdAttribute =
+      opts.testIdAttribute ?? process.env.TURBO_SHIM_TESTID_ATTR ?? "data-testid";
     this._initScripts = [];
     this._pages = [];
     this._listeners = new Map();
@@ -1182,24 +1185,25 @@ function makeBaseFixtures() {
       await use(page);
     },
     request: async (_f, use) => use(request),
-    baseURL: async (_f, use) => use(undefined),
+    baseURL: async (_f, use) => use(process.env.TURBO_SHIM_BASE_URL ?? undefined),
   };
 }
 
-function makeTestFn(fixtureDefs) {
+function makeTestFn(baseDefs, extDefs = {}) {
+  const open = (testInfo) => openFixtures(baseDefs, extDefs, testInfo);
   const run = (name, fn) =>
     nodeTest(name, async () => {
       const testInfo = makeTestInfo(name);
-      const { arg, teardown } = await openFixtures(fixtureDefs, testInfo);
+      const { arg, teardown } = await open(testInfo);
       try {
         await fn(arg, testInfo);
       } finally {
         await teardown();
       }
     });
-  run.describe = makeDescribe(fixtureDefs);
+  run.describe = makeDescribe();
   run.skip = (name, fn) => nodeTest.skip(name, async () => fn?.({}, makeTestInfo(name)));
-  run.only = (name, fn) => nodeTest.only(name, async () => runWith(fixtureDefs, name, fn));
+  run.only = (name, fn) => nodeTest.only(name, async () => runWith(open, name, fn));
   run.fixme = run.skip;
   run.fail = run;
   run.slow = () => {};
@@ -1207,28 +1211,26 @@ function makeTestFn(fixtureDefs) {
   run.use = () => {};
   run.step = async (_name, body) => body();
   run.info = () => makeTestInfo("");
-  run.beforeEach = (fn) =>
-    beforeEach(async () =>
-      fn(await openFixtures(fixtureDefs, makeTestInfo("beforeEach")).then((r) => r.arg)),
-    );
+  run.beforeEach = (fn) => beforeEach(async () => fn((await open(makeTestInfo("beforeEach"))).arg));
   run.afterEach = (fn) => afterEach(async () => fn({}));
   run.beforeAll = (fn) => before(async () => fn({}));
   run.afterAll = (fn) => after(async () => fn({}));
-  run.extend = (more) => makeTestFn({ ...fixtureDefs, ...more });
+  // A new fixture name extends; reusing a base/ext name OVERRIDES it but the
+  // override still sees the prior value (Playwright's `page: ({page}) => …`).
+  run.extend = (more) => makeTestFn(baseDefs, { ...extDefs, ...more });
   return run;
 }
 
-async function runWith(defs, name, fn) {
-  const testInfo = makeTestInfo(name);
-  const { arg, teardown } = await openFixtures(defs, testInfo);
+async function runWith(open, name, fn) {
+  const { arg, teardown } = await open(makeTestInfo(name));
   try {
-    await fn(arg, testInfo);
+    await fn(arg, makeTestInfo(name));
   } finally {
     await teardown();
   }
 }
 
-function makeDescribe(_defs) {
+function makeDescribe() {
   const d = (name, fn) => nodeTest(name, fn);
   d.skip = (name, fn) => nodeTest.skip(name, fn ?? (() => {}));
   d.only = (name, fn) => nodeTest(name, fn);
@@ -1261,25 +1263,18 @@ function makeTestInfo(title) {
   };
 }
 
-// Resolve the fixture argument object (context → page eagerly; user fixtures via
-// their (use) callback). Returns { arg, teardown }.
-async function openFixtures(defs, testInfo) {
+// Resolve the fixture argument object. Base fixtures (browser → context → page →
+// request → baseURL) resolve first, then extensions in insertion order — so an
+// extension overriding a base name (e.g. `page`) already sees the base value in
+// `arg` when it runs, and replaces it via `use(val)`. Returns { arg, teardown }.
+async function openFixtures(baseDefs, extDefs, testInfo) {
   const arg = {};
   const teardowns = [];
-  const order = [
-    "browser",
-    "context",
-    "page",
-    "request",
-    "baseURL",
-    ...Object.keys(defs).filter((k) => !BASE_NAMES.has(k)),
-  ];
-  for (const name of order) {
-    const def = defs[name];
-    if (def === undefined) continue;
+  const resolve = async (name, def) => {
+    if (def === undefined) return;
     if (typeof def !== "function") {
       arg[name] = def;
-      continue;
+      return;
     }
     await new Promise((settle, reject) => {
       const used = (val) =>
@@ -1290,13 +1285,15 @@ async function openFixtures(defs, testInfo) {
         });
       Promise.resolve(def(arg, used, testInfo)).then(() => settle(), reject);
     });
-  }
+  };
+  for (const name of ["browser", "context", "page", "request", "baseURL"])
+    await resolve(name, baseDefs[name]);
+  for (const name of Object.keys(extDefs)) await resolve(name, extDefs[name]);
   const teardown = async () => {
     for (const release of teardowns.reverse()) release();
   };
   return { arg, teardown };
 }
-const BASE_NAMES = new Set(["browser", "context", "page", "request", "baseURL"]);
 
 export const test = makeTestFn(makeBaseFixtures());
 

@@ -473,6 +473,57 @@ test("request.newContext().get/post/fetch", async () => {
   server.close();
 });
 
+test("request methods pass the HTTP method + body through", async () => {
+  const seen = [];
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      seen.push({ method: req.method, body });
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end(`<title>${req.method}</title>`);
+    });
+  });
+  const base = await listen(server);
+  const ctx = await request.newContext();
+  assert.equal(
+    (await (await ctx.post(`${base}/`, { data: { a: 1 } })).text()).match(/POST/)?.[0],
+    "POST",
+  );
+  await ctx.put(`${base}/`);
+  await ctx.delete(`${base}/`);
+  assert.deepEqual(
+    seen.map((s) => s.method),
+    ["POST", "PUT", "DELETE"],
+  );
+  assert.match(seen[0].body, /"a":1/);
+  server.close();
+});
+
+test("BrowserContext reads baseURL/testIdAttribute from env (config use{} mapping)", () => {
+  process.env.TURBO_SHIM_BASE_URL = "http://env.example";
+  process.env.TURBO_SHIM_TESTID_ATTR = "data-qa";
+  try {
+    const ctx = new BrowserContext();
+    assert.equal(ctx._baseURL, "http://env.example");
+    assert.equal(ctx._testIdAttribute, "data-qa");
+    // explicit opts still win over env
+    const ctx2 = new BrowserContext({ baseURL: "http://opt", testIdAttribute: "data-x" });
+    assert.equal(ctx2._baseURL, "http://opt");
+    assert.equal(ctx2._testIdAttribute, "data-x");
+  } finally {
+    process.env.TURBO_SHIM_BASE_URL = undefined;
+    process.env.TURBO_SHIM_TESTID_ATTR = undefined;
+  }
+});
+
+test("GenericAssertions: .resolves / .rejects", async () => {
+  await expect(Promise.resolve(5)).resolves.toBe(5);
+  await expect(Promise.resolve([1, 2])).resolves.toEqual([1, 2]);
+  await expect(Promise.reject(new Error("boom"))).rejects.toThrow(/boom/);
+  await expect(Promise.reject(new Error("boom"))).rejects.toThrow("boom");
+});
+
 pw("fixture { page } is injected and isolated", async ({ page }) => {
   await page.setContent("<h1>fx</h1>");
   await expect(page.locator("h1")).toHaveText("fx");
@@ -493,6 +544,20 @@ const extended = pw.extend({
 extended("test.extend injects custom fixtures", async ({ greeting, named }) => {
   assert.equal(greeting, "hi");
   await expect(named.locator("h2")).toHaveText("custom");
+});
+
+// The payroll pattern: override `page` with a fixture that depends on the base
+// `page` (same name). The override must SEE the base page, not undefined.
+const wrapped = pw.extend({
+  page: async ({ page }, use) => {
+    page._wrapped = true; // tag the base page the override received
+    await page.setContent("<h4>wrapped</h4>");
+    await use(page);
+  },
+});
+wrapped("page-override fixture receives + wraps the base page", async ({ page }) => {
+  assert.equal(page._wrapped, true);
+  await expect(page.locator("h4")).toHaveText("wrapped");
 });
 
 pw.describe("describe + hooks", () => {
