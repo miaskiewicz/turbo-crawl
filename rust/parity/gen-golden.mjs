@@ -54,6 +54,40 @@ const cookies = {
   appHttp: jar.cookieHeader("http://x.test/app/x", 0),
 };
 
-const golden = { url, robots, cookies };
+// --- DOM views (needs the turbo-dom JS package) -----------------------------
+let dom = null;
+try {
+  const { createEnvironment } = await import("@miaskiewicz/turbo-dom/runtime");
+  const { text } = await import("../../src/text.mjs");
+  const { markdown } = await import("../../src/markdown.mjs");
+  const { links } = await import("../../src/extract.mjs");
+  const { detectJsRequired } = await import("../../src/detect.mjs");
+  const { extractHydrationState } = await import("../../src/hydration.mjs");
+  const { extractSchema } = await import("../../src/schema.mjs");
+
+  const HTML = `<html><head><title>Shop</title></head><body>
+<main><h1>Widget</h1><p>Buy the <a href="/buy">widget</a> now.</p></main>
+<a href="/a">A</a><a href="https://o.test/b">B</a>
+<div id="root"></div><script src="/app.js"></script>
+<script id="__NEXT_DATA__" type="application/json">{"p":1}</script>
+</body></html>`;
+  const BASE = "https://x.test/";
+  const doc = createEnvironment(HTML).document;
+  const det = detectJsRequired(doc);
+  dom = {
+    html: HTML,
+    base: BASE,
+    text: text(doc),
+    markdown: markdown(doc, BASE),
+    links: links(doc, BASE),
+    detect: { jsRequired: det.jsRequired, scripts: det.scripts, reason: det.reason },
+    hydrationNext: extractHydrationState(doc).next,
+    extractTitle: extractSchema(doc, { title: { selector: "h1" } }, BASE).title,
+  };
+} catch (e) {
+  console.error("DOM golden skipped (turbo-dom JS absent):", e.message);
+}
+
+const golden = { url, robots, cookies, dom };
 writeFileSync(new URL("./golden.json", import.meta.url), `${JSON.stringify(golden, null, 2)}\n`);
-console.log("wrote golden.json", JSON.stringify(golden));
+console.log("wrote golden.json (dom:", dom ? "yes" : "no", ")");
