@@ -358,18 +358,68 @@ pub async fn render_html_async(backend: Backend, script: &str) -> Result<String,
     render_page(backend, "about:blank", script).await
 }
 
+/// Default render execution budget (G9 eval-guard). A page script that loops
+/// forever (sync) or never settles (async) is terminated past this.
+pub const DEFAULT_RENDER_BUDGET_MS: u64 = 10_000;
+
 /// Async render with a page base URL — relative `fetch` resolves against it and
 /// the `document.cookie` bridge is scoped to it. Drives the event loop so
 /// `fetch`-driven and promise-based hydration completes before serialization.
+/// Bounded by [`DEFAULT_RENDER_BUDGET_MS`].
 pub async fn render_page(backend: Backend, base: &str, script: &str) -> Result<String, String> {
+    render_page_with_budget(backend, base, script, DEFAULT_RENDER_BUDGET_MS).await
+}
+
+/// `render_page` with an explicit execution budget (ms). The V8 isolate is a true
+/// isolate (host heap unreachable from guest — the security boundary the JS
+/// `node:vm` path lacked); this adds a runaway-execution guard: a watchdog thread
+/// terminates the isolate if the script exceeds `budget_ms`.
+pub async fn render_page_with_budget(
+    backend: Backend,
+    base: &str,
+    script: &str,
+    budget_ms: u64,
+) -> Result<String, String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
     let mut rt = make_runtime(backend.clone(), base)?;
-    rt.execute_script("<page>", script.to_string())
-        .map_err(|e| e.to_string())?;
-    drain_event_loop(&mut rt).await?; // resolve promises/microtasks + fetch from the page
-    rt.execute_script("<timers>", "__runTimers()")
-        .map_err(|e| e.to_string())?;
-    drain_event_loop(&mut rt).await?; // resolve promises queued by timer callbacks
+    let handle = rt.v8_isolate().thread_safe_handle();
+    let done = Arc::new(AtomicBool::new(false));
+    let watch = done.clone();
+    let watchdog = std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        while !watch.load(Ordering::Relaxed) {
+            if start.elapsed() >= std::time::Duration::from_millis(budget_ms) {
+                handle.terminate_execution();
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    });
+
+    let result = run_render(&mut rt, script).await;
+    done.store(true, Ordering::Relaxed);
+    let _ = watchdog.join();
+    result.map_err(|e| budget_msg(&e, budget_ms))?;
     Ok(backend.document_html())
+}
+
+async fn run_render(rt: &mut JsRuntime, script: &str) -> Result<(), String> {
+    rt.execute_script("<page>", script.to_string()).map_err(|e| e.to_string())?;
+    drain_event_loop(rt).await?; // promises/microtasks + fetch from the page
+    rt.execute_script("<timers>", "__runTimers()").map_err(|e| e.to_string())?;
+    drain_event_loop(rt).await?; // promises queued by timer callbacks
+    Ok(())
+}
+
+// A terminated isolate surfaces as a generic execution error; relabel it.
+fn budget_msg(e: &str, budget_ms: u64) -> String {
+    if e.contains("terminated") || e.contains("execution") {
+        format!("render budget exceeded ({budget_ms}ms)")
+    } else {
+        e.to_string()
+    }
 }
 
 fn read_string(rt: &mut JsRuntime, global: v8::Global<v8::Value>) -> Result<String, String> {

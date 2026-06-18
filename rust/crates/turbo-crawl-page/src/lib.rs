@@ -83,6 +83,25 @@ impl Navigator for TurboNavigator {
     }
 }
 
+/// Batch fetch+parse a list of URLs with bounded concurrency (port of the intent
+/// of `src/batch.mjs`). Order-preserving; a per-URL failure is captured as `Err`,
+/// never aborting the batch.
+pub async fn batch(
+    nav: &TurboNavigator,
+    urls: Vec<String>,
+    concurrency: usize,
+) -> Vec<(String, Result<Nav, String>)> {
+    use futures_util::stream::{self, StreamExt};
+    stream::iter(urls)
+        .map(|url| async move {
+            let res = nav.goto(&url).await;
+            (url, res)
+        })
+        .buffered(concurrency.max(1))
+        .collect()
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +226,25 @@ mod tests {
         assert_eq!(res.status, 200);
         assert_eq!(res.title, "Live");
         assert_eq!(res.links, vec![format!("http://127.0.0.1:{port}/next")]);
+    }
+
+    #[tokio::test]
+    async fn batch_is_ordered_and_captures_failures() {
+        let port = spawn_html("<title>OK</title>").await;
+        let nav = TurboNavigator::default();
+        let urls = vec![
+            format!("http://127.0.0.1:{port}/a"),
+            format!("http://127.0.0.1:{port}/b"),
+            "http://127.0.0.1:1/dead".to_string(),
+        ];
+        let res = batch(&nav, urls.clone(), 2).await;
+        assert_eq!(res.len(), 3);
+        // order preserved
+        assert_eq!(res[0].0, urls[0]);
+        assert_eq!(res[1].0, urls[1]);
+        assert_eq!(res[0].1.as_ref().unwrap().title, "OK");
+        // the dead URL is captured as Err, not a panic/abort
+        assert!(res[2].1.is_err());
     }
 
     #[tokio::test]

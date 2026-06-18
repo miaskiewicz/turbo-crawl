@@ -115,8 +115,19 @@ impl DomBackend for TreeDom {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dom::render_page_with_budget;
     use crate::{render_html, render_html_async, render_page, run_with_dom};
     use std::rc::Rc;
+
+    #[tokio::test]
+    async fn runaway_script_hits_render_budget() {
+        // A synchronous infinite loop must be terminated by the watchdog, not hang.
+        let dom = Rc::new(TreeDom::parse("<body><div id='app'></div></body>"));
+        let err = render_page_with_budget(dom, "https://x.test/", "while (true) {}", 200)
+            .await
+            .unwrap_err();
+        assert!(err.contains("budget exceeded"), "got: {err}");
+    }
 
     #[tokio::test]
     async fn fetch_over_net_hydrates_from_localhost() {

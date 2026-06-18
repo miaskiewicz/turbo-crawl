@@ -16,6 +16,7 @@ pub mod cache;
 pub mod cookies;
 pub mod crawl;
 pub mod frontier;
+pub mod measure;
 pub mod net;
 pub mod robots;
 pub mod url;
