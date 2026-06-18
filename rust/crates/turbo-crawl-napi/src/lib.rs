@@ -185,6 +185,70 @@ pub fn render(html: String, base_url: String, script: String) -> Result<String> 
     .map_err(Error::from_reason)
 }
 
+// --- per-element accessors (by node handle; back the shim Locator) ----------
+// Handles are stable for a given HTML parse, so the shim resolves matches (which
+// carry `node`) then reads by handle — works for both `query` and `getBy`.
+
+#[napi]
+pub fn attr_of(html: String, node: u32, name: String) -> Option<String> {
+    Tree::parse(&html).get_attribute(node, &name).map(str::to_string)
+}
+
+#[napi]
+pub fn input_value_of(html: String, node: u32) -> String {
+    view::input_value_of(&Tree::parse(&html), node)
+}
+
+#[napi]
+pub fn is_visible(html: String, node: u32) -> bool {
+    view::is_visible(&Tree::parse(&html), node)
+}
+
+#[napi]
+pub fn is_checked(html: String, node: u32) -> bool {
+    view::is_checked(&Tree::parse(&html), node)
+}
+
+#[napi]
+pub fn is_enabled(html: String, node: u32) -> bool {
+    view::is_enabled(&Tree::parse(&html), node)
+}
+
+#[napi]
+pub fn is_editable(html: String, node: u32) -> bool {
+    view::is_editable(&Tree::parse(&html), node)
+}
+
+#[napi]
+pub fn is_empty(html: String, node: u32) -> bool {
+    view::is_empty(&Tree::parse(&html), node)
+}
+
+#[napi]
+pub fn aria_role_of(html: String, node: u32) -> String {
+    view::role_of(&Tree::parse(&html), node)
+}
+
+#[napi]
+pub fn accessible_name_of(html: String, node: u32) -> String {
+    view::accessible_name(&Tree::parse(&html), node)
+}
+
+#[napi]
+pub fn accessible_description_of(html: String, node: u32) -> String {
+    view::accessible_description(&Tree::parse(&html), node)
+}
+
+#[napi]
+pub fn selected_values_of(html: String, node: u32) -> Vec<String> {
+    view::selected_values(&Tree::parse(&html), node)
+}
+
+#[napi]
+pub fn css_value_of(html: String, node: u32, name: String) -> String {
+    view::css_value(&Tree::parse(&html), node, &name)
+}
+
 // --- actions (Lane A intent graph) ------------------------------------------
 // Each mutating action parses the HTML, mutates the tree, and returns the new
 // serialized HTML; the shim swaps its cached HTML for the result.

@@ -31,7 +31,9 @@ pub mod visible;
 pub mod xpath;
 
 pub use actions::{build_submission, fill_value, serialize_form, Submission};
-pub use aria::{accessible_name, implicit_role, role_of};
+pub use aria::{
+    accessible_description, accessible_error_message, accessible_name, implicit_role, role_of,
+};
 pub use aria_snapshot::{aria_snapshot, matches_aria_snapshot};
 pub use ax::{accessibility_tree, ax_subtree, AxNode};
 pub use detect::{detect_js_required, Detect};
