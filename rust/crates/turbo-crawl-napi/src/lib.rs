@@ -249,6 +249,12 @@ pub fn css_value_of(html: String, node: u32, name: String) -> String {
     view::css_value(&Tree::parse(&html), node, &name)
 }
 
+/// Whether `expected` is an ordered ARIA-snapshot subset of `node`'s subtree.
+#[napi]
+pub fn matches_aria_snapshot(html: String, node: u32, expected: String) -> bool {
+    view::matches_aria_snapshot(&Tree::parse(&html), node, &expected)
+}
+
 // --- actions (Lane A intent graph) ------------------------------------------
 // Each mutating action parses the HTML, mutates the tree, and returns the new
 // serialized HTML; the shim swaps its cached HTML for the result.
@@ -336,6 +342,48 @@ pub fn click(html: String, selector: String, base_url: String) -> Result<String>
         .to_string());
     }
     Ok(json!({ "action": "inert" }).to_string())
+}
+
+// Node-handle action variants (back locator-scoped actions; work for getBy too).
+
+#[napi]
+pub fn fill_node(html: String, node: u32, value: String) -> String {
+    let mut tree = Tree::parse(&html);
+    view::fill_value(&mut tree, node, &value);
+    serialize_inner(&tree, tree.root())
+}
+
+#[napi]
+pub fn set_checked_node(html: String, node: u32, on: bool) -> String {
+    let mut tree = Tree::parse(&html);
+    view::set_checked(&mut tree, node, on);
+    serialize_inner(&tree, tree.root())
+}
+
+#[napi]
+pub fn select_option_node(html: String, node: u32, value: String) -> String {
+    let mut tree = Tree::parse(&html);
+    view::select_option(&mut tree, node, &value);
+    serialize_inner(&tree, tree.root())
+}
+
+#[napi]
+pub fn click_node(html: String, node: u32, base_url: String) -> String {
+    let tree = Tree::parse(&html);
+    if let Some(href) = ancestor_anchor_href(&tree, node) {
+        let url = turbo_crawl_core::url::resolve(&base_url, &href).unwrap_or(href);
+        return json!({ "action": "navigate", "url": url }).to_string();
+    }
+    if let Some(form) = ancestor_form(&tree, node) {
+        let submitter = is_submitter(&tree, node).then_some(node);
+        let s = view::build_submission(&tree, form, &base_url, submitter);
+        return json!({
+            "action": "submit", "method": s.method, "url": s.url,
+            "body": s.body, "contentType": s.content_type,
+        })
+        .to_string();
+    }
+    json!({ "action": "inert" }).to_string()
 }
 
 // --- async: fetch + crawl ---------------------------------------------------

@@ -19,12 +19,33 @@ export function render(html: string, baseUrl: string, script: string): string;
 /** Fetch with an explicit method/body (POST form submit). */
 export function request(url: string, method: string, body?: string): Promise<string>;
 
-// Actions — mutate the DOM and return the new HTML.
+// Actions by selector — mutate the DOM and return the new HTML.
 export function fill(html: string, selector: string, value: string): string;
 export function setChecked(html: string, selector: string, on: boolean): string;
 export function selectOption(html: string, selector: string, value: string): string;
 /** Click intent → JSON {action:"navigate"|"submit"|"inert", ...}. */
 export function click(html: string, selector: string, baseUrl: string): string;
+
+// Actions by node handle (back locator-scoped actions).
+export function fillNode(html: string, node: number, value: string): string;
+export function setCheckedNode(html: string, node: number, on: boolean): string;
+export function selectOptionNode(html: string, node: number, value: string): string;
+export function clickNode(html: string, node: number, baseUrl: string): string;
+
+// Per-element accessors by node handle.
+export function attrOf(html: string, node: number, name: string): string | null;
+export function inputValueOf(html: string, node: number): string;
+export function isVisible(html: string, node: number): boolean;
+export function isChecked(html: string, node: number): boolean;
+export function isEnabled(html: string, node: number): boolean;
+export function isEditable(html: string, node: number): boolean;
+export function isEmpty(html: string, node: number): boolean;
+export function ariaRoleOf(html: string, node: number): string;
+export function accessibleNameOf(html: string, node: number): string;
+export function accessibleDescriptionOf(html: string, node: number): string;
+export function selectedValuesOf(html: string, node: number): string[];
+export function cssValueOf(html: string, node: number, name: string): string;
+export function matchesAriaSnapshot(html: string, node: number, expected: string): boolean;
 
 export function markdown(html: string, baseUrl: string): string;
 export function text(html: string): string;

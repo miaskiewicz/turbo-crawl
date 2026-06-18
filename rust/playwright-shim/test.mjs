@@ -123,6 +123,53 @@ test("click submits a GET form", async () => {
   server.close();
 });
 
+test("locator accessors (G1)", async () => {
+  const page = newPage();
+  await page.setContent(
+    "<a id='l' href='/p' title='go'>link</a><input id='i' value='hi' disabled><div id='d' style='display:none'>x</div>",
+  );
+  assert.equal(await page.locator("#l").getAttribute("href"), "/p");
+  assert.equal(await page.locator("#l").ariaRole(), "link");
+  assert.equal(await page.locator("#i").inputValue(), "hi");
+  assert.equal(await page.locator("#i").isEnabled(), false);
+  assert.equal(await page.locator("#d").isVisible(), false);
+  assert.equal(await page.locator("#l").isVisible(), true);
+});
+
+test("expect matcher surface (G2)", async () => {
+  const page = newPage();
+  await page.setContent(
+    "<button class='primary'>Go</button><input value='v'><div hidden>h</div><nav><a href='/'>Home</a></nav>",
+  );
+  await expect(page.locator("button")).toBeVisible();
+  await expect(page.locator("div")).toBeHidden();
+  await expect(page.locator("button")).toHaveClass("primary");
+  await expect(page.locator("button")).toHaveAttribute("class", "primary");
+  await expect(page.locator("input")).toHaveValue("v");
+  await expect(page.locator("h1")).not.toBeVisible();
+  await expect(page.locator("nav")).toMatchAriaSnapshot('- navigation\n- link "Home"');
+});
+
+test("locator-scoped actions (G3)", async () => {
+  const page = newPage();
+  await page.setContent("<input id='t'><input id='c' type='checkbox'>");
+  await page.locator("#t").fill("typed");
+  await page.locator("#c").check();
+  assert.equal(await page.locator("#t").inputValue(), "typed");
+  assert.equal(await page.locator("#c").isChecked(), true);
+  await page.locator("#c").uncheck();
+  assert.equal(await page.locator("#c").isChecked(), false);
+});
+
+test("honest-throws for pixel APIs (G5)", async () => {
+  const page = newPage();
+  await page.setContent("<button>x</button>");
+  await assert.rejects(() => page.screenshot(), /no-JS render engine/);
+  await assert.rejects(() => page.pdf(), /no-JS render engine/);
+  await assert.rejects(() => page.locator("button").screenshot(), /no-JS render engine/);
+  await assert.rejects(() => page.locator("button").boundingBox(), /no-JS render engine/);
+});
+
 test("goto over localhost via chromium.launch", async () => {
   const body = "<html><head><title>Live</title></head><body><p>hello</p></body></html>";
   const server = createServer((_req, res) => {
