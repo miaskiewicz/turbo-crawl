@@ -173,6 +173,13 @@ impl Shared {
 
 // Whether an item's host is under its concurrency cap and past its politeness
 // gate; tracks the minimum wait across deferred items in `min_wait`.
+//
+// Politeness is a per-host token bucket of rate 1 / `politeness_ms` with burst =
+// `per_host_concurrency` — i.e. `cap` requests may overlap, then dispatches space
+// out at the politeness interval (this is what crawlee's
+// `maxRequestsPerMinute` + `maxConcurrency` does). `next_at` accumulates the
+// interval per dispatch; a request is ready while `next_at` is no more than
+// `(cap-1)` intervals ahead of now. (`cap == 1` → the strict serial gap.)
 fn item_ready(
     sh: &mut Shared,
     o: &CrawlOptions,
@@ -182,12 +189,13 @@ fn item_ready(
 ) -> bool {
     let cap = o.per_host_concurrency;
     let host = host_of(&item.url).unwrap_or_default();
+    let burst = o.politeness_ms.saturating_mul(cap.saturating_sub(1) as u64);
     let st = sh.host_mut(&host);
     if st.in_flight >= cap {
         return false;
     }
-    if st.next_at > now {
-        *min_wait = (*min_wait).min(st.next_at - now);
+    if st.next_at > now + burst {
+        *min_wait = (*min_wait).min(st.next_at - burst - now);
         return false;
     }
     true
@@ -258,7 +266,10 @@ fn record_politeness(sh: &mut Shared, o: &CrawlOptions, host: &str) {
     let now = now_ms();
     let st = sh.host_mut(host);
     let ms = st.politeness_ms.get_or_insert(o.politeness_ms).to_owned();
-    st.next_at = now + ms;
+    // Accumulate the interval (token bucket) so `burst` overlapping dispatches are
+    // allowed, then subsequent ones space out — instead of resetting to `now`,
+    // which would hard-serialize every fetch one interval apart.
+    st.next_at = st.next_at.max(now) + ms;
 }
 
 struct Ctx {

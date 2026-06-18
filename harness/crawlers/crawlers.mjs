@@ -208,6 +208,51 @@ async function turboRustCrawl(target, opts) {
   return { pages, items, ms: ms(t0) };
 }
 
+// ── turbo-rust (js): a JS BFS over the napi render tier (no browser) ──────────
+// Each page is fetched + its own scripts run in a true V8 isolate over the native
+// rtdom DOM (the same path that renders quotes.toscrape.com/js); items are counted
+// post-render, links enqueued same-host within the target's allow filter.
+async function turboRustJsCrawl(target, opts) {
+  const { loadTurboRust } = await import("../competitive/rust-engine.mjs");
+  const browser = await (await loadTurboRust("js")).launch();
+  const page = await browser.newPage();
+  const seen = new Set([target.start]);
+  const queue = [target.start];
+  let pages = 0;
+  let items = 0;
+  const countExpr = `document.querySelectorAll(${JSON.stringify(target.itemSelector)}).length`;
+  const hrefExpr = `Array.prototype.map.call(document.querySelectorAll('a[href]'), (a) => a.getAttribute('href'))`;
+  const t0 = process.hrtime.bigint();
+  while (queue.length && pages < opts.pages) {
+    const url = queue.shift();
+    await page.goto(url); // fetch + run the page's own JS, then read the hydrated DOM
+    pages++;
+    items += (await page.evaluate(countExpr)) || 0;
+    for (const href of (await page.evaluate(hrefExpr)) || []) {
+      let abs;
+      try {
+        abs = new URL(href, url).href;
+      } catch {
+        continue;
+      }
+      if (sameHost(abs, target.host) && (!target.allow || target.allow(abs)) && !seen.has(abs)) {
+        seen.add(abs);
+        queue.push(abs);
+      }
+    }
+    await sleep(POLITENESS_MS);
+  }
+  return { pages, items, ms: ms(t0) };
+}
+
+function sameHost(url, host) {
+  try {
+    return new URL(url).host === host;
+  } catch {
+    return false;
+  }
+}
+
 // ── got + cheerio (hand-rolled BFS) ──────────────────────────────────────────
 async function gotCheerioCrawl(target, opts) {
   const { default: got } = await import("got");
@@ -558,6 +603,13 @@ export const CRAWLERS = [
     // secure tier needs isolated-vm; skip cleanly if absent.
     available: () => canImport("isolated-vm"),
     crawl: (target, opts) => turboCrawl(target, opts, "secure"),
+  },
+  {
+    name: "turbo-rust (js)",
+    set: "js",
+    turbo: true,
+    available: () => Promise.resolve(loadTurboRustNative() != null),
+    crawl: turboRustJsCrawl,
   },
   {
     name: "crawlee PlaywrightCrawler",

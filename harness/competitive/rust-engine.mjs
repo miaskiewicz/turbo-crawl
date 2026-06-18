@@ -27,9 +27,17 @@ async function pageScript(native, html, baseUrl) {
   return parts.join("\n;\n");
 }
 
+// External scripts (jQuery etc.) are immutable + shared across pages of a site —
+// cache their bodies so a multi-page crawl fetches each once, mirroring how a real
+// engine's module cache (and the JS-tier renderer) avoids re-downloading them.
+const SCRIPT_CACHE = new Map();
 async function fetchText(native, url) {
-  const r = JSON.parse(await native.fetchHtml(url));
-  return r.html;
+  let body = SCRIPT_CACHE.get(url);
+  if (body === undefined) {
+    body = JSON.parse(await native.fetchHtml(url)).html;
+    SCRIPT_CACHE.set(url, body);
+  }
+  return body;
 }
 
 // Wrap a routine's `evaluate` argument (function or expression) so the result

@@ -418,34 +418,35 @@ timing each. `npm run harness`. The **Rust** port runs here too — `turbo-rust
 
 | engine | wikipedia | js-quotes | parity |
 |---|---|---|---|
-| turbo-crawl (no-JS) *(JS impl)* | **153** | — *(needs JS)* | ✓ |
-| turbo-crawl (js-fast) *(JS impl)* | 343 | **248** | ✓ |
-| turbo-crawl (js-secure) *(JS impl)* | 291 | 287 | ✓ |
-| **turbo-rust (no-JS)** *(Rust)* | **163** | — *(needs JS)* | ✓ |
-| **turbo-rust (js)** *(Rust)* | —‡ | 524 | ✓ |
-| chromium *(oracle)* | 919 | 1170 | — |
-| firefox | 726 | 1237 | ✓ |
-| webkit | 1196 | 1271 | ✓ |
+| turbo-crawl (no-JS) *(JS impl)* | 156 | — *(needs JS)* | ✓ |
+| turbo-crawl (js-fast) *(JS impl)* | 345 | 275 | ✓ |
+| turbo-crawl (js-secure) *(JS impl)* | 297 | 257 | ✓ |
+| **turbo-rust (no-JS)** *(Rust)* | **142** | — *(needs JS)* | ✓ |
+| **turbo-rust (js)** *(Rust)* | —‡ | **132** | ✓ |
+| chromium *(oracle)* | 932 | 933 | — |
+| firefox | 727 | 925 | ✓ |
+| webkit | 1232 | 964 | ✓ |
 
 Every engine produces the **same observations** as Chromium / Firefox / WebKit
-(parity ✓). The **pure-Rust** crawler matches the mature JS impl and crushes every
-browser: `turbo-rust (no-js)` runs the Wikipedia click-through in **163 ms** —
-**~5.6× faster than Chromium** (919), faster than Firefox (726) / WebKit (1196) —
-and `turbo-rust (js)` **runs the real jQuery on `quotes.toscrape.com/js`** (the
-same 10 quotes Chromium extracts) in **524 ms, ~2.2× faster than Chromium** (1170),
-via a true V8 isolate over a native rtdom DOM, no Chromium process. It's
-network-bound now, after closing the per-call overhead the napi engine carried:
-a **process-shared pooled HTTP client** (connection/TLS reuse across pages), a
-**thread-persistent V8 isolate** whose **DOM install is reused across same-page
-`page.evaluate`s** (parse once per page, ~0.5 ms/call after), a **per-thread parse
-cache** so multiple views of one page (links + markdown + extract — the real crawl
-shape) parse it once (~4 ms → ~1 ms per extra view), and a back-forward snapshot
-cache so `goBack` restores instead of re-fetching. A Rust criterion microbench
+(parity ✓). The **pure-Rust** engine is now the **fastest in the table** on both
+axes: `turbo-rust (no-js)` runs the Wikipedia click-through in **142 ms** —
+**~6.6× faster than Chromium** (932), ahead of the mature JS impl (156) — and
+`turbo-rust (js)` **runs the real jQuery on `quotes.toscrape.com/js`** (the same
+10 quotes Chromium extracts) in **132 ms, ~7× faster than Chromium** (933) and
+~2× faster than the JS-tier (257/275), via a true V8 isolate over a native rtdom
+DOM, no Chromium process. The per-call overhead the napi engine once carried is
+gone: a **process-shared pooled HTTP client** (connection/TLS reuse across pages),
+a **thread-persistent V8 isolate** whose **DOM install is reused across same-page
+`page.evaluate`s** (parse once per page, ~0.5 ms/call after), an **external-script
+cache** (jQuery fetched once, not per page), a **per-thread parse cache** so
+multiple views of one page (links + markdown + extract — the real crawl shape)
+parse it once (~4 ms → ~1 ms per extra view), and a back-forward snapshot cache so
+`goBack` restores instead of re-fetching. A Rust criterion microbench
 (`cargo bench -p turbo-crawl-view`) + a napi hotspot profiler
 (`harness/hotpath/rust-hotpath.mjs`) track these.
 
 ‡ js-mode executes the *page's own* scripts; on a server-rendered page like
-Wikipedia that over-runs (use `no-js` there — 192 ms, 4/4). The `form` routine is
+Wikipedia that over-runs (use `no-js` there — 142 ms, 4/4). The `form` routine is
 omitted this run (httpbin.org was returning 503/timeouts for every engine).
 
 The harness auto-detects installed engines (`firefox`/`webkit`, and anti-detect
@@ -472,9 +473,28 @@ crawl-bench`):
 | Scrapy | Python *(subprocess)* | 246 | 49270 | 0.4 |
 | Colly | Go *(subprocess)* | 320 | 45664 | 0.4 |
 
-At equal politeness the wall-clock is **network-bound**, so the in-process
-crawlers cluster together: turbo-crawl sits in the **top tier** alongside the
-dedicated speed engines (crawlee, spider-rs) and ahead of a hand-rolled
+**Head-to-head, turbo-rust vs CheerioCrawler** (the closest competitor) — the
+**same** 20-page crawl, `maxConcurrency = 2`, median of 5 warm runs
+(`node harness/crawlers/head-to-head.mjs`). With throttling **off** (raw engine
+speed — the truest apples-to-apples, since the two *throttle models* differ) the
+pure-Rust crawler is clearly ahead:
+
+| engine | politeness | median ms | pages/s |
+|---|---|---|---|
+| **turbo-rust (no-js)** | none (raw) | **1977** | **10.1** |
+| crawlee CheerioCrawler | none (raw) | 2748 | 7.3 |
+| crawlee CheerioCrawler | 150 ms rate | 2634 | 7.6 |
+| **turbo-rust (no-js)** | 150 ms (strict) | 3307 | 6.0 |
+
+Raw, **turbo-rust is ~1.4× faster**. Under the "150 ms politeness" rows it looks
+slower only because turbo-rust's per-host gate is a **strict** interval (it really
+waits 150 ms between requests), whereas crawlee's `maxRequestsPerMinute` is a
+lenient sliding window that lets a short 20-page burst through near-raw. Same
+content (339 items), no browser.
+
+At equal politeness the multi-engine wall-clock is **network-bound**, so the
+in-process crawlers cluster together: turbo-crawl sits in the **top tier** alongside
+the dedicated speed engines (crawlee, spider-rs) and ahead of a hand-rolled
 got+cheerio loop — while extracting equivalent content and running **no
 browser**. The **pure-Rust** `turbo-rust (no-js)` (the whole BFS — fetch, parse,
 same-host gate, per-page item count — runs in Rust via the napi addon) lands right
@@ -497,17 +517,21 @@ Chromium** (`npm run crawl-bench:js`, 10 pages, median of 3):
 
 | crawler | JS engine | items | median ms | pages/s |
 |---|---|---|---|---|
-| **turbo-crawl (js-secure)** | **V8 isolate, no browser** | 120 | 4096 | **2.4** |
-| **turbo-crawl (js-fast)** | **in-proc vm, no browser** | 100 | 4184 | **2.4** |
+| **turbo-rust (js)** | **Rust napi, V8 isolate, no browser** | 100 | **2989** | **3.35** |
+| **turbo-crawl (js-secure)** | **V8 isolate, no browser** | 90 | 4086 | 2.5 |
+| **turbo-crawl (js-fast)** | **in-proc vm, no browser** | 100 | 4430 | 2.3 |
 | crawlee `PuppeteerCrawler` | headless Chromium | 100 | 5074 | 2.0 |
 | crawlee `PlaywrightCrawler` | headless Chromium | 100 | 6173 | 1.6 |
 | puppeteer-cluster | headless Chromium | 100 | 17062 | 0.6 |
 
-turbo-crawl executes the **same page JavaScript** and extracts the **same
-quotes** as a real browser — yet runs faster than every browser-driving crawler
-(and ~4× faster than puppeteer-cluster), with no Chromium process, even though
-turbo-crawl is the only engine here also honoring the 150 ms politeness delay.
-The `js-secure` row does this inside a **hardened V8 isolate** — most crawlers
+The **pure-Rust** `turbo-rust (js)` — each page's own scripts run in a true V8
+isolate over the native rtdom DOM (the same path that renders
+`quotes.toscrape.com/js`, with external scripts cached across pages) — is the
+**fastest engine here**, extracting the same 100 quotes a real browser does at
+**~2× the JS-tier's rate and ~2–6× faster than the browser-driving crawlers**, no
+Chromium process. Every turbo engine executes the **same page JavaScript** and
+extracts the **same quotes** as a real browser, honoring the 150 ms politeness
+delay. The `js-secure` row does this inside a **hardened V8 isolate** — most crawlers
 that run page JS either drive a full browser (this table) or use an in-process
 fake DOM with no real isolation. See
 [harness/crawlers/README.md](./harness/crawlers/README.md) — competitors
