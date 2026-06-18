@@ -383,4 +383,39 @@ export function expect(locator) {
   return new Expectation(locator, false);
 }
 
+// --- @playwright/test surface (drop-in) -------------------------------------
+import { test as nodeTest } from "node:test";
+
+/** Playwright-style `test(name, async ({ page }) => …)` over node:test. */
+export function test(name, fn) {
+  return nodeTest(name, async () => {
+    const browser = await chromium.launch();
+    const page = await browser.newPage();
+    await fn({ page, context: { storageState: () => page.storageState() }, request });
+    await browser.close();
+  });
+}
+test.describe = (name, fn) => nodeTest(name, fn);
+test.skip = (name, fn) => nodeTest.skip(name, fn ?? (() => {}));
+test.beforeEach = () => {};
+test.afterEach = () => {};
+
+/** `defineConfig` is identity — the Playwright CLI/config is unused under node:test. */
+export const defineConfig = (config) => config;
+/** Device descriptors are no-ops (no real viewport/UA emulation in Lane A). */
+export const devices = new Proxy({}, { get: () => ({}) });
+/** Minimal APIRequestContext: a fresh page per fetch. */
+export const request = {
+  async newContext() {
+    return {
+      async get(url) {
+        const p = newPage();
+        const r = await p.goto(url);
+        return { status: () => r.status(), text: async () => p.content() };
+      },
+    };
+  },
+};
+
 export { Locator, Page };
+export default { test, expect, chromium, newPage, defineConfig, devices, request };
