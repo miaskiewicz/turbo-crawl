@@ -21,5 +21,9 @@ pub mod net;
 pub mod robots;
 pub mod url;
 
+/// Re-export reqwest so downstream crates (e.g. the napi addon's shared client)
+/// name the exact same client type/version without a parallel dependency.
+pub use reqwest;
+
 /// Library version — kept in lockstep with `package.json` per the release rules.
 pub const VERSION: &str = "0.1.6";

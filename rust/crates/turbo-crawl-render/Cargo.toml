@@ -4,13 +4,18 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "turbo-crawl JS-execution tier (tier 3): deno_core isolate + DOM op bridge"
+description = "turbo-crawl JS-execution tier (tier 3): deno_core isolate + rtdom↔V8 DOM binding"
 
 [dependencies]
 deno_core = "0.404"
+# Direct v8 dep so the verbatim vendored `browser_env_upstream.rs` (which references
+# the `v8` crate by its bare name) compiles. Pinned to the exact version deno_core
+# resolves so both share one v8 — the binding installs into deno_core's own context.
+v8 = "=149.4.0"
 turbo-dom-parser = { package = "turbo-dom", version = "0.3.1" }
 turbo-crawl-core = { path = "../turbo-crawl-core", version = "0.1.6" }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "io-util"] }
+serde_json = "1"

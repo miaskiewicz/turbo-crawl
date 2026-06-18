@@ -1,10 +1,18 @@
-# turbo-crawl Rust port — remaining gaps
+# turbo-crawl Rust port — gaps (✅ ALL CLOSED)
+
+> **Status: complete.** All gaps G1–G16 below are implemented and tested on branch
+> `rust-port`. Since then the render tier's DOM was upgraded from the original
+> `deno_core` op-bridge to a full **rtdom↔V8 binding** (`browser_env`, vendored from
+> turbo-test) — real `document`/Element, so **jQuery and React-style bundles run**;
+> and the napi layer gained a **shared pooled HTTP client** + a **thread-persistent
+> V8 isolate** reused across pages (no-JS Wikipedia 602→192 ms). This file is kept as
+> the historical gap log; the live picture is in `rust/README.md` +
+> `rust/HEADLESS-HYDRATION.md`.
 
 The browserless engine, JS-execution tier, napi bridge, Playwright shim, MCP
 binary, packaging, and pure-logic parity are **done** (branch `rust-port`, builds
-on crates.io `turbo-dom@0.3.1`, 225 Rust + 9 shim tests green). This document
-tracks everything still missing, in detail, to reach JS feature parity + a true
-`@playwright/test` drop-in.
+on crates.io `turbo-dom@0.3.1`). This document tracks (now historically) what was
+missing, in detail, to reach JS feature parity + a true `@playwright/test` drop-in.
 
 Crate map: `core` (net/cookies/robots/url/frontier/crawl) · `page`
 (Page/Navigator) · `view` (15 view modules) · `render` (deno_core JS tier) ·

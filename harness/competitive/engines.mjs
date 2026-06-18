@@ -5,6 +5,7 @@
 // their package + (for real browsers) a downloaded binary.
 
 import { existsSync } from "node:fs";
+import { loadTurboRust } from "./rust-engine.mjs";
 
 // Real-browser engines need an executable on disk; check before claiming available.
 async function browserAvailable(launcher) {
@@ -68,6 +69,8 @@ const CANDIDATES = [
     load: () => loadTurboCrawl("secure"),
     headless: false,
   },
+  { name: "turbo-rust (no-js)", oracle: false, load: () => loadTurboRust(null), headless: false },
+  { name: "turbo-rust (js)", oracle: false, load: () => loadTurboRust("js"), headless: false },
   { name: "chromium", oracle: true, load: () => loadReal("chromium"), headless: true },
   { name: "firefox", oracle: false, load: () => loadReal("firefox"), headless: true },
   { name: "webkit", oracle: false, load: () => loadReal("webkit"), headless: true },

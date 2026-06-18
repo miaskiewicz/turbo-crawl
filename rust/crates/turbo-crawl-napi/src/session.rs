@@ -100,14 +100,22 @@ async fn goto(st: &mut State, url: &str) -> std::result::Result<String, String> 
     let res = fetch_html(url, opts).await.map_err(|e| e.to_string())?;
     st.url = res.final_url.clone();
     st.tree = Some(Tree::parse(&res.html));
-    let title = st.tree.as_ref().unwrap().query_selector("title").map(|h| {
-        st.tree.as_ref().unwrap().text_content(h).trim().to_string()
-    });
-    Ok(json!({ "url": res.final_url, "status": res.status, "title": title.unwrap_or_default() }).to_string())
+    let title = st
+        .tree
+        .as_ref()
+        .unwrap()
+        .query_selector("title")
+        .map(|h| st.tree.as_ref().unwrap().text_content(h).trim().to_string());
+    Ok(
+        json!({ "url": res.final_url, "status": res.status, "title": title.unwrap_or_default() })
+            .to_string(),
+    )
 }
 
 fn tree(st: &State) -> std::result::Result<&Tree, String> {
-    st.tree.as_ref().ok_or_else(|| "no page loaded (call goto)".to_string())
+    st.tree
+        .as_ref()
+        .ok_or_else(|| "no page loaded (call goto)".to_string())
 }
 
 async fn action(st: &mut State, tool: &str, args: &Value) -> std::result::Result<String, String> {
@@ -159,7 +167,10 @@ fn read(st: &State, tool: &str, args: &Value) -> std::result::Result<String, Str
         "markdown" => Ok(view::markdown(t, root, &st.url)),
         "text" => Ok(view::text(t, root)),
         "html" => Ok(serialize_inner(t, root)),
-        "title" => Ok(t.query_selector("title").map(|h| t.text_content(h).trim().to_string()).unwrap_or_default()),
+        "title" => Ok(t
+            .query_selector("title")
+            .map(|h| t.text_content(h).trim().to_string())
+            .unwrap_or_default()),
         "links" => j(json!(view::links(t, &st.url))),
         "interactive_elements" => j(json!(view::interactive_elements(t, &st.url, true))),
         "accessibility_tree" => j(json!(view::accessibility_tree(t))),

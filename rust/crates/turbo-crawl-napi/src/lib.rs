@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use turbo_crawl_core::crawl::{crawl as run_crawl, CrawlOptions, Record};
-use turbo_crawl_core::net::{fetch_html as net_fetch, FetchOptions};
+use turbo_crawl_core::net::{build_client, fetch_html as net_fetch, FetchOptions};
 use turbo_crawl_page::TurboNavigator;
 use turbo_crawl_view as view;
 use turbo_dom_parser::rtdom::serialize::serialize_inner;
@@ -164,8 +164,7 @@ fn parse_field(spec: &Value) -> Field {
 /// (Playwright `page.evaluate`-ish; synchronous, no event loop).
 #[napi]
 pub fn evaluate(html: String, script: String) -> Result<String> {
-    let dom = std::rc::Rc::new(turbo_crawl_render::TreeDom::parse(&html));
-    turbo_crawl_render::run_with_dom(dom, &script).map_err(Error::from_reason)
+    turbo_crawl_render::run_with_dom(&html, &script).map_err(Error::from_reason)
 }
 
 /// Run the page's own `script` over its DOM (promises/await + virtual timers +
@@ -175,12 +174,11 @@ pub fn evaluate(html: String, script: String) -> Result<String> {
 #[napi]
 pub fn render(html: String, base_url: String, script: String) -> Result<String> {
     std::thread::spawn(move || {
-        let dom = std::rc::Rc::new(turbo_crawl_render::TreeDom::parse(&html));
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| e.to_string())?;
-        rt.block_on(turbo_crawl_render::render_page(dom, &base_url, &script))
+        rt.block_on(turbo_crawl_render::render_page(&html, &base_url, &script))
     })
     .join()
     .map_err(|_| Error::from_reason("render thread panicked"))?
@@ -196,7 +194,13 @@ pub fn transform(src: String, ts: bool, jsx: bool) -> Result<String> {
 
 /// Render a TS/JSX bundle: transform → run over the DOM → hydrated HTML.
 #[napi]
-pub fn render_ts(html: String, base_url: String, src: String, ts: bool, jsx: bool) -> Result<String> {
+pub fn render_ts(
+    html: String,
+    base_url: String,
+    src: String,
+    ts: bool,
+    jsx: bool,
+) -> Result<String> {
     let script = turbo_crawl_transform::transform(&src, ts, jsx).map_err(Error::from_reason)?;
     render(html, base_url, script)
 }
@@ -360,6 +364,15 @@ pub fn click_node(html: String, node: u32, base_url: String) -> String {
 
 // --- async: fetch + crawl ---------------------------------------------------
 
+/// Process-shared HTTP client so connections + TLS sessions are pooled across
+/// every `fetchHtml`/`request`/`goto` (without it, each fetch paid a fresh TLS
+/// handshake — the dominant per-page cost in a multi-page crawl).
+fn shared_client() -> &'static turbo_crawl_core::reqwest::Client {
+    static CLIENT: std::sync::OnceLock<turbo_crawl_core::reqwest::Client> =
+        std::sync::OnceLock::new();
+    CLIENT.get_or_init(build_client)
+}
+
 async fn do_fetch(
     url: &str,
     method: Option<String>,
@@ -374,6 +387,7 @@ async fn do_fetch(
         body,
         allow_non_html: true,
         jar: jar.as_mut(),
+        client: Some(shared_client()),
         ..Default::default()
     };
     let res = net_fetch(url, opts)

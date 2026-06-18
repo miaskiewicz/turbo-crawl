@@ -1,37 +1,12 @@
-//! Toolchain smoke test for the JS-execution tier: boot a deno_core isolate and
-//! evaluate trivial JS. Validates the V8 build before the DOM op layer lands.
+//! JS-execution tier (tier 3): a `deno_core` V8 isolate with a real rtdom↔V8 DOM
+//! binding ([`browser_env`], vendored from turbo-test) so page scripts hydrate
+//! against a genuine `document`. [`dom`] is the runtime that grafts the binding onto
+//! deno_core's context and drives fetch/timers/event-loop/budget.
 
+mod browser_env;
 pub mod dom;
-pub mod tree_backend;
-pub use dom::{render_html, render_html_async, render_page, run_with_dom, DomBackend};
-pub use tree_backend::TreeDom;
 
-use deno_core::{v8, JsRuntime, RuntimeOptions};
-
-/// Evaluate `code` in a fresh isolate, returning its result as an i64.
-pub fn eval_i64(code: &str) -> Result<i64, String> {
-    let mut rt = JsRuntime::new(RuntimeOptions::default());
-    let global = rt
-        .execute_script("<smoke>", code.to_string())
-        .map_err(|e| e.to_string())?;
-    let context = rt.main_context();
-    let scope = v8::HandleScope::new(rt.v8_isolate());
-    let scope = std::pin::pin!(scope);
-    let mut scope = scope.init();
-    let context = v8::Local::new(&scope, context);
-    let scope = v8::ContextScope::new(&mut scope, context);
-    let local = v8::Local::new(&scope, global);
-    local
-        .integer_value(&scope)
-        .ok_or_else(|| "not an integer".to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn isolate_runs_js() {
-        assert_eq!(eval_i64("1 + 2").unwrap(), 3);
-    }
-}
+pub use dom::{
+    render_html, render_html_async, render_page, render_page_with_budget, run_with_dom,
+    DEFAULT_RENDER_BUDGET_MS,
+};

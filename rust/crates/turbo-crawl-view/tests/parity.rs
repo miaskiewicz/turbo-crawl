@@ -25,20 +25,39 @@ fn rust_views_match_js_golden() {
     let root = tree.root();
 
     assert_eq!(view::text(&tree, root), d["text"], "text parity");
-    assert_eq!(view::markdown(&tree, root, base), d["markdown"], "markdown parity");
+    assert_eq!(
+        view::markdown(&tree, root, base),
+        d["markdown"],
+        "markdown parity"
+    );
 
     let links: Vec<String> = view::links(&tree, base);
-    let want_links: Vec<String> =
-        d["links"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    let want_links: Vec<String> = d["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
     assert_eq!(links, want_links, "links parity");
 
     let det = view::detect_js_required(&tree, None, None);
-    assert_eq!(det.js_required, d["detect"]["jsRequired"], "detect.js_required");
-    assert_eq!(det.scripts as u64, d["detect"]["scripts"].as_u64().unwrap(), "detect.scripts");
+    assert_eq!(
+        det.js_required, d["detect"]["jsRequired"],
+        "detect.js_required"
+    );
+    assert_eq!(
+        det.scripts as u64,
+        d["detect"]["scripts"].as_u64().unwrap(),
+        "detect.scripts"
+    );
     assert_eq!(det.reason, d["detect"]["reason"], "detect.reason");
 
     let hyd = view::extract_hydration_state(&tree);
-    assert_eq!(hyd.next, Some(d["hydrationNext"].clone()), "hydration.next parity");
+    assert_eq!(
+        hyd.next,
+        Some(d["hydrationNext"].clone()),
+        "hydration.next parity"
+    );
 
     let schema = std::collections::BTreeMap::from([(
         "title".to_string(),

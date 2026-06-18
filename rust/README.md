@@ -1,108 +1,109 @@
 # turbo-crawl — Rust port
 
 Native-speed core of turbo-crawl. Premise: turbo-dom ships as a pure Rust crate,
-so the browserless crawler can be Rust too. The only piece that *must* stay JS is
-the `@playwright/test` drop-in façade (agents `import` it inside their own Node
-process) — everything else ports.
+so the browserless crawler is Rust too. The only piece that *must* stay JS is the
+`@playwright/test` drop-in façade (agents `import` it inside their own Node
+process); it's a thin shim over the napi addon — all the muscle is Rust.
 
-turbo-dom is consumed as the **`turbo-dom-parser` crate** with
-`default-features = false, features = ["rust-runtime"]` — its pure-Rust
-`rtdom::Tree` (no napi/wasm boundary). The crate is currently wired via a path
-dep (`/Users/.../turbo-dom`); swap to a git/version dep once published.
+turbo-dom is consumed from **crates.io** as the `turbo-dom-parser` crate
+(`{ package = "turbo-dom", version = "0.3.1" }`) — its pure-Rust `rtdom::Tree`
+(handle-based `u32` DOM, no napi/wasm boundary).
 
-## Tiers
+## Crates
 
-| Tier | Scope | Status |
-|------|-------|--------|
-| **1** | net / cookies / robots / url / frontier / crawl-scheduling — pure logic + HTTP | ✅ |
-| **2** | `Page`/`Navigator` over turbo-dom (fetch+parse, link/title extraction) | ✅ navigator; views (extract/visible/aria/locator/markdown) pending |
-| **3** | JS-execution tier — `deno_core` isolate + DOM ops + global bootstrap | ✅ page scripts run + mutate the DOM + virtual timers; `render_html` returns hydrated HTML |
-| glue | napi-rs `.node` addon + thin JS `@playwright/test` shim | later |
+| Crate | Scope |
+|-------|-------|
+| `turbo-crawl-core` | Tier 1 — net / cookies / robots / url / frontier / crawl scheduling / cache / measure |
+| `turbo-crawl-page` | Tier 2 — `TurboNavigator` (fetch+parse over `rtdom::Tree`) |
+| `turbo-crawl-view` | extraction & views — extract / visible / aria / ax / locator / markdown / text / schema / query / xpath / hydration / dom-ops / actions |
+| `turbo-crawl-render` | Tier 3 — `deno_core` isolate + the rtdom↔V8 DOM binding (JS execution / hydration) |
+| `turbo-crawl-transform` | swc TS/JSX → classic JS for the render tier |
+| `turbo-crawl-napi` | the `.node` addon — in-process bridge from the core to Node (+ stateful `Session`) |
+| `turbo-crawl-mcp` | stdio JSON-RPC MCP server (stateful session, action + read tools) |
 
-47 offline tests across the workspace (`cargo test`).
+`cargo test` runs the full offline suite across the workspace (200+ tests);
+`cargo clippy --workspace --all-targets` and `cargo fmt` are clean.
 
 ## Tier 1 — `turbo-crawl-core`
 
-Direct ports of the JS modules, same behavior, same edge cases:
+Direct ports of the JS modules, same behavior and edge cases:
 
-- `url` — `resolve` / `canonicalize` (tracking-param strip, query sort, frag drop)
-  / `is_http_url`. Frontier dedupe basis.
+- `url` — `resolve` / `canonicalize` (tracking-param strip, query sort, frag drop) /
+  `is_http_url`. Frontier dedupe basis.
 - `frontier` — canonical-dedup URL queue with depth + ring cursor.
-- `robots` — robots.txt parse, per-agent grouping, longest-match Allow/Disallow
-  with `*`/`$` wildcards (hand-rolled glob, no regex dep), TTL cache. Fetch is an
-  injected `RobotsFetcher` trait → offline-testable.
+- `robots` — robots.txt parse, per-agent grouping, longest-match Allow/Disallow with
+  `*`/`$` wildcards (hand-rolled glob, no regex dep), TTL cache; injected
+  `RobotsFetcher` → offline-testable.
 - `cookies` — RFC 6265 subset `CookieJar` (domain/path scope, Secure, HttpOnly,
-  Expires/Max-Age, SameSite). Times are `f64` ms so a session cookie is
-  `f64::INFINITY`, matching the JS `Infinity` sentinel. Self-contained HTTP-date
-  parser (no chrono).
-- `net` — `fetch_html` over reqwest (gzip/br/deflate, rustls). Charset sniff,
-  8 MiB streamed byte cap, content-type gate, CookieJar round-trip, and manual
-  per-hop redirect follow (cookie re-derive + fetch-spec method rewrite) when
-  `max_redirects` is set. Pure helpers unit-tested offline; `fetch_html` is the
-  live-IO seam.
+  Expires/Max-Age, SameSite; `storageState` round-trip). Times are `f64` ms (session
+  cookie = `f64::INFINITY`). Self-contained HTTP-date parser (no chrono).
+- `net` — `fetch_html` over reqwest (gzip/br, rustls, HTTP/2). Charset sniff, byte
+  cap, content-type gate, CookieJar round-trip, manual per-hop redirect follow, and a
+  **shared pooled `build_client()`** passed via `FetchOptions::client` so connections
+  + TLS sessions are reused across pages.
 - `crawl` — frontier-driven scheduling: global + per-host concurrency, per-host
-  politeness, retry with exponential backoff, depth/page caps. The fetch+parse
-  seam is the `Navigator` trait — the tier-2 `Page` implements it. robots
-  integration lands with that wiring.
+  politeness, retry/backoff, depth/page caps, robots gate. Fetch+parse seam is the
+  `Navigator` trait (tier-2 `Page` implements it).
+- `cache` / `measure` — `ResponseCache` (304/storageState) and crawl summaries.
 
 ## Tier 2 — `turbo-crawl-page`
 
-The real fetch+parse seam, over turbo-dom's pure-Rust `rtdom::Tree`:
+`TurboNavigator` implements `crawl::Navigator` — fetches via `net::fetch_html`,
+parses with `Tree::parse`, projects a `Nav` (title + absolute-resolved `<a href>`s).
+The tier-1 `crawl::crawl(opts, nav)` driver runs unchanged over it. `parse_nav` is
+pure (no network) and offline-tested end to end against the scheduler.
 
-- `TurboNavigator` implements `crawl::Navigator` — fetches via
-  `turbo_crawl_core::net::fetch_html`, parses with `Tree::parse`, projects a
-  `Nav`. The tier-1 `crawl::crawl(opts, nav)` driver runs unchanged over it.
-- `parse_nav(html, final_url, status)` is **pure** (no network): extracts the
-  `<title>` and every `<a href>` resolved to an absolute URL against the final
-  URL. Unit-tested offline, plus an end-to-end test that drives the crawl
-  scheduler over a fixture navigator (real parse, no sockets).
+## views — `turbo-crawl-view`
 
-```rust
-#[async_trait]
-pub trait Navigator: Send + Sync {
-    async fn goto(&self, url: &str) -> Result<Nav, String>;
-}
-```
-
-Still pending (task #4): the view/extraction modules (extract / visible / aria /
-locator / markdown / …) over the same `Tree` API.
+The extraction/interaction surface over the same `rtdom::Tree`: `extract`, `visible`
+(cascade), `aria`/`ax`/`aria_snapshot`, `locator` (by_role/text/label), `markdown`,
+`text`, `schema`, `query`, `xpath`, `hydration`, `dom_ops` (checked/editable/css/
+select), `actions` (fill/submit/click-intent). All pure + offline-tested; a
+differential `tests/parity.rs` checks them against a committed JS golden.
 
 ## Tier 3 — `turbo-crawl-render`
 
-The JS-execution path, end to end over the real DOM. **The page's own scripts
-run** on a `deno_core` V8 isolate, mutate the turbo-dom tree in place, and the
-render returns the hydrated HTML — the Lane B contract.
+The JS-execution path, end to end over a **real DOM**. The page's own scripts run on
+a `deno_core` V8 isolate against a genuine `document`, mutate the turbo-dom tree in
+place, and the render returns the hydrated HTML (the Lane B contract).
 
-- Boots a **`deno_core` V8 isolate** (true isolate by default — host heap
-  unreachable from guest, the security property the old `node:vm` backend lacked).
-- `DomBackend` trait = the native DOM seam (read + mutate + serialize). Page JS
-  → V8 → `#[op2]` → `DomBackend` → back. No JS-DOM-in-JS-VM indirection; the DOM
-  lives in Rust beside the parser.
-- `TreeDom` implements it over `rtdom::Tree` — node ids ARE turbo-dom handles
-  (`u32`), zero-translation. `Tree` sits behind a `RefCell` (page JS mutates;
-  isolate is single-threaded).
-- **Global bootstrap**: `document` (query/create/getElementById/body), an
-  `Element` wrapper (textContent / innerHTML / attributes / appendChild / scoped
-  query), `window`/`self`/`navigator`/`location`/`localStorage`/`console`, and
-  **virtual timers** (`setTimeout`/`requestAnimationFrame`/`queueMicrotask`
-  drained synchronously, ordered by delay — mirrors the JS tier's virtual clock).
-- `fetch` is an **honest throw** ("inert in the render tier") — no silent no-op.
+- Boots a **`deno_core` V8 isolate** (true isolate — host heap unreachable from
+  guest; a runaway-execution **budget** watchdog terminates a wedged script).
+- **The DOM is a native `rtdom`↔V8 binding** — `browser_env`, vendored from
+  [turbo-test](../../turbo-test) (its battle-tested binding that runs React +
+  Testing Library). A JS DOM node is a V8 object holding a turbo-dom handle in an
+  internal field; methods/accessors are native callbacks straight onto `Tree`. No
+  JS-DOM-in-JS-VM indirection. See [`src/browser_env.rs`](crates/turbo-crawl-render/src/browser_env.rs)
+  for the vendor/sync story (verbatim copy + a one-command re-vendor script; the
+  turbo-crawl-specific deltas — `install_html`/`document_html` and the env bootstrap
+  — live separately and are never patched into the upstream file).
+- The runtime in [`src/dom.rs`](crates/turbo-crawl-render/src/dom.rs) grafts that
+  binding onto deno_core's context, then layers the non-DOM env (`navigator`,
+  `location`, virtual timers, `fetch`/XHR **over the tier-1 net stack**,
+  `document.cookie` bridged to the shared `CookieJar`, observers, history).
+- **`fetch` is real** (async, event-loop-driven; relative URLs resolve against the
+  page base) — promise/`await`/timer-driven hydration settles before serialization.
+- `run_with_dom` (the sync `page.evaluate` path) reuses a **thread-persistent
+  isolate across pages** — the ~20 ms boot is paid once, then ~5 ms/call. Page-JS
+  isolation across pages is intentionally relaxed (a crawl doesn't need it).
+- `transform` (`turbo-crawl-transform`, swc) turns a TS/JSX bundle into classic JS
+  so it runs under the tier.
 
-```rust
-// render a JS-gated page → hydrated HTML
-let dom = Rc::new(TreeDom::parse(html));
-let hydrated = render_html(dom, page_script)?;
-```
+## glue — `turbo-crawl-napi` + the Playwright shim
 
-Still pending: real async (event-loop-driven promises + `fetch` over the tier-1
-net) and the `document.__cookieJar` bridge; `swc` transform (task #8); collapse
-the JS `node:vm`/`isolated-vm` dual backend onto this one isolate.
+`turbo-crawl-napi` is the `.node` addon: a stateless functional surface (markdown /
+text / links / extract / getBy / accessors / actions / evaluate / render / transform)
+plus async `fetchHtml` / `request` / `crawl` and a stateful `Session` (retained tree,
+worker thread). The `rust/playwright-shim/` package is the `@playwright/test` drop-in
+backed by it (Page / Locator / expect / `chromium`, plus a `--import register` resolve
+redirect so vanilla specs run on the no-browser Rust engine, unedited).
 
 ## Build / test
 
 ```
 cd rust
-cargo test               # 43 offline tests across the workspace
-cargo clippy --all-targets
+cargo test --workspace        # full offline suite
+cargo clippy --workspace --all-targets
 cargo fmt
+cargo build --release -p turbo-crawl-napi   # build the .node addon (then node addon tests / harness)
 ```

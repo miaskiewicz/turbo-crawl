@@ -19,7 +19,8 @@ over `rtdom::Tree` — `query_selector(_all)` for the script tags, `text_content
 for the JSON, plus a tiny tolerant scanner for the `window.X = {...};` globals
 (balanced-brace slice → `serde_json`). No turbo-dom additions needed.
 
-**Status:** ⬜ not yet ported (part of task #4). Cheap, self-contained, offline.
+**Status:** ✅ ported — `hydration` in `turbo-crawl-view` over `rtdom::Tree`
+(exposed via napi `hydrationState`). Offline-tested.
 
 ## 2. JS-execution hydration (the render tier)
 
@@ -31,29 +32,30 @@ Requirements and where each stands:
 
 | Requirement | Status |
 |---|---|
-| Real V8 isolate, host heap unreachable from guest | ✅ deno_core |
-| DOM read/mutate/serialize bound to native `rtdom::Tree` | ✅ `DomBackend`/`TreeDom` |
-| `document` + `Element` + `window`/`navigator`/`location`/`localStorage`/`console` | ✅ bootstrap |
+| Real V8 isolate, host heap unreachable from guest (+ runaway budget) | ✅ deno_core + watchdog |
+| **Full** DOM bound to native `rtdom::Tree` (real `document`/Element — jQuery/React run) | ✅ `browser_env` (vendored from turbo-test) |
+| `window`/`navigator`/`location`/`localStorage`/`console` + Event classes | ✅ binding + env bootstrap |
 | Timers (`setTimeout`/`rAF`/`queueMicrotask`) | ✅ virtual (drained by delay) |
 | Promise / `async`-`await` / microtask resolution (event loop) | ✅ `render_html_async` |
-| `fetch` over the real net stack (relative-URL aware) | ✅ `op_fetch` → `turbo_crawl_core::net` |
+| `fetch` + `XMLHttpRequest` over the real net stack (relative-URL aware) | ✅ `op_fetch` → `turbo_crawl_core::net` |
 | `document.cookie` ↔ `CookieJar` bridge | ✅ `op_cookie_get/set` |
-| Entry point | ✅ `render_page(backend, base_url, script)` → hydrated HTML |
+| `MutationObserver`/`IntersectionObserver`/`ResizeObserver`, history API | ✅ (observers are no-op stubs; history updates `location.href`) |
+| TS/JSX bundle support | ✅ `turbo-crawl-transform` (swc) |
+| Entry point | ✅ `render_page(html, base_url, script)` → hydrated HTML |
+
+Validated end to end: a mock SPA hydrates into `#root`, an XHR/`fetch`-driven page
+fills from a localhost server, and **real jQuery** (`quotes.toscrape.com/js`) renders
+its 10 quotes — see `crates/turbo-crawl-render/tests/render.rs`.
 
 **Known gaps / not-yet-required:**
 
-- `XMLHttpRequest` (only `fetch` is wired). Add if a target SPA needs it.
-- `MutationObserver`, `IntersectionObserver`, history API beyond `location.href`.
-- `esbuild`→`swc` transform for non-ESM/JSX page bundles (task #8).
-- Bundle/module loading: scripts are evaluated as classic scripts; ESM `import`
-  graphs are not fetched/linked yet.
-- The `node:vm` + `isolated-vm` dual backend (JS repo) collapses onto this one
-  isolate (task #8).
+- Bundle/module loading: scripts run as classic scripts; ESM `import` graphs aren't
+  fetched/linked (the harness adapter concatenates a page's classic `<script>`s).
+- Observers are inert stubs (no live mutation callbacks over the static tree).
 
 ## Lane routing (when to hydrate)
 
-`detect.mjs` (Lane B heuristic) decides whether a page is JS-gated and worth the
-isolate: near-empty rendered text + heavy external scripts, or an empty known SPA
-mount (`#root`/`#app`/`#__next`/`[data-reactroot]`). Porting `detect` to
-`turbo-crawl-view` (over `text` + `query`) is part of task #4; until then a caller
-chooses Lane A (no-JS parse) vs Lane B (`render_page`) explicitly.
+`detect` (Lane B heuristic, ported to `turbo-crawl-view`) decides whether a page is
+JS-gated and worth the isolate: near-empty rendered text + heavy external scripts, or
+an empty known SPA mount (`#root`/`#app`/`#__next`/`[data-reactroot]`). A caller picks
+Lane A (no-JS parse) vs Lane B (`render_page`) from its verdict.

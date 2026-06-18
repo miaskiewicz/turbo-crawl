@@ -7,20 +7,26 @@
 use swc_core::common::comments::SingleThreadedComments;
 use swc_core::common::sync::Lrc;
 use swc_core::common::{FileName, Globals, Mark, SourceMap, GLOBALS};
+use swc_core::ecma::ast::Pass;
 use swc_core::ecma::ast::Program;
 use swc_core::ecma::codegen::text_writer::JsWriter;
 use swc_core::ecma::codegen::Emitter;
 use swc_core::ecma::parser::{lexer::Lexer, EsSyntax, Parser, StringInput, Syntax, TsSyntax};
-use swc_core::ecma::ast::Pass;
 use swc_core::ecma::transforms::base::resolver;
 use swc_core::ecma::transforms::react::{react, Options as ReactOptions};
 use swc_core::ecma::transforms::typescript::strip;
 
 fn syntax(ts: bool, jsx: bool) -> Syntax {
     if ts {
-        Syntax::Typescript(TsSyntax { tsx: jsx, ..Default::default() })
+        Syntax::Typescript(TsSyntax {
+            tsx: jsx,
+            ..Default::default()
+        })
     } else {
-        Syntax::Es(EsSyntax { jsx, ..Default::default() })
+        Syntax::Es(EsSyntax {
+            jsx,
+            ..Default::default()
+        })
     }
 }
 
@@ -30,7 +36,12 @@ pub fn transform(src: &str, ts: bool, jsx: bool) -> Result<String, String> {
     let comments = SingleThreadedComments::default();
     let fm = cm.new_source_file(Lrc::new(FileName::Anon), src.to_string());
 
-    let lexer = Lexer::new(syntax(ts, jsx), Default::default(), StringInput::from(&*fm), Some(&comments));
+    let lexer = Lexer::new(
+        syntax(ts, jsx),
+        Default::default(),
+        StringInput::from(&*fm),
+        Some(&comments),
+    );
     let mut parser = Parser::new_from(lexer);
     let program = parser
         .parse_program()
@@ -68,7 +79,9 @@ fn emit(cm: &Lrc<SourceMap>, program: &Program) -> Result<String, String> {
             comments: None,
             wr: writer,
         };
-        emitter.emit_program(program).map_err(|e| format!("codegen error: {e}"))?;
+        emitter
+            .emit_program(program)
+            .map_err(|e| format!("codegen error: {e}"))?;
     }
     String::from_utf8(buf).map_err(|e| e.to_string())
 }
@@ -79,7 +92,12 @@ mod tests {
 
     #[test]
     fn strips_typescript_types() {
-        let out = transform("const x: number = 1; function f(a: string): void {}", true, false).unwrap();
+        let out = transform(
+            "const x: number = 1; function f(a: string): void {}",
+            true,
+            false,
+        )
+        .unwrap();
         assert!(!out.contains(": number"), "types stripped: {out}");
         assert!(out.contains("const x = 1"), "got: {out}");
     }

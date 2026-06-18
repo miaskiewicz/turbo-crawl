@@ -215,7 +215,15 @@ impl CookieJar {
             .filter(|c| cookie_applies(c, &ctx))
             .cloned()
             .collect();
-        out.sort_by_key(|c| std::cmp::Reverse(c.path.len()));
+        // RFC 6265 §5.4: longest path first. Same-path order is unspecified by the
+        // spec (and doesn't survive a storageState round-trip via the HashMap store),
+        // so tiebreak on name for a stable, deterministic header.
+        out.sort_by(|a, b| {
+            b.path
+                .len()
+                .cmp(&a.path.len())
+                .then_with(|| a.name.cmp(&b.name))
+        });
         out
     }
 
@@ -612,7 +620,8 @@ mod tests {
         let j2 = CookieJar::from_storage_state(&state);
         assert_eq!(j2.size(), 2);
         // secure cookie still secure-gated; session cookie still sent
-        assert_eq!(j2.cookie_header("https://x.test/app", 0.0), "sid=abc; k=v");
+        // same path "/" → deterministic name order (k before sid)
+        assert_eq!(j2.cookie_header("https://x.test/app", 0.0), "k=v; sid=abc");
         assert_eq!(j2.cookie_header("http://x.test/", 0.0), "k=v"); // sid is Secure
     }
 

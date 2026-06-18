@@ -23,7 +23,8 @@
       "**/node_modules/**",
       "**/coverage/**",
       "test/fixtures/**",
-      "**/storage/**"
+      "**/storage/**",
+      "**/browser_env.js"
     ]
   }
 }

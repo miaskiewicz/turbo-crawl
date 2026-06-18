@@ -380,24 +380,41 @@ generic `{ fallback: fetchHtml }` to route them to whatever renderer you plug in
 
 `harness/competitive/` runs the **same Playwright script** on turbo-crawl and a
 fleet of real browsers, scoring output **parity** against a Chromium oracle and
-timing each. `npm run harness`. Median ms over 5 runs (live network), parity is
-each engine's observations vs the Chromium oracle:
+timing each. `npm run harness`. The **Rust** port runs here too — `turbo-rust
+(no-js)` and `turbo-rust (js)` drive the same routines through the napi addon
+(turbo-dom + the `deno_core` render tier), **no Chromium**. Median ms over 8 runs
+(live network), parity is each engine's observations vs the Chromium oracle:
 
-| engine | wikipedia | form | js-quotes | parity |
-|---|---|---|---|---|
-| **turbo-crawl (no-JS)** | **153** | 236 | — *(needs JS)* | ✓ |
-| **turbo-crawl (js-fast)** | 355 | **241** | **241** | ✓ |
-| **turbo-crawl (js-secure)** | 318 | 235 | 237 | ✓ |
-| chromium *(oracle)* | 947 | 652 | 895 | — |
-| firefox | 802 | 880 | 895 | ✓ |
-| webkit | 1295 | 851 | 847 | ✓ |
-| stealth (playwright-extra) | 1020 | 528 | 903 | ✓ |
-| patchright | 1029 | 538 | 894 | ✓ |
+| engine | wikipedia | js-quotes | parity |
+|---|---|---|---|
+| turbo-crawl (no-JS) *(JS impl)* | **153** | — *(needs JS)* | ✓ |
+| turbo-crawl (js-fast) *(JS impl)* | 343 | **248** | ✓ |
+| turbo-crawl (js-secure) *(JS impl)* | 291 | 287 | ✓ |
+| **turbo-rust (no-JS)** *(Rust)* | 192 | — *(needs JS)* | ✓ |
+| **turbo-rust (js)** *(Rust)* | —‡ | 524 | ✓ |
+| chromium *(oracle)* | 919 | 1170 | — |
+| firefox | 726 | 1237 | ✓ |
+| webkit | 1196 | 1271 | ✓ |
 
-Every turbo-crawl mode produces the **same observations** as Chromium / Firefox /
-WebKit / the stealth browsers — while running 2–6× faster. The harness
-auto-detects installed engines (`firefox`/`webkit`, and anti-detect browsers like
-`playwright-extra`/`patchright`/`rebrowser-playwright`); see
+Every engine produces the **same observations** as Chromium / Firefox / WebKit
+(parity ✓). The **pure-Rust** crawler is right there with the mature JS impl and
+crushes every browser: `turbo-rust (no-js)` runs the Wikipedia click-through in
+**192 ms** — **~4.8× faster than Chromium** (919), and faster than Firefox (726) /
+WebKit (1196) — and `turbo-rust (js)` **runs the real jQuery on
+`quotes.toscrape.com/js`** (the same 10 quotes Chromium extracts) in **524 ms,
+~2.2× faster than Chromium** (1170), via a true V8 isolate over a native rtdom
+DOM, no Chromium process. Both numbers are essentially network-bound now: the
+napi addon uses a **process-shared pooled HTTP client** (connection + TLS reuse
+across pages) and a **thread-persistent V8 isolate** that `page.evaluate` reuses
+across pages (the ~20 ms isolate boot is paid once, then ~5 ms/call), so the Rust
+engine sits within a hair of the in-process `node:vm` JS impl.
+
+‡ js-mode executes the *page's own* scripts; on a server-rendered page like
+Wikipedia that over-runs (use `no-js` there — 192 ms, 4/4). The `form` routine is
+omitted this run (httpbin.org was returning 503/timeouts for every engine).
+
+The harness auto-detects installed engines (`firefox`/`webkit`, and anti-detect
+browsers like `playwright-extra`/`patchright`/`rebrowser-playwright`); see
 [harness/competitive/README.md](./harness/competitive/README.md). (Numbers are
 network-bound and machine/run dependent.)
 

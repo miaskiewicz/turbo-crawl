@@ -1,0 +1,338 @@
+//! Render-tier integration tests. These drive deno_core (which boots V8 its own
+//! way), so they live in a SEPARATE test binary from the lib unit tests — the
+//! vendored `browser_env_upstream.rs` smoke test boots a standalone V8 platform in
+//! the lib binary, and the two platform initializations must not share a process.
+
+use turbo_crawl_render::{
+    render_html, render_html_async, render_page, render_page_with_budget, run_with_dom,
+};
+
+// --- reads over a real parsed DOM -------------------------------------------
+#[test]
+fn reads_real_parsed_dom() {
+    assert_eq!(
+        run_with_dom(
+            "<html><body><h1 id='title'>Hello</h1></body></html>",
+            "document.querySelector('h1').textContent"
+        )
+        .unwrap(),
+        "Hello"
+    );
+    assert_eq!(
+        run_with_dom(
+            "<html><body><h1 id='title'>Hello</h1></body></html>",
+            "document.getElementById('title').getAttribute('id')"
+        )
+        .unwrap(),
+        "title"
+    );
+}
+
+#[test]
+fn query_selector_all_returns_list() {
+    let n = run_with_dom(
+        "<ul><li>a</li><li>b</li><li>c</li></ul>",
+        "String(document.querySelectorAll('li').length)",
+    )
+    .unwrap();
+    assert_eq!(n, "3");
+}
+
+#[test]
+fn scoped_query_within_element() {
+    let txt = run_with_dom(
+        "<div id='a'><span class='x'>1</span></div><span class='x'>2</span>",
+        "document.getElementById('a').querySelector('.x').textContent",
+    )
+    .unwrap();
+    assert_eq!(txt, "1");
+}
+
+#[test]
+fn element_api_surface() {
+    // tagName / innerHTML / outerHTML / body / mutate + reserialize, all within one
+    // render (the binding holds the tree for the life of the install).
+    let out = run_with_dom(
+        "<html><body><div id='a' class='c'>hi</div></body></html>",
+        r#"
+        const el = document.querySelector('#a');
+        el.setAttribute('data-x', '1');
+        el.id = 'b';
+        JSON.stringify({
+          tag: el.tagName,
+          inner: el.innerHTML,
+          outer: el.outerHTML,
+          hasBody: document.body !== null,
+          dataX: el.getAttribute('data-x'),
+          byNewId: document.getElementById('b') !== null,
+        });
+        "#,
+    )
+    .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["tag"], "DIV", "{out}");
+    assert!(v["inner"].as_str().unwrap().contains("hi"), "{out}");
+    assert!(
+        v["outer"].as_str().unwrap().contains("class=\"c\""),
+        "{out}"
+    );
+    assert_eq!(v["hasBody"], true, "{out}");
+    assert_eq!(v["dataX"], "1", "{out}");
+    assert_eq!(v["byNewId"], true, "{out}");
+}
+
+#[test]
+fn window_and_navigator_present() {
+    assert_eq!(
+        run_with_dom("<body></body>", "navigator.userAgent").unwrap(),
+        "turbo-crawl"
+    );
+    assert_eq!(
+        run_with_dom("<body></body>", "String(window === globalThis)").unwrap(),
+        "true"
+    );
+}
+
+// --- hydration (the headline tier-3 capability) -----------------------------
+#[test]
+fn page_script_hydrates_then_serializes() {
+    let html = render_html(
+        "<html><body><div id='app'></div></body></html>",
+        r#"
+        const app = document.getElementById('app');
+        app.innerHTML = '<p class="msg">hydrated</p>';
+        setTimeout(() => {
+          const span = document.createElement('span');
+          span.textContent = 'fromtimer';
+          app.appendChild(span);
+        }, 10);
+        "#,
+    )
+    .unwrap();
+    assert!(
+        html.contains(r#"<p class="msg">hydrated</p>"#),
+        "got: {html}"
+    );
+    assert!(html.contains("<span>fromtimer</span>"), "got: {html}");
+}
+
+#[tokio::test]
+async fn mock_spa_hydrates_into_root() {
+    // A framework-shaped bundle: mounts into #root, holds state, re-renders after an
+    // effect (setTimeout) — the SPA hydration path end to end.
+    let bundle = r#"
+        const root = document.getElementById('root');
+        let state = { count: 0, items: ['a', 'b'] };
+        function render() {
+          root.innerHTML = '';
+          const app = document.createElement('div');
+          app.setAttribute('class', 'app');
+          const h = document.createElement('h1');
+          h.textContent = 'Count: ' + state.count;
+          app.appendChild(h);
+          const ul = document.createElement('ul');
+          for (const it of state.items) {
+            const li = document.createElement('li');
+            li.textContent = it;
+            ul.appendChild(li);
+          }
+          app.appendChild(ul);
+          root.appendChild(app);
+        }
+        render();                                   // initial mount
+        setTimeout(() => {                          // effect → setState → re-render
+          state.count = 5;
+          state.items.push('c');
+          render();
+        }, 10);
+    "#;
+    let html = render_page(
+        "<html><body><div id='root'></div></body></html>",
+        "https://x.test/",
+        bundle,
+    )
+    .await
+    .unwrap()
+    .replace("&nbsp;", " ");
+    assert!(html.contains(r#"<div class="app">"#), "got: {html}");
+    assert!(html.contains("<h1>Count: 5</h1>"), "got: {html}");
+    assert!(html.contains("<li>c</li>"), "got: {html}");
+}
+
+#[tokio::test]
+async fn async_promise_hydration_resolves() {
+    let html = render_html_async(
+        "<html><body><div id='app'></div></body></html>",
+        r#"
+        Promise.resolve().then(() => {
+          document.getElementById('app').innerHTML = '<p>micro</p>';
+        });
+        (async () => {
+          await new Promise((r) => setTimeout(r, 5));
+          const s = document.createElement('span');
+          s.textContent = 'awaited';
+          document.getElementById('app').appendChild(s);
+        })();
+        "#,
+    )
+    .await
+    .unwrap();
+    assert!(html.contains("<p>micro</p>"), "got: {html}");
+    assert!(html.contains("<span>awaited</span>"), "got: {html}");
+}
+
+// --- DOM shims the render tier adds for real-world bundles (jQuery etc.) -----
+#[test]
+fn get_elements_by_tag_name_on_detached_subtree() {
+    // jQuery's support probe builds a DETACHED div and reads
+    // `div.getElementsByTagName('input')[0]`; the native query matches only
+    // connected nodes, so the extension walks `children` instead.
+    let out = run_with_dom(
+        "<body></body>",
+        r#"
+        const div = document.createElement('div');
+        div.innerHTML = '<input type="checkbox"><span>x</span><input>';
+        JSON.stringify({
+          inputs: div.getElementsByTagName('input').length,
+          all: div.getElementsByTagName('*').length,
+          last: div.lastChild ? String(div.lastChild.tagName) : null,
+          lastEl: div.lastElementChild ? String(div.lastElementChild.tagName) : null,
+        });
+        "#,
+    )
+    .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["inputs"], 2, "{out}");
+    assert_eq!(v["all"], 3, "{out}");
+    assert_eq!(v["last"], "INPUT", "{out}");
+    assert_eq!(v["lastEl"], "INPUT", "{out}");
+}
+
+#[test]
+fn document_write_appends_to_body() {
+    let html = render_html(
+        "<html><body></body></html>",
+        r#"
+        document.write("<div class='quote'>one</div>");
+        document.write("<div class='quote'>two</div>");
+        "#,
+    )
+    .unwrap();
+    let n = html.matches(r#"class="quote""#).count();
+    assert_eq!(n, 2, "got: {html}");
+    assert!(
+        html.contains(">one<") && html.contains(">two<"),
+        "got: {html}"
+    );
+}
+
+// --- network: fetch / XHR over the tier-1 stack -----------------------------
+#[tokio::test]
+async fn mock_spa_fetches_data_via_xhr() {
+    let port = spawn_json_server(r#"{"title":"From XHR"}"#).await;
+    let bundle = r#"
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', '/data.json');
+        xhr.onload = () => {
+          const d = JSON.parse(xhr.responseText);
+          document.getElementById('root').textContent = d.title;
+        };
+        xhr.send();
+    "#;
+    let html = render_page(
+        "<body><div id='root'>loading</div></body>",
+        &base(port),
+        bundle,
+    )
+    .await
+    .unwrap()
+    .replace("&nbsp;", " ");
+    assert!(html.contains("From XHR"), "got: {html}");
+}
+
+#[tokio::test]
+async fn fetch_over_net_hydrates_from_localhost() {
+    let port = spawn_json_server(r#"{"msg":"from-fetch"}"#).await;
+    let html = render_page(
+        "<html><body><div id='app'></div></body></html>",
+        &base(port),
+        r#"
+        (async () => {
+          const r = await fetch('/data.json');
+          const j = await r.json();
+          document.getElementById('app').textContent = j.msg + ':' + r.status;
+        })();
+        "#,
+    )
+    .await
+    .unwrap();
+    assert!(html.contains("from-fetch:200"), "got: {html}");
+}
+
+#[tokio::test]
+async fn fetch_failure_surfaces_as_failed_response() {
+    // Nothing listening → fetch resolves to a failed Response (no throw).
+    let html = render_page(
+        "<html><body><div id='app'></div></body></html>",
+        "http://127.0.0.1:1/",
+        r#"
+        (async () => {
+          const r = await fetch('/x');
+          document.getElementById('app').textContent = 'ok=' + r.ok + '/st=' + r.status;
+        })();
+        "#,
+    )
+    .await
+    .unwrap();
+    assert!(html.contains("ok=false/st=0"), "got: {html}");
+}
+
+// --- cookies + budget -------------------------------------------------------
+#[tokio::test]
+async fn document_cookie_bridge_roundtrips() {
+    let html = render_page(
+        "<html><body></body></html>",
+        "https://x.test/",
+        "document.cookie = 'a=1'; document.body.textContent = document.cookie;",
+    )
+    .await
+    .unwrap();
+    assert!(html.contains("a=1"), "got: {html}");
+}
+
+#[tokio::test]
+async fn runaway_script_hits_render_budget() {
+    let err = render_page_with_budget(
+        "<body><div id='app'></div></body>",
+        "https://x.test/",
+        "while (true) {}",
+        200,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("budget exceeded"), "got: {err}");
+}
+
+// --- helpers ----------------------------------------------------------------
+async fn spawn_json_server(body: &'static str) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            let mut b = [0u8; 512];
+            let _ = s.read(&mut b).await;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}"
+            );
+            let _ = s.write_all(resp.as_bytes()).await;
+            let _ = s.flush().await;
+        }
+    });
+    port
+}
+
+fn base(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/")
+}

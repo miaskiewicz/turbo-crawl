@@ -19,13 +19,24 @@ One routine runs unmodified on every engine via the shared Playwright Page API.
 
 | engine | what | needs |
 |---|---|---|
-| `turbo-crawl (no-js)` | Lane A — fetch + parse, no JS | always |
+| `turbo-crawl (no-js)` | JS-impl Lane A — fetch + parse, no JS | always |
 | `turbo-crawl (js-fast)` | JS render via in-process `node:vm` | `esbuild` |
 | `turbo-crawl (js-secure)` | JS render via `isolated-vm` (true isolate) | `isolated-vm` + `esbuild` |
+| `turbo-rust (no-js)` | **Rust** engine (napi addon), Lane A — fetch + parse | built `.node` addon |
+| `turbo-rust (js)` | **Rust** engine, JS render via `deno_core` (real `document` over rtdom) | built `.node` addon |
 | `chromium` (**oracle**) | real headless Chromium | `playwright` + browser |
 | `firefox`, `webkit` | real Playwright browsers | `playwright` + browser |
 | `stealth` | `playwright-extra` + stealth plugin | those packages |
 | `patchright`, `rebrowser` | patched/anti-detect Chromium | those packages |
+
+The two `turbo-rust` engines run the **Rust** port (`rust/crates/turbo-crawl-napi`)
+behind the same Page API via a thin adapter ([`rust-engine.mjs`](./rust-engine.mjs)):
+`goto`/`fill`/`click`/`title` and (for `js`) `<script>` execution all land in Rust
+— turbo-dom + the `deno_core` render tier, **no Chromium**. They auto-skip if the
+native addon isn't built (`cargo build --release -p turbo-crawl-napi`). The addon
+pools one HTTP client (connection/TLS reuse across pages) and reuses one V8 isolate
+for `page.evaluate` across pages, so the Rust engine is network-bound here — on par
+with the in-process `node:vm` JS-impl engines, and multiples faster than every browser.
 
 Install more to battle-test against them, e.g.:
 
