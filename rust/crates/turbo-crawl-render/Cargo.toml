@@ -9,7 +9,7 @@ description = "turbo-crawl JS-execution tier (tier 3): deno_core isolate + DOM o
 [dependencies]
 deno_core = "0.404"
 turbo-dom-parser = { package = "turbo-dom", version = "0.3.1" }
-turbo-crawl-core = { path = "../turbo-crawl-core" }
+turbo-crawl-core = { path = "../turbo-crawl-core", version = "0.1.6" }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
