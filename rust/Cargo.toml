@@ -6,6 +6,7 @@ members = [
     "crates/turbo-crawl-mcp",
     "crates/turbo-crawl-page",
     "crates/turbo-crawl-render",
+    "crates/turbo-crawl-transform",
     "crates/turbo-crawl-view",
 ]
 

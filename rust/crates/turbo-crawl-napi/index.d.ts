@@ -16,6 +16,11 @@ export function evaluate(html: string, script: string): string;
 /** Run the page's own JS (promises/timers/fetch/cookies) → hydrated HTML. */
 export function render(html: string, baseUrl: string, script: string): string;
 
+/** Transform TS/JSX source → classic JS (swc). */
+export function transform(src: string, ts: boolean, jsx: boolean): string;
+/** Transform a TS/JSX bundle then render it → hydrated HTML. */
+export function renderTs(html: string, baseUrl: string, src: string, ts: boolean, jsx: boolean): string;
+
 /** Fetch with an explicit method/body (POST form submit). */
 export function request(url: string, method: string, body?: string): Promise<string>;
 

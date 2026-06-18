@@ -185,6 +185,20 @@ pub fn render(html: String, base_url: String, script: String) -> Result<String> 
     .map_err(Error::from_reason)
 }
 
+/// Transform TS/JSX page source → classic JS (swc) so a bundle written in
+/// TS/JSX runs under the render tier. Pass `ts`/`jsx` for the input syntax.
+#[napi]
+pub fn transform(src: String, ts: bool, jsx: bool) -> Result<String> {
+    turbo_crawl_transform::transform(&src, ts, jsx).map_err(Error::from_reason)
+}
+
+/// Render a TS/JSX bundle: transform → run over the DOM → hydrated HTML.
+#[napi]
+pub fn render_ts(html: String, base_url: String, src: String, ts: bool, jsx: bool) -> Result<String> {
+    let script = turbo_crawl_transform::transform(&src, ts, jsx).map_err(Error::from_reason)?;
+    render(html, base_url, script)
+}
+
 // --- per-element accessors (by node handle; back the shim Locator) ----------
 // Handles are stable for a given HTML parse, so the shim resolves matches (which
 // carry `node`) then reads by handle — works for both `query` and `getBy`.

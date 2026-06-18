@@ -1,0 +1,18 @@
+[package]
+name = "turbo-crawl-transform"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "turbo-crawl swc transform — TS/JSX → classic JS for the render tier"
+
+[dependencies]
+swc_core = { version = "70", features = [
+    "ecma_ast",
+    "ecma_parser",
+    "ecma_codegen",
+    "ecma_transforms_typescript",
+    "ecma_transforms_react",
+    "ecma_visit",
+    "common",
+] }
