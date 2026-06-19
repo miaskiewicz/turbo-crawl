@@ -173,30 +173,48 @@ actual Playwright/Chromium against the SAME servers showed the dominant cause wa
    `connect-src` omits `http://localhost:*` (only dev allows it), so the browser
    blocks `GET http://localhost:3001/auth/me`. Real Chromium hit this too → blank.
    (e2e normally runs the dev CSP.)
-2. **Stale backend → `auth/me` 500.** flux-apis HEAD is *Release 11 March 2026*
-   but its DB has *June* migrations applied — the June migration **dropped the
-   `entity_invitations` table**, yet the March `auth/me` code still `SELECT`s it →
-   SQL error → 500 → auth fails → empty. Recreating the table makes `auth/me` 200.
-   With CSP + table fixed, **real Chromium renders `/people/active` fully** (5
-   tabs + the add-employee button; only `/employments` still 500s → empty grid).
+2. **Backend is 3 months out of sync (the dominant cause) → `500`s.** flux-apis
+   HEAD is *Release 11 March 2026* but its DB has *June* migrations applied. The
+   March code queries schema the June DB changed: the June migration **dropped
+   `entity_invitations`** (yet March `auth/me` still `SELECT`s it → 500), and
+   `employments` **lost `job_id`** (March `Employment` model still selects it →
+   `column Employment.job_id does not exist` → `GET /employments` 500), etc.
+   Recreating `entity_invitations` makes `auth/me` 200; with that + the CSP fix,
+   **real Chromium renders `/people/active` fully** (5 tabs + add-employee button;
+   the grid is empty only because `/employments` still 500s). The *real* fix is to
+   sync flux-apis code↔DB (check out a June commit, or reset the DB to March).
 
-3. **turbo-surf has full auth parity.** Its cookie jar carries the cross-domain
-   `refresh_token` cookie (`*.propelauthtest.com`); it performs
-   `GET …/api/v1/refresh_token` (×2) → `GET …/auth/me`, **all `200`** — same as
-   Chromium.
+3. **turbo-surf has full auth + data parity.** Its cookie jar carries the
+   cross-domain `refresh_token` cookie (`*.propelauthtest.com`); it performs
+   `GET …/api/v1/refresh_token` (×2) → `GET …/auth/me` — **all `200`**, and
+   `auth/me` returns the **complete** user + organizations payload (len 2040),
+   identical to Chromium.
 
-4. **Residual turbo-surf gap (precisely isolated).** With auth at parity, Chromium
-   commits a real DOM (507 chars) but turbo-surf's React fires `onCommitFiberRoot`
-   **12× to EMPTY host DOM** — not a loop (finite), not auth, not CSP, not maps
-   (blocking maps didn't help), not a throw (error boundary around the grid caught
-   nothing), not suspense. A deep **DOM-binding/reconciliation fidelity gap** in
-   the render tier for this specific component tree (the `DataTable` grid),
-   reachable only by diffing React's committed fiber tree vs Chromium's — beyond
-   black-box probing.
+4. **Residual turbo-surf gap (exhaustively isolated).** With everything at parity,
+   Chromium renders `/people/active` (459 DOM tags) but turbo-surf commits a bare
+   empty `<div>` (2 tags). Ruled out by direct probes, every one: not auth, not
+   data (stubbing `/employments` to a clean 200 didn't help — and Chromium renders
+   even WITH its 500), not CSP, not maps, not a loop (`onCommitFiberRoot` fires a
+   finite 12×), not a throw / error (locked-console + Error-patch + grid error
+   boundary all caught nothing), not suspense. **Every component renders** — app
+   markers + grid markers fire all the way down (`DataTableCore`/`Header`/`Body`
+   all execute) — yet React's commit materializes **no host DOM**. React's DOM
+   mutations go through the **native rtdom binding** (JS-level `appendChild`
+   overrides see 0 calls on both routes), so this is a **native rtdom↔React
+   commit-binding gap** specific to this component tree, not anything observable
+   from page JS.
 
-**Net:** the headline blocker (backend env) is fixed and `/people/active` renders
-in a real browser; turbo-surf is reduced to one precise residual fidelity gap.
-The full login→dashboard path + many surfaces work.
+   **Next step (Rust-side):** instrument `turbo-surf-render`'s rtdom binding /
+   vendored `browser_env` DOM-mutation ops (createElement / appendChild /
+   insertBefore / setAttribute) during a `/people/active` commit and diff against
+   `/home` (which commits 459 tags fine) — find the op/element that silently no-ops
+   or fails in the commit path. Or diff React's committed fiber `current` vs
+   `alternate` trees (the commit may be swapping in an empty tree).
+
+**Net:** the headline blocker (stale backend env) is identified + partially fixed —
+`/people/active` now renders in a real browser. turbo-surf is reduced to ONE
+precise residual: a native commit-binding gap, with a concrete Rust-side repro
+path. The full login→dashboard flow + many surfaces work.
 
 ### Probing gotchas (reusable)
 
