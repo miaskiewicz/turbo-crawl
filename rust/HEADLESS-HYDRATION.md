@@ -128,10 +128,32 @@ hydrate dev builds (the `import.meta`/ESM + best-effort-on-budget work merged on
 dev session to a readable React error at the `DataTable` grid, or bisect the grid
 internals (likely a `useMediaQuery`/layout path or a host API the grid needs).
 
+**Root cause confirmed (dev-build probe):** running the route through a `next dev`
+build (in a temp checkout with its own `.next`, so the prod `:3000` server is
+untouched — the engine can now open dev sessions thanks to the `import.meta` +
+best-effort-on-budget work on `main`) renders **"Application error: a client-side
+exception has occurred"** — Next's **root error boundary** fallback. So
+`/people/active` **throws a client-side exception during render**; with no
+intermediate `error.tsx` boundary in the entity/admin/people segments, it unwinds
+to the root boundary, which replaces the whole tree (empty on the minified prod
+build, the generic "Application error" page on dev). That's why the shell blanks
+too even though its render function ran.
+
+So the chain is: every component renders → the `DataTable` grid subtree throws →
+root error boundary → blank. NOT null-return / suspense / missing-module /
+data-fetch / redirect (all ruled out). The throw is in `DataTable`'s render-phase
+hooks (it pulls `useMediaQuery`, `useTableStickyPositions` (DOM measurement),
+fullscreen APIs, analytics) — one needs a host API our env lacks or mis-stubs.
+
+**Last mile (small):** name the exact throwing line. Either (a) finish dev-build
+support — a remaining external dev chunk still fails classic eval with
+`Unexpected token '.'` (a #2 follow-up); fixing it lets dev React log the error +
+component stack directly — or (b) add a `try/catch` around `DataTableCore`'s hook
+calls in the vendored grid source and log the caught error.
+
 **Status:** banked as a known limitation — the full login→dashboard path + many
 surfaces work; segments that mount this `DataTable` grid (people, and similar)
-commit empty. Not a null-return / suspense / missing-module / data-fetch /
-redirect (all ruled out); the empty commit originates in the design-system grid.
+throw to the root boundary and render empty.
 
 ### Probing gotchas (reusable)
 
