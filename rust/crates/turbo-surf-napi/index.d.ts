@@ -20,11 +20,21 @@ export function render(html: string, baseUrl: string, script: string): string;
  * the way a browser does — fetch+execute each, fire onload, drain to quiescence — so
  * a real SPA bundle mounts. Async (Promise): must not block Node's event loop, since
  * chunk fetches may hit a same-process server. */
-export function hydrate(html: string, baseUrl: string, cookies?: string, userAgent?: string): Promise<string>;
+export function hydrate(
+  html: string,
+  baseUrl: string,
+  cookies?: string,
+  userAgent?: string,
+): Promise<string>;
 
 /** Live session: hydrate + keep the app's JS isolate ALIVE so interactions dispatch
  * real DOM events into the running app. Returns a session id. */
-export function liveOpen(html: string, baseUrl: string, cookies?: string, userAgent?: string): Promise<number>;
+export function liveOpen(
+  html: string,
+  baseUrl: string,
+  cookies?: string,
+  userAgent?: string,
+): Promise<number>;
 /** Run JS in a live session, drain to quiescence, return String(globalThis.__RESULT). */
 export function liveEval(id: number, script: string): Promise<string>;
 /** Serialize the live session's current DOM to HTML. */
