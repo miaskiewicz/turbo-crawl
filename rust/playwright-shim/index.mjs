@@ -818,10 +818,18 @@ class Page {
     await new Promise((r) => setTimeout(r, Math.min(ms ?? 0, 50)));
   }
   async waitForURL(url, opts = {}) {
-    const match = (u) =>
-      url instanceof RegExp
-        ? url.test(u)
-        : u.includes(String(url).replace(/\*\*/g, "").replace(/\*/g, ""));
+    // Playwright accepts a string (glob), RegExp, or a predicate fn(URL)=>bool.
+    const match = (u) => {
+      if (typeof url === "function") {
+        try {
+          return !!url(new URL(u));
+        } catch {
+          return false;
+        }
+      }
+      if (url instanceof RegExp) return url.test(u);
+      return u.includes(String(url).replace(/\*\*/g, "").replace(/\*/g, ""));
+    };
     if (match(this._url)) return undefined;
     // In a live session a navigation can be a MULTI-STEP client redirect (login →
     // /post-login → /entity-select|/entity/{id}), each step a render that runs on the
