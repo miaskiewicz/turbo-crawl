@@ -76,13 +76,149 @@ carrying cookies, so the redirect chain completes hop-by-hop. Test:
 
 **Open limitation — cold deep-route loads render empty.** A *cold*
 `goto('/entity/{id}/admin/people/active', {networkidle})` (cookie carried, no
-prior in-app nav) commits an **empty app-root `div`** — all chunks execute, no
-error / no rejection / no data fetch, the RSC flight payload is complete and
-valid, yet React's App Router flight client never reconciles a tree (the same
-shell/providers render fine for `/admin/home`). This is the next investigation
-(React's flight-client no-commit on deeper nested-segment routes); it's why most
-authed-page e2e specs still fail "locator matched no elements". A few specs
-(`boundingBox`) need a real browser by design.
+prior in-app nav) commits an **empty app-root `div`** while `/admin/home` (same
+shell + providers) renders fully. It's why many authed-page e2e specs still fail
+"locator matched no elements". A few specs (`boundingBox`) need a real browser by
+design.
+
+Diagnosis so far (via a React-DevTools-hook probe over the live isolate):
+- **React is NOT parked/suspended** — it fires `onCommitFiberRoot` 12× for the
+  empty route (19× for the rendering one). It commits; the people segment just
+  reconciles to **empty host DOM**.
+- **Not a missing module/chunk** — all client-reference modules register and all
+  chunks load `200`. **Not data-suspense** — the app has no `useSuspenseQuery`
+  and no data fetch fires. **Not an error** — the only console error is a benign
+  `Cannot read properties of undefined (reading 'prototype')` that appears
+  *identically* on the route that DOES render (red herring).
+- Both routes render `Providers` + `Theme` identically; divergence is deeper, in
+  the segment subtree, and **silent**. Other deep authed routes (e.g.
+  company-settings) render fine — so it's specific to certain segments.
+- **Not suspense** either: a Suspense-boundary fiber probe (tag 13) shows the one
+  boundary is NOT in fallback state at the final commit (`suspended=0`). So React
+  commits a real tree; the people segment subtree just resolves to nothing.
+- **Not a redirect**: the only `history.replaceState` is Next's canonical-URL
+  sync to the *same* path (`admin/people/active`), not a navigation away.
+**Localized via prod `console.log` markers down the render path (overturns the
+"returns null" guess):** the ENTIRE people component tree executes — markers fire
+for `AdminRouteLayout → EntityAdminGuard → PayrollAdminLayout → PeopleLayout →
+PeopleProvider → PeopleLayoutInner → ActiveEmployeesPage → EmployeesListPage →
+EmployeeTable`. So nothing returns null. Render-pass counts are **finite** (most
+=1; `PeopleProvider`=3, `EmployeesListPage`=4, `EmployeeTable`=4 — normal
+state-settle, NOT an infinite loop). Yet `BODYLEN=0`: React runs every render
+function but **commits no non-empty DOM** (not even the shell that DID render its
+functions). `/admin/home` cleanly stops at `PayrollAdminLayout` and commits.
+
+The deepest app component that renders is `EmployeeTable` → which renders
+`<DataTableProvider><DataTable/></DataTableProvider>` from
+`@flux-payroll/flux-payroll-ui` (a custom grid; readable source under
+`dist/components/data/DataTable/`). `DataTableCore` does
+`useMediaQuery(theme.breakpoints.down('md'))` to pick table-vs-card layout. The
+empty commit originates **at/below this design-system grid** — every higher
+component (incl the shell) runs its render but the atomic commit is empty, which
+means the failure is during React's render/commit of the grid subtree (a thrown
+value or a render-phase update that prevents commit), not a null return upstream.
+The grid's own code has no `extends`/`.prototype`; the `prototype` TypeError is
+unrelated (fires identically on `/home`).
+
+**Blocked on tooling for the last mile:** the prod build is minified and our V8
+isolate captures **no stack frames** (even with `Error.stackTraceLimit` raised).
+A `next dev` build would name the failing internal — and the render tier can now
+hydrate dev builds (the `import.meta`/ESM + best-effort-on-budget work merged on
+`main`) — but `next dev` login was flaky to drive headlessly. Last mile: drive a
+dev session to a readable React error at the `DataTable` grid, or bisect the grid
+internals (likely a `useMediaQuery`/layout path or a host API the grid needs).
+
+**Root cause confirmed (dev-build probe):** running the route through a `next dev`
+build (in a temp checkout with its own `.next`, so the prod `:3000` server is
+untouched — the engine can now open dev sessions thanks to the `import.meta` +
+best-effort-on-budget work on `main`) renders **"Application error: a client-side
+exception has occurred"** — Next's **root error boundary** fallback. So
+`/people/active` **throws a client-side exception during render**; with no
+intermediate `error.tsx` boundary in the entity/admin/people segments, it unwinds
+to the root boundary, which replaces the whole tree (empty on the minified prod
+build, the generic "Application error" page on dev). That's why the shell blanks
+too even though its render function ran.
+
+So the chain is: every component renders → the `DataTable` grid subtree throws →
+root error boundary → blank. NOT null-return / suspense / missing-module /
+data-fetch / redirect (all ruled out). The throw is in `DataTable`'s render-phase
+hooks (it pulls `useMediaQuery`, `useTableStickyPositions` (DOM measurement),
+fullscreen APIs, analytics) — one needs a host API our env lacks or mis-stubs.
+
+**Last-mile attempt (deep instrumentation) — refined, partly inconclusive:**
+- **Dev throw is real but the error is unreadable headlessly.** Dev renders the
+  root-boundary "Application error", but React **swallows the caught error** in our
+  env (no DevTools overlay; `console.error` is re-patched by Next dev and even a
+  `defineProperty`-locked hook captured nothing), and dev sessions open
+  **best-effort** (dev React loops past budget → terminated isolate → `liveEval`
+  returns `""` for everything, even `1+1`). So globals/console can't be read off a
+  dev session.
+- **On PROD the grid does NOT throw.** Wrapping `DataTableCore`'s body in
+  try/catch (catches its hooks incl `useTableStickyPositions`) → `data-griderr`
+  empty. Adding a real **error boundary around the grid's children** → still
+  empty. So neither the grid's hooks nor its descendants throw on the prod build,
+  yet `BODYLEN=0`. **The prod-empty and the dev-"Application error" look like
+  different failure modes** — the earlier "grid subtree throws" was over-attributed
+  to the grid.
+- The `Unexpected token '.'` dev chunk turned out to be **CSS inside a `<script>`**
+  (Next devtools styles). Running it + logging a SyntaxError + continuing is
+  exactly what a real browser does — **browser-accurate, not a bug**. So (a) needs
+  no further fix; dev-build support is complete via the merged #2.
+
+**RESOLVED via a real-Chromium oracle (the decisive tool).** Driving the route in
+actual Playwright/Chromium against the SAME servers showed the dominant cause was
+**the environment, not turbo-surf**:
+
+1. **Prod CSP blocked the backend.** `next build` emits a strict CSP whose
+   `connect-src` omits `http://localhost:*` (only dev allows it), so the browser
+   blocks `GET http://localhost:3001/auth/me`. Real Chromium hit this too → blank.
+   (e2e normally runs the dev CSP.)
+2. **Backend is 3 months out of sync (the dominant cause) → `500`s.** flux-apis
+   HEAD is *Release 11 March 2026* but its DB has *June* migrations applied. The
+   March code queries schema the June DB changed: the June migration **dropped
+   `entity_invitations`** (yet March `auth/me` still `SELECT`s it → 500), and
+   `employments` **lost `job_id`** (March `Employment` model still selects it →
+   `column Employment.job_id does not exist` → `GET /employments` 500), etc.
+   Recreating `entity_invitations` makes `auth/me` 200; with that + the CSP fix,
+   **real Chromium renders `/people/active` fully** (5 tabs + add-employee button;
+   the grid is empty only because `/employments` still 500s). The *real* fix is to
+   sync flux-apis code↔DB (check out a June commit, or reset the DB to March).
+
+3. **turbo-surf has full auth + data parity.** Its cookie jar carries the
+   cross-domain `refresh_token` cookie (`*.propelauthtest.com`); it performs
+   `GET …/api/v1/refresh_token` (×2) → `GET …/auth/me` — **all `200`**, and
+   `auth/me` returns the **complete** user + organizations payload (len 2040),
+   identical to Chromium.
+
+4. **Residual turbo-surf gap — FIXED (commit `2a92f36`).** With env at parity,
+   turbo-surf still committed an empty `<div>` because the page **never quiesced**
+   within the render budget — two timer/host bugs let third-party scripts spin:
+   - **No virtual clock in `__runTimers`.** `delay` was only a sort key, so a
+     self-rescheduling `setTimeout` poll (analytics SDKs do this) fired until the
+     raw count cap — spinning the whole budget so React never committed. Binding
+     instrumentation (file-logged from Rust) showed `/people` doing 1150 creates /
+     1319 appends and the hydrate running the FULL 30s budget with the body still
+     empty. Fix: a virtual clock — `due = __now + delay`; the drain advances `__now`
+     to each fired timer's due and stops delayed timers past a 15s virtual ceiling,
+     so polls fire a browser-like ~tens of times and the page quiesces.
+   - **`<iframe>` had no `contentWindow`.** PostHog reads a builtin's native
+     prototype off a throwaway iframe's `contentWindow`; with none it bailed
+     without caching and recreated an iframe on EVERY lookup — **776** iframe
+     create/remove churn that also starved the budget. Fix: iframes get a
+     lightweight stub whose `contentWindow` IS our realm (lookup resolves + caches
+     → loop stops, 776→4) and which never enters the rtdom tree.
+
+   Result: `/people/active` 2 tags → **485 tags in ~2.2s**; `/home` (459) and
+   company-settings (557) also drop to ~1.4–2.2s (were near/over budget). Verified
+   with real Chromium as oracle. Tests: `virtual_clock_bounds_self_rescheduling_timers`,
+   `iframe_content_window_exposes_builtins`.
+
+**Net: cause #2 fully resolved.** The dominant blocker was a stale local backend
+(March code vs June DB → `auth/me` 500); recreating the dropped `entity_invitations`
+table makes auth 200. The turbo-surf side was two budget-starving spin loops
+(timer virtual clock + iframe contentWindow), now fixed — authed SPA pages render
+headlessly. (The local backend still needs code↔DB sync for `/employments` etc.;
+that's an env fix, not turbo-surf.)
 
 ### Probing gotchas (reusable)
 
