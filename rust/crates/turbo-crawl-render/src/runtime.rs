@@ -1193,9 +1193,25 @@ fn run_sync(rt: &mut JsRuntime, html: &str, script: &str) -> Result<String, Stri
 }
 
 async fn drain_event_loop(rt: &mut JsRuntime) -> Result<(), String> {
-    rt.run_event_loop(deno_core::PollEventLoopOptions::default())
+    match rt
+        .run_event_loop(deno_core::PollEventLoopOptions::default())
         .await
-        .map_err(|e| e.to_string())
+    {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Browser-tolerant: a page's UNHANDLED promise rejection logs in a real
+            // browser, it doesn't abort the page. deno_core surfaces it as a fatal event-
+            // loop error ("Uncaught (in promise) …"); swallow it so hydration keeps going
+            // (the pump re-polls). Real execution errors (terminated budget, op failures)
+            // still propagate.
+            let s = e.to_string();
+            if s.contains("Uncaught (in promise)") || s.contains("Unhandled") {
+                Ok(())
+            } else {
+                Err(s)
+            }
+        }
+    }
 }
 
 /// Like [`render_html`] but drives deno_core's event loop, so a page script that

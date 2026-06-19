@@ -284,8 +284,23 @@ class Locator {
     return [sval];
   }
   async click() {
-    if (this._canDriveLive)
-      return void (await this._page._sessionDispatch(this._selector, this._index, "click"));
+    if (this._canDriveLive) {
+      const urlBefore = this._page._url;
+      await this._page._sessionDispatch(this._selector, this._index, "click");
+      // A JS handler that navigated changed the URL (SPA router / form POST + redirect).
+      // If the URL is unchanged, the click hit a plain <a>/<form> whose browser default
+      // action our event dispatch doesn't perform — follow the static intent (anchor
+      // navigate / form POST). For a JS button (Inert intent) the dispatch already did
+      // the work, so we leave it.
+      if (this._page._url === urlBefore) {
+        const n = this._node();
+        if (n != null) {
+          const intent = JSON.parse(native.clickNode(this._page._html, n, this._page._url));
+          if (intent.action !== "inert") return this._page._followIntent(intent);
+        }
+      }
+      return;
+    }
     const intent = JSON.parse(native.clickNode(this._html, this._requireNode(), this._page._url));
     return this._page._followIntent(intent);
   }
@@ -306,8 +321,11 @@ class Locator {
   async scrollIntoViewIfNeeded() {}
   async highlight() {}
   async waitFor() {
-    // Static DOM: the element is present or it isn't. Resolve if present, else
-    // honour Playwright's "detached/hidden" states by checking visibility.
+    // "Wait for this element" — for an SPA the element only exists after the app runs, so
+    // ensure the page is hydrated (a live session). This covers the bare `goto(/login)` +
+    // `emailField.waitFor()` login flow (no `waitUntil:'networkidle'`). Cheap: hydrates
+    // at most once per document.
+    await this._page._ensureLive();
     return undefined;
   }
 
@@ -427,10 +445,17 @@ class Page {
     this._session = null; // live JS session id (networkidle navigations), else null
     this._loadedPath = null; // path the live DOM was loaded at (to detect in-app nav)
     this._navHops = 0; // auto-followed redirects since the last user navigation
+    this._autoHydrate = true; // hydrate-on-demand unless a goto opted out (commit)
   }
 
   get _live() {
     return this._session != null;
+  }
+
+  // Hydrate-on-demand: open a live session if one isn't up (and the last navigation
+  // didn't opt out via waitUntil:'commit'). Idempotent — at most one hydration per doc.
+  async _ensureLive() {
+    if (!this._live && this._autoHydrate !== false) await this._openLiveSession();
   }
 
   // Open a LIVE session: hydrate the current document and KEEP the app's JS isolate
@@ -546,14 +571,13 @@ class Page {
     if (this._url !== "about:blank") this._history.push(this._url);
     this._fwd = []; // a fresh navigation invalidates the forward stack
     this._navHops = 0; // user navigation — reset the redirect-follow budget
+    this._autoHydrate = opts?.waitUntil !== "commit"; // 'commit' = inspect raw shell
     const resp = await this._navigate(this._resolveUrl(url));
-    // `waitUntil: 'networkidle'` means "let the page settle" — for an SPA that's
-    // hydration. A real browser runs the page's JS on navigation; the shim's fetch
-    // only pulls server HTML, so without this an SPA's client-rendered content
-    // (forms, dashboards) never appears and every locator misses. Mirror the browser:
-    // run the page's own bundle to quiescence. (Default/'load' stays raw so callers
-    // can still inspect the pre-hydration server shell.) A LIVE session keeps the app
-    // mounted so later clicks/fills dispatch real events into it (interactive SPA).
+    // `waitUntil:'networkidle'` (or a later waitForLoadState('networkidle')) opens a LIVE
+    // session: hydrate the app to quiescence so an SPA's client-rendered content (forms,
+    // dashboards) appears, and keep it mounted so clicks/fills dispatch real events into
+    // the running app. Default/'load'/'commit' stay raw (cheap fetch) — hydrating EVERY
+    // goto is both slow and unnecessary for static pages.
     if (opts?.waitUntil === "networkidle") await this._openLiveSession();
     return resp;
   }

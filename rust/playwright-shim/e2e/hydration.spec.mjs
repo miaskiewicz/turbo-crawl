@@ -14,7 +14,8 @@ test.afterAll(async () => {
 });
 
 test("the server shell has no form before hydration", async ({ page }) => {
-  await page.goto(`${app.base}/`);
+  // `waitUntil: 'commit'` opts out of auto-hydration → inspect the raw server shell.
+  await page.goto(`${app.base}/`, { waitUntil: "commit" });
   expect(await page.getByTestId("login-email-input").count()).toBe(0);
   await expect(page.getByTestId("boot")).toContainText("Loading");
 });

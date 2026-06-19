@@ -19,7 +19,7 @@ turbo-crawl-core = { path = "../turbo-crawl-core", version = "0.2.0" }
 turbo-crawl-view = { path = "../turbo-crawl-view", version = "0.2.0" }
 turbo-crawl-page = { path = "../turbo-crawl-page", version = "0.2.0" }
 turbo-crawl-render = { path = "../turbo-crawl-render", version = "0.2.0" }
-turbo-dom-parser = { package = "turbo-dom", version = "0.3.4" }
+turbo-dom-parser = { package = "turbo-dom", version = "0.3.5" }
 async-trait = "0.1"
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt", "io-std", "io-util", "net", "time"] }
