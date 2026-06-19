@@ -398,6 +398,33 @@ if (typeof globalThis.FileReader === "undefined") {
     }
   };
 }
+// customElements — the Web Components registry. deno_core ships none, so a bundle that
+// registers a custom element (MUI and friends do) threw "customElements is not defined"
+// mid-script, aborting the rest of that chunk (→ missing UI). Register + resolve
+// whenDefined; no live upgrade pass (the static tree isn't re-instantiated), which is
+// enough to keep the page's JS running.
+if (typeof globalThis.customElements === "undefined") {
+  const __ce = new Map();
+  const __waiters = new Map();
+  globalThis.customElements = {
+    define(name, ctor) {
+      __ce.set(name, ctor);
+      const w = __waiters.get(name);
+      if (w) { w.forEach((r) => r(ctor)); __waiters.delete(name); }
+    },
+    get(name) { return __ce.get(name); },
+    getName(ctor) { for (const [n, c] of __ce) if (c === ctor) return n; return null; },
+    whenDefined(name) {
+      if (__ce.has(name)) return Promise.resolve(__ce.get(name));
+      return new Promise((r) => {
+        const arr = __waiters.get(name) || [];
+        arr.push(r);
+        __waiters.set(name, arr);
+      });
+    },
+    upgrade() {},
+  };
+}
 // MessageChannel — React 18's scheduler drains its work queue by posting to a
 // MessagePort and running the handler on the other port's onmessage. Route the
 // message through the timer queue (setTimeout 0) so the hydration pump drains it;
