@@ -1,11 +1,11 @@
 # Changelog
 
-All notable changes to turbo-crawl are documented here. Format follows
+All notable changes to turbo-surf are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer.
 
 ## [0.2.0]
 
-**turbo-crawl is a browserless, native-speed crawler _and_ Playwright-compatible
+**turbo-surf is a browserless, native-speed crawler _and_ Playwright-compatible
 script runner for AI agents — one engine, no Chromium.** It fetches, parses, and
 acts on pages on its own native DOM ([turbo-dom](https://github.com/miaskiewicz/turbo-dom),
 the `turbo-dom` Rust crate), and for JS-gated pages it runs the page's own scripts

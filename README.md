@@ -1,10 +1,10 @@
-# turbo-crawl
+# turbo-surf
 
 > Native-speed, **browserless** web crawler + **MCP server** for AI agents — built
 > on [turbo-dom](https://github.com/miaskiewicz/turbo-dom). Fetch + parse + extract
 > + run page JS with no headless browser; 100×+ faster on server-rendered pages.
 
-turbo-crawl is a single native (Rust) engine — no Chromium, no pixels, no layout:
+turbo-surf is a single native (Rust) engine — no Chromium, no pixels, no layout:
 
 - **A crawler** — point it at a domain and stream page records: indexed interactive
   elements, a link/form graph, an accessibility tree, markdown and plain-text views,
@@ -24,14 +24,14 @@ benchmark suite drives the engine with unmodified Playwright scripts.
 Most tools in this space pick one lane: a crawler **or** a browser-automation
 library, and they get their DOM from a real browser (Playwright/Puppeteer/
 Selenium) or an in-process fake DOM with no security isolation (jsdom,
-happy-dom). turbo-crawl is unusual on four axes at once:
+happy-dom). turbo-surf is unusual on four axes at once:
 
 1. **AI-agent-ready out of the box.** It ships a full **MCP server** (60 tools:
    navigate, click/fill/submit, query, extract, accessibility tree, markdown,
    `crawl` a whole site, `batch` a URL list, `render`/`set_mode` to run page JS,
    `eval_js`/`inject_js` against the live render heap with a DOM-history trail,
    cookies/headers, `snapshot`, …) so an agent drives real pages over stdio with
-   **no browser and no glue code** — `npx turbo-crawl-mcp`. Most crawlers are
+   **no browser and no glue code** — `npx turbo-surf-mcp`. Most crawlers are
    libraries you wrap yourself; this one is an agent tool on day one.
 2. **Crawler + agent surface on one native engine.** The same engine bulk-crawls a
    domain and serves the MCP tools — no browser anywhere in the stack. Its page API
@@ -52,7 +52,7 @@ happy-dom). turbo-crawl is unusual on four axes at once:
 See [CHANGELOG.md](./CHANGELOG.md) for what shipped and
 [rust/README.md](./rust/README.md) for the engine internals.
 
-Status: **v0.2.0 — working** ([npm](https://www.npmjs.com/package/@miaskiewicz/turbo-crawl)).
+Status: **v0.2.0 — working** ([npm](https://www.npmjs.com/package/turbo-surf)).
 A native Rust engine (7-crate workspace on the `turbo-dom` crate): hardened
 networking (cookies / `document.cookie` bridge / robots + crawl-delay / charset /
 size + redirect caps, HTTP/2 + a pooled client, 304 conditional cache), crawl
@@ -67,9 +67,9 @@ live-heap `eval_js`/`inject_js` + a DOM-history trail, and a 60-tool MCP server
 The npm package is a thin launcher that spawns the native binary:
 
 ```sh
-npm install -g @miaskiewicz/turbo-crawl   # provides the `turbo-crawl-mcp` command
+npm install -g turbo-surf   # provides the `turbo-surf-mcp` command
 # …or run without installing:
-npx -y turbo-crawl-mcp
+npx -y turbo-surf-mcp
 ```
 
 Node ≥ 20 to launch; the engine is a prebuilt per-platform native binary (no Node
@@ -77,22 +77,22 @@ runtime hosts it).
 
 ### What ships where
 
-turbo-crawl publishes from **one `v*` git tag** to two registries (see
+turbo-surf publishes from **one `v*` git tag** to two registries (see
 [PUBLISHING.md](./PUBLISHING.md)):
 
 | Artifact | Registry | What it is | For |
 |---|---|---|---|
-| [`@miaskiewicz/turbo-crawl`](https://www.npmjs.com/package/@miaskiewicz/turbo-crawl) | **npm** | A thin launcher (`cli.js`/`index.js`) **+ prebuilt `turbo-crawl-mcp` binaries** for each platform in `bin/` (darwin x64/arm64, linux x64/arm64-gnu, win x64). `npx` resolves the right one and spawns it. | Running the **MCP server** / CLI. No Rust toolchain, no Chromium, no Node hosting Rust. |
-| `turbo-crawl-core`, `-view`, `-page`, `-render`, `-mcp` | **crates.io** | The Rust crates, in dependency order. | **Embedding** the engine in a Rust program. |
+| [`turbo-surf`](https://www.npmjs.com/package/turbo-surf) | **npm** | A thin launcher (`cli.js`/`index.js`) **+ prebuilt `turbo-surf-mcp` binaries** for each platform in `bin/` (darwin x64/arm64, linux x64/arm64-gnu, win x64). `npx` resolves the right one and spawns it. | Running the **MCP server** / CLI. No Rust toolchain, no Chromium, no Node hosting Rust. |
+| `turbo-surf-core`, `-view`, `-page`, `-render`, `-mcp` | **crates.io** | The Rust crates, in dependency order. | **Embedding** the engine in a Rust program. |
 
-The `turbo-crawl-napi` cdylib and `turbo-crawl-transform` crate are **not**
+The `turbo-surf-napi` cdylib and `turbo-surf-transform` crate are **not**
 published — napi is for the dev harness + the Playwright shim only. The Playwright
 shim (`rust/playwright-shim/`) is a dev/in-repo tool, not an npm artifact.
 
 ## MCP server (agents)
 
 ```sh
-npx turbo-crawl-mcp          # stdio MCP server (60 tools), e.g.:
+npx turbo-surf-mcp          # stdio MCP server (60 tools), e.g.:
 # navigation:  goto, go_back, go_forward, reload, set_user_agent
 # content:     interactive_elements, accessibility_tree, aria_snapshot, markdown,
 #              text, html, links, requests, snapshot, query, get_by,
@@ -140,23 +140,23 @@ time you run it.
 the command Claude will spawn):
 
 ```sh
-claude mcp add turbo-crawl -- npx -y turbo-crawl-mcp
+claude mcp add turbo-surf -- npx -y turbo-surf-mcp
 ```
 
-That writes the server into your Claude Code config. `npx -y turbo-crawl-mcp`
+That writes the server into your Claude Code config. `npx -y turbo-surf-mcp`
 resolves + spawns the native binary over stdio — one process, no Node hosting it,
 no browser.
 
-**3. Verify it's connected.** List your servers (look for `turbo-crawl` →
+**3. Verify it's connected.** List your servers (look for `turbo-surf` →
 `✓ connected`):
 
 ```sh
 claude mcp list
 ```
 
-Now start (or restart) Claude Code and ask it to, e.g., *"use turbo-crawl to fetch
+Now start (or restart) Claude Code and ask it to, e.g., *"use turbo-surf to fetch
 the markdown of example.com"* — the 60 tools above are available. Remove it later
-with `claude mcp remove turbo-crawl`.
+with `claude mcp remove turbo-surf`.
 
 **Scope (where the server is registered).** By default it's registered for your
 user. To share it with a repo instead, add `--scope project` — that writes a
@@ -166,7 +166,7 @@ user. To share it with a repo instead, add `--scope project` — that writes a
 // .mcp.json — committed; teammates get the server automatically
 {
   "mcpServers": {
-    "turbo-crawl": { "command": "npx", "args": ["-y", "turbo-crawl-mcp"] }
+    "turbo-surf": { "command": "npx", "args": ["-y", "turbo-surf-mcp"] }
   }
 }
 ```
@@ -174,22 +174,22 @@ user. To share it with a repo instead, add `--scope project` — that writes a
 **Running from a checkout** (contributors) — point at a local build instead of npm:
 
 ```sh
-cargo build --release -p turbo-crawl-mcp --manifest-path rust/Cargo.toml
-claude mcp add turbo-crawl -- "$PWD/rust/target/release/turbo-crawl-mcp"
+cargo build --release -p turbo-surf-mcp --manifest-path rust/Cargo.toml
+claude mcp add turbo-surf -- "$PWD/rust/target/release/turbo-surf-mcp"
 ```
 
 **Troubleshooting.** `command not found: claude` → install the Claude Code CLI.
 `npx` hangs the first run → it's downloading the binary; let it finish (or pre-warm
-with `npx -y turbo-crawl-mcp` in a terminal, then Ctrl-C). Shows `✗ failed` in
+with `npx -y turbo-surf-mcp` in a terminal, then Ctrl-C). Shows `✗ failed` in
 `claude mcp list` → run the command directly to see the error; on an unsupported
 platform there's no prebuilt binary (build from a checkout as above).
 
 **Other MCP clients** (Claude Desktop, Cursor, …) — point their MCP config's
-`command` at `npx` with args `["-y", "turbo-crawl-mcp"]`, or at the binary path.
+`command` at `npx` with args `["-y", "turbo-surf-mcp"]`, or at the binary path.
 
 ## Playwright drop-in (run your e2e specs with no browser)
 
-turbo-crawl's page API is Playwright-shaped, and `rust/playwright-shim/` is a
+turbo-surf's page API is Playwright-shaped, and `rust/playwright-shim/` is a
 **drop-in `@playwright/test` replacement** backed by the native engine — **no
 Chromium**. A `register.mjs` module-resolution hook rewrites every
 `import … from "@playwright/test"` (and `playwright` / `playwright-core`) to the
@@ -225,23 +225,23 @@ that paints entirely from JS after load (and never re-fetches) needs a real brow
 
 ## Competitive benchmark
 
-`harness/competitive/` runs the **same Playwright script** on turbo-crawl and a
+`harness/competitive/` runs the **same Playwright script** on turbo-surf and a
 fleet of real browsers, scoring output **parity** against a Chromium oracle and
-timing each. `npm run harness`. turbo-crawl drives every routine through its native
+timing each. `npm run harness`. turbo-surf drives every routine through its native
 engine — turbo-dom + a `deno_core` V8 render tier for page JS — with **no Chromium**.
 Median ms over 8 runs (live network), parity is each engine's observations vs the
 Chromium oracle:
 
 | engine | wikipedia | js-quotes | parity |
 |---|---|---|---|
-| **turbo-crawl (no-JS)** | **142** | — *(needs JS)* | ✓ |
-| **turbo-crawl (JS)** | —‡ | **132** | ✓ |
+| **turbo-surf (no-JS)** | **142** | — *(needs JS)* | ✓ |
+| **turbo-surf (JS)** | —‡ | **132** | ✓ |
 | chromium *(oracle)* | 932 | 933 | — |
 | firefox | 727 | 925 | ✓ |
 | webkit | 1232 | 964 | ✓ |
 
 Every engine produces the **same observations** as Chromium / Firefox / WebKit
-(parity ✓) — and turbo-crawl is the **fastest in the table** on both axes. The
+(parity ✓) — and turbo-surf is the **fastest in the table** on both axes. The
 Wikipedia click-through runs in **142 ms** (**~6.6× faster than Chromium**, 932),
 and the **real jQuery on `quotes.toscrape.com/js`** — the same 10 quotes Chromium
 extracts — in **132 ms** (**~7× faster than Chromium**, 933), inside a true V8
@@ -251,7 +251,7 @@ isolate** whose **DOM install is reused across same-page `page.evaluate`s** (par
 once per page, ~0.5 ms/call after), an **external-script cache** (jQuery fetched
 once, not per page), a **per-page parse cache**, and a back-forward snapshot cache
 so `goBack` restores instead of re-fetching. Profilers: `cargo bench -p
-turbo-crawl-view` (Rust microbench) + `harness/hotpath/rust-hotpath.mjs`.
+turbo-surf-view` (Rust microbench) + `harness/hotpath/rust-hotpath.mjs`.
 
 ‡ JS mode runs the *page's own* scripts; on a server-rendered page like Wikipedia
 that over-runs (use no-JS there — 142 ms, 4/4). The `form` routine is omitted this
@@ -264,7 +264,7 @@ network-bound and machine/run dependent.)
 
 ## Crawler-vs-crawler benchmark
 
-`harness/crawlers/` races turbo-crawl against other open-source crawlers on a
+`harness/crawlers/` races turbo-surf against other open-source crawlers on a
 real, paginated site — **same** 20-page same-host crawl of `books.toscrape.com`,
 **same** ~150 ms per-request politeness on every engine, items counted with the
 **same** CSS selector. Median of 3 timed runs, live network (`npm run
@@ -273,7 +273,7 @@ crawl-bench`):
 | crawler | runtime model | items | median ms | pages/s |
 |---|---|---|---|---|
 | crawlee `CheerioCrawler` | Node | 339 | 2767 | 7.2 |
-| **turbo-crawl (no-js)** | **native Rust, browserless** | 339 | 3271 | **6.1** |
+| **turbo-surf (no-js)** | **native Rust, browserless** | 339 | 3271 | **6.1** |
 | spider-rs | Rust + N-API | 194 | 3486 | 5.7 |
 | got + cheerio (hand-rolled) | Node | 339 | 5590 | 3.6 |
 | node-crawler (`crawler`) | Node | 339 | 49624 | 0.4 |
@@ -284,26 +284,26 @@ crawl-bench`):
 crawl, `maxConcurrency = 2`, median of 5 warm runs
 (`node harness/crawlers/head-to-head.mjs`). With throttling **off** (raw engine
 speed — the truest apples-to-apples, since the two *throttle models* differ)
-turbo-crawl is clearly ahead:
+turbo-surf is clearly ahead:
 
 | engine | politeness | median ms | pages/s |
 |---|---|---|---|
-| **turbo-crawl (no-js)** | none (raw) | **1977** | **10.1** |
+| **turbo-surf (no-js)** | none (raw) | **1977** | **10.1** |
 | crawlee CheerioCrawler | none (raw) | 2748 | 7.3 |
 | crawlee CheerioCrawler | 150 ms rate | 2634 | 7.6 |
-| **turbo-crawl (no-js)** | 150 ms (strict) | 3307 | 6.0 |
+| **turbo-surf (no-js)** | 150 ms (strict) | 3307 | 6.0 |
 
-Raw, **turbo-crawl is ~1.4× faster**. Under the "150 ms politeness" rows it looks
-slower only because turbo-crawl's per-host gate is a **strict** interval (it really
+Raw, **turbo-surf is ~1.4× faster**. Under the "150 ms politeness" rows it looks
+slower only because turbo-surf's per-host gate is a **strict** interval (it really
 waits 150 ms between requests), whereas crawlee's `maxRequestsPerMinute` is a
 lenient sliding window that lets a short 20-page burst through near-raw. Same
 content (339 items), no browser.
 
 At equal politeness the multi-engine wall-clock is **network-bound**, so the
-in-process crawlers cluster together: turbo-crawl sits in the **top tier** alongside
+in-process crawlers cluster together: turbo-surf sits in the **top tier** alongside
 the dedicated speed engines (crawlee, spider-rs) and ahead of a hand-rolled
 got+cheerio loop — while extracting equivalent content and running **no
-browser**. turbo-crawl runs the whole BFS — fetch, parse, same-host gate, per-page
+browser**. turbo-surf runs the whole BFS — fetch, parse, same-host gate, per-page
 item count — in its native Rust engine, and is **~13× ahead of Scrapy / Colly**.
 The heavyweight
 engines trail ~15×: Scrapy and Colly pay a fresh
@@ -311,24 +311,24 @@ process startup per crawl (the harness shells out to their CLIs), and
 node-crawler's per-request overhead is high. turbo-dom's raw parse advantage
 doesn't show here — at 20 live pages, network swamps a sub-millisecond parse;
 it shows in-memory instead (links ~18k/s, crawl ~14k pages/s, below). And unlike
-every engine in this table, the *same* turbo-crawl also runs Playwright scripts
+every engine in this table, the *same* turbo-surf also runs Playwright scripts
 (parity table above).
 
-### JS-executing crawlers — turbo-crawl vs real browsers
+### JS-executing crawlers — turbo-surf vs real browsers
 
 The other set targets `quotes.toscrape.com/js`, where quotes are built
-client-side (a non-JS crawler sees ~0). turbo-crawl runs the page's own scripts in
+client-side (a non-JS crawler sees ~0). turbo-surf runs the page's own scripts in
 a true V8 isolate over its native DOM, while every competitor drives a **real
 headless Chromium** (`npm run crawl-bench:js`, 10 pages, median of 3):
 
 | crawler | JS engine | items | median ms | pages/s |
 |---|---|---|---|---|
-| **turbo-crawl (JS)** | **V8 isolate, no browser** | 100 | **2989** | **3.35** |
+| **turbo-surf (JS)** | **V8 isolate, no browser** | 100 | **2989** | **3.35** |
 | crawlee `PuppeteerCrawler` | headless Chromium | 100 | 5074 | 2.0 |
 | crawlee `PlaywrightCrawler` | headless Chromium | 100 | 6173 | 1.6 |
 | puppeteer-cluster | headless Chromium | 100 | 17062 | 0.6 |
 
-turbo-crawl runs each page's own scripts in a **true V8 isolate** over the native
+turbo-surf runs each page's own scripts in a **true V8 isolate** over the native
 rtdom DOM (the same path that renders `quotes.toscrape.com/js`, external scripts
 cached across pages) — the **fastest engine here**, extracting the same 100 quotes
 a real browser does **~2–6× faster than the browser-driving crawlers**, with no
@@ -350,8 +350,8 @@ cd rust
 cargo test --workspace                      # the offline suite
 cargo clippy --workspace --all-targets
 cargo fmt
-cargo build --release -p turbo-crawl-mcp    # the MCP binary the launcher spawns
-cargo bench -p turbo-crawl-view             # Rust microbench (parse / views)
+cargo build --release -p turbo-surf-mcp    # the MCP binary the launcher spawns
+cargo bench -p turbo-surf-view             # Rust microbench (parse / views)
 ```
 
 From the repo root: `npm run check` lints/formats the launcher JS, runs the Rust

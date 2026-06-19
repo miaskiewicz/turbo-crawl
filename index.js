@@ -1,7 +1,7 @@
 "use strict";
-// Programmatic entry: locate + spawn the native turbo-crawl MCP binary. The CLI
-// (`cli.js`, the `turbo-crawl-mcp` bin) is the primary interface; this exists so
-// `require("@miaskiewicz/turbo-crawl")` works in scripts. The engine is the
+// Programmatic entry: locate + spawn the native turbo-surf MCP binary. The CLI
+// (`cli.js`, the `turbo-surf-mcp` bin) is the primary interface; this exists so
+// `require("turbo-surf")` works in scripts. The engine is the
 // standalone Rust binary — this package is only the platform-binary launcher.
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
@@ -16,16 +16,16 @@ function isMusl() {
   }
 }
 
-/** Absolute path to the platform's turbo-crawl-mcp binary, or null if absent. */
+/** Absolute path to the platform's turbo-surf-mcp binary, or null if absent. */
 function binaryPath() {
   const ext = process.platform === "win32" ? ".exe" : "";
-  const base = `turbo-crawl-mcp-${process.platform}-${process.arch}`;
+  const base = `turbo-surf-mcp-${process.platform}-${process.arch}`;
   const names = isMusl() ? [`${base}-musl${ext}`, `${base}${ext}`] : [`${base}${ext}`];
   for (const name of names) {
     const p = path.join(__dirname, "bin", name);
     if (fs.existsSync(p)) return p;
   }
-  const dev = path.join(__dirname, "rust", "target", "release", `turbo-crawl-mcp${ext}`);
+  const dev = path.join(__dirname, "rust", "target", "release", `turbo-surf-mcp${ext}`);
   if (fs.existsSync(dev)) return dev;
   return null;
 }
@@ -33,7 +33,7 @@ function binaryPath() {
 /** Spawn the MCP server (stdio JSON-RPC). Returns the ChildProcess. */
 function spawnMcp(args = [], opts = {}) {
   const bin = binaryPath();
-  if (!bin) throw new Error(`turbo-crawl: no binary for ${process.platform}-${process.arch}`);
+  if (!bin) throw new Error(`turbo-surf: no binary for ${process.platform}-${process.arch}`);
   return spawn(bin, args, { stdio: "inherit", ...opts });
 }
 

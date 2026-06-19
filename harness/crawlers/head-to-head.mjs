@@ -6,12 +6,12 @@
 //   node harness/crawlers/head-to-head.mjs [--pages=20] [--iters=5]
 //
 // Needs crawlee + cheerio installed (npm i -D crawlee cheerio) and the napi addon
-// built (cargo build --release -p turbo-crawl-napi).
+// built (cargo build --release -p turbo-surf-napi).
 
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const native = require("../../rust/crates/turbo-crawl-napi/index.js");
+const native = require("../../rust/crates/turbo-surf-napi/index.js");
 
 const TARGET = "https://books.toscrape.com/";
 const ITEM_SELECTOR = ".product_pod h3 a";

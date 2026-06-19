@@ -1,7 +1,7 @@
 # Playwright shim — coverage & limitations
 
 `rust/playwright-shim/` is a **drop-in `@playwright/test` replacement** backed by
-the turbo-crawl native engine (turbo-dom + the napi addon + the V8 render tier) —
+the turbo-surf native engine (turbo-dom + the napi addon + the V8 render tier) —
 **no browser, no Chromium**. A suite that imports `@playwright/test` runs on it
 unchanged via the [`register.mjs`](./register.mjs) module-resolution redirect:
 

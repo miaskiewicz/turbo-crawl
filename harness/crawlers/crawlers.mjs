@@ -5,14 +5,14 @@
 //   items — total matches of target.itemSelector across those pages (correctness)
 //   ms    — wall time for the crawl
 //
-// turbo-crawl entries always run (only the repo's existing deps + network). Every
+// turbo-surf entries always run (only the repo's existing deps + network). Every
 // competitor is lazy-loaded behind available(): if its package isn't installed,
 // available() returns false and run.mjs prints "skipped (not installed)".
 //
 // Sets:
-//   nojs — compared against turbo-crawl (no-js): fetch+parse HTML, no page JS.
-//   js   — compared against turbo-crawl (js-fast) AND (js-secure): execute page JS
-//          in a real engine (browser, or turbo-crawl's render tier).
+//   nojs — compared against turbo-surf (no-js): fetch+parse HTML, no page JS.
+//   js   — compared against turbo-surf (js-fast) AND (js-secure): execute page JS
+//          in a real engine (browser, or turbo-surf's render tier).
 //
 // FAIRNESS: every engine uses the SAME target.itemSelector to count items, the
 // SAME page cap, the SAME tiny politeness delay, stays same-host, and is warmed
@@ -118,7 +118,7 @@ function cheerioLinks($, baseUrl, host, allow) {
 
 const sleep = (n) => new Promise((r) => setTimeout(r, n));
 
-// ── turbo-crawl: the whole crawl runs in Rust via the napi addon ─────────────
+// ── turbo-surf: the whole crawl runs in Rust via the napi addon ─────────────
 // `native.crawl` does the BFS, fetch (pooled client), parse, same-host gate, and
 // per-page item count (itemSelector) entirely in Rust — only the JSON result
 // crosses to Node. Same page cap / concurrency / politeness as every other engine.
@@ -127,7 +127,7 @@ function loadTurboRustNative() {
   if (turboRustNative === undefined) {
     try {
       const require = createRequire(import.meta.url);
-      turboRustNative = require("../../rust/crates/turbo-crawl-napi/index.js");
+      turboRustNative = require("../../rust/crates/turbo-surf-napi/index.js");
     } catch {
       turboRustNative = null;
     }
@@ -486,7 +486,7 @@ async function puppeteerClusterCrawl(target, opts) {
 export const CRAWLERS = [
   // ── Set A: non-JS ──────────────────────────────────────────────────────────
   {
-    name: "turbo-crawl (no-js)",
+    name: "turbo-surf (no-js)",
     set: "nojs",
     turbo: true,
     available: () => Promise.resolve(loadTurboRustNative() != null),
@@ -538,7 +538,7 @@ export const CRAWLERS = [
 
   // ── Set B: JS-executing ─────────────────────────────────────────────────────
   {
-    name: "turbo-crawl (js)",
+    name: "turbo-surf (js)",
     set: "js",
     turbo: true,
     available: () => Promise.resolve(loadTurboRustNative() != null),

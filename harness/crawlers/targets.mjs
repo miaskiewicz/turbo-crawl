@@ -5,11 +5,11 @@
 //
 // Two sets:
 //   nojs — books.toscrape.com: server-rendered, paginated catalog. Every crawler
-//          (turbo-crawl no-js, CheerioCrawler, got+cheerio, node-crawler, …) can
+//          (turbo-surf no-js, CheerioCrawler, got+cheerio, node-crawler, …) can
 //          fetch+parse it. itemSelector counts product titles.
 //   js   — quotes.toscrape.com/js: quotes are written client-side via
 //          document.write + jQuery, so a NON-JS crawler sees ~0 quotes and a
-//          JS-executing crawler (or turbo-crawl js-fast/js-secure) sees 10/page.
+//          JS-executing crawler (or turbo-surf js-fast/js-secure) sees 10/page.
 //          That gap is the point of the JS set.
 
 // Restrict the JS crawl to the client-rendered catalog so every JS engine walks

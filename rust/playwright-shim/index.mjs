@@ -1,4 +1,4 @@
-// A Playwright-shaped façade backed by the turbo-crawl native (Rust) addon.
+// A Playwright-shaped façade backed by the turbo-surf native (Rust) addon.
 // No browser, no Chromium: `goto` fetches over Rust+reqwest, the read/locator/
 // expect surface runs over the cached HTML through the napi addon (turbo-dom +
 // the view modules), the JS-render tier (`render`/`evaluate`) runs page scripts
@@ -16,12 +16,12 @@
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const native = require("../crates/turbo-crawl-napi/index.js");
+const native = require("../crates/turbo-surf-napi/index.js");
 
 // Playwright's methods return promises, so unsupported ones REJECT (not sync
 // throw) — `await page.screenshot()` then surfaces the reason cleanly.
 const UNSUPPORTED = (api, why) => async () => {
-  throw new Error(`turbo-crawl: ${api} unavailable — ${why}`);
+  throw new Error(`turbo-surf: ${api} unavailable — ${why}`);
 };
 const PIXEL = "no-browser engine (no rendering surface)";
 const INPUT = "no synthetic input devices (static DOM, no pointer/keyboard hardware)";
@@ -64,7 +64,7 @@ class Locator {
   }
   _requireNode() {
     const n = this._node();
-    if (n == null) throw new Error("turbo-crawl: locator matched no elements");
+    if (n == null) throw new Error("turbo-surf: locator matched no elements");
     return n;
   }
   get _html() {
@@ -222,7 +222,7 @@ class Locator {
   // is the callback's first arg). Needs a selector-backed locator — see LIMITATIONS.
   async evaluate(fn, arg) {
     if (!this._selector)
-      throw new Error("turbo-crawl: locator.evaluate needs a CSS-selector-backed locator");
+      throw new Error("turbo-surf: locator.evaluate needs a CSS-selector-backed locator");
     const src = `(${fn.toString()})(document.querySelector(${JSON.stringify(this._selector)}), ${JSON.stringify(arg ?? null)})`;
     return native.evaluate(this._html, src);
   }
@@ -533,7 +533,7 @@ class Page {
       interactionScript(selector, index ?? 0, kind, value),
     );
     await this._refreshFromSession();
-    if (r === "NO_MATCH") throw new Error("turbo-crawl: locator matched no elements");
+    if (r === "NO_MATCH") throw new Error("turbo-surf: locator matched no elements");
     return r;
   }
   get _cookies() {
@@ -843,12 +843,12 @@ class Page {
       }
       if (match(this._url)) return undefined;
     }
-    throw new Error(`turbo-crawl: waitForURL(${url}) — current url is ${this._url}`);
+    throw new Error(`turbo-surf: waitForURL(${url}) — current url is ${this._url}`);
   }
   async waitForSelector(selector, opts = {}) {
     const present = (await this.locator(selector).count()) > 0;
     if (!present && opts.state !== "hidden" && opts.state !== "detached")
-      throw new Error(`turbo-crawl: waitForSelector(${selector}) found no element`);
+      throw new Error(`turbo-surf: waitForSelector(${selector}) found no element`);
     return present ? this.locator(selector) : null;
   }
   async waitForFunction(fn, arg) {
@@ -1091,7 +1091,7 @@ class BrowserContext {
 }
 
 const browserStub = {
-  version: () => "turbo-crawl",
+  version: () => "turbo-surf",
   browserType: () => ({ name: () => "chromium" }),
   async newContext(opts) {
     return new BrowserContext(opts);
@@ -1544,7 +1544,7 @@ function makeTestInfo(title) {
     status: "passed",
     expectedStatus: "passed",
     retry: 0,
-    project: { name: "turbo-crawl" },
+    project: { name: "turbo-surf" },
   };
 }
 

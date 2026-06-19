@@ -1,6 +1,6 @@
-# turbo-crawl docs
+# turbo-surf docs
 
-turbo-crawl is a single native (Rust) engine — there is no per-module JS reference
+turbo-surf is a single native (Rust) engine — there is no per-module JS reference
 anymore (the engine is Rust; its modules are crates). Start here:
 
 ## Overview & product
@@ -16,7 +16,7 @@ anymore (the engine is Rust; its modules are crates). Start here:
 - [`../rust/HEADLESS-HYDRATION.md`](../rust/HEADLESS-HYDRATION.md) — the no-browser
   JS render tier (a `deno_core` V8 isolate over the native rtdom DOM + the vendored
   `browser_env` binding).
-- [`../rust/crates/turbo-crawl-napi/README.md`](../rust/crates/turbo-crawl-napi/README.md)
+- [`../rust/crates/turbo-surf-napi/README.md`](../rust/crates/turbo-surf-napi/README.md)
   — the dev/harness in-process addon (not published).
 
 ## Agent & test surfaces

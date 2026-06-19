@@ -1,5 +1,5 @@
 // Competitive-harness adapter for the **Rust** engine (the napi addon in
-// `rust/crates/turbo-crawl-napi`). Exposes the same Playwright-shaped Page the
+// `rust/crates/turbo-surf-napi`). Exposes the same Playwright-shaped Page the
 // routines drive, but every operation lands in Rust: fetch + parse + view via
 // turbo-dom, JS hydration via deno_core. Two modes:
 //   - no-js : Lane A — fetch + parse, scripts never run.
@@ -169,7 +169,7 @@ class RustPage {
 
 // `{ launch() → { newPage, close } }` — the shape `engines.mjs` expects.
 export async function loadTurboRust(jsMode) {
-  const native = require("../../rust/crates/turbo-crawl-napi/index.js");
+  const native = require("../../rust/crates/turbo-surf-napi/index.js");
   native.version(); // probe: throws here (→ engine skipped) if the addon is absent
   return {
     launch: async () => ({

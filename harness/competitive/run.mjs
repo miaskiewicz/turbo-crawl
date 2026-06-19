@@ -1,5 +1,5 @@
 // Competitive harness: run the SAME Playwright routine across every installed
-// engine (turbo-crawl no-JS / js-fast / js-secure, plus real Chromium/Firefox/
+// engine (turbo-surf no-JS / js-fast / js-secure, plus real Chromium/Firefox/
 // WebKit and any stealth browsers), time each, and score output parity against the
 // Chromium oracle.
 //

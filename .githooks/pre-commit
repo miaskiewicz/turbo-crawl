@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# turbo-crawl pre-commit gate. The engine is Rust (see rust/ — gated by `cargo test
+# turbo-surf pre-commit gate. The engine is Rust (see rust/ — gated by `cargo test
 # / clippy / fmt`, run via `npm run check`). The only JS left is the thin launcher
 # (cli.js/index.js) + the dev harness, so this hook just lints/formats staged JS.
 # Enable once with:  git config core.hooksPath .githooks  (or: npm run prepare)

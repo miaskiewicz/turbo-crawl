@@ -1,8 +1,8 @@
-# Publish the turbo-crawl Rust library crates to crates.io on a v* tag (mirrors
+# Publish the turbo-surf Rust library crates to crates.io on a v* tag (mirrors
 # turbo-dom's publish-crate job). Requires repo secret CARGO_REGISTRY_TOKEN.
 # Published in dependency order so each dependent's version dep is already live:
 #   core → view → page → render → mcp.
-# (turbo-crawl-napi is a cdylib → ships to npm via rust-napi-prebuild.yml, not here.)
+# (turbo-surf-napi is a cdylib → ships to npm via rust-napi-prebuild.yml, not here.)
 name: rust-crates-publish
 
 on:
@@ -23,18 +23,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       # cargo reads CARGO_REGISTRY_TOKEN from the env natively; `cargo publish`
       # waits for each crate to index before the next dependent publishes.
-      - run: cargo publish -p turbo-crawl-core
+      - run: cargo publish -p turbo-surf-core
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      - run: cargo publish -p turbo-crawl-view
+      - run: cargo publish -p turbo-surf-view
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      - run: cargo publish -p turbo-crawl-page
+      - run: cargo publish -p turbo-surf-page
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      - run: cargo publish -p turbo-crawl-render
+      - run: cargo publish -p turbo-surf-render
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      - run: cargo publish -p turbo-crawl-mcp
+      - run: cargo publish -p turbo-surf-mcp
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

@@ -1,6 +1,6 @@
-# turbo-crawl — Rust port
+# turbo-surf — Rust port
 
-Native-speed core of turbo-crawl. Premise: turbo-dom ships as a pure Rust crate,
+Native-speed core of turbo-surf. Premise: turbo-dom ships as a pure Rust crate,
 so the browserless crawler is Rust too. The only piece that *must* stay JS is the
 `@playwright/test` drop-in façade (agents `import` it inside their own Node
 process); it's a thin shim over the napi addon — all the muscle is Rust.
@@ -13,18 +13,18 @@ turbo-dom is consumed from **crates.io** as the `turbo-dom-parser` crate
 
 | Crate | Scope |
 |-------|-------|
-| `turbo-crawl-core` | Tier 1 — net / cookies / robots / url / frontier / crawl scheduling / cache / measure |
-| `turbo-crawl-page` | Tier 2 — `TurboNavigator` (fetch+parse over `rtdom::Tree`) |
-| `turbo-crawl-view` | extraction & views — extract / visible / aria / ax / locator / markdown / text / schema / query / xpath / hydration / dom-ops / actions |
-| `turbo-crawl-render` | Tier 3 — `deno_core` isolate + the rtdom↔V8 DOM binding (JS execution / hydration) |
-| `turbo-crawl-transform` | swc TS/JSX → classic JS for the render tier |
-| `turbo-crawl-napi` | the `.node` addon — in-process bridge from the core to Node (+ stateful `Session`) |
-| `turbo-crawl-mcp` | stdio JSON-RPC MCP server — native binary, full 60-tool surface (parity with the JS server) over a stateful session |
+| `turbo-surf-core` | Tier 1 — net / cookies / robots / url / frontier / crawl scheduling / cache / measure |
+| `turbo-surf-page` | Tier 2 — `TurboNavigator` (fetch+parse over `rtdom::Tree`) |
+| `turbo-surf-view` | extraction & views — extract / visible / aria / ax / locator / markdown / text / schema / query / xpath / hydration / dom-ops / actions |
+| `turbo-surf-render` | Tier 3 — `deno_core` isolate + the rtdom↔V8 DOM binding (JS execution / hydration) |
+| `turbo-surf-transform` | swc TS/JSX → classic JS for the render tier |
+| `turbo-surf-napi` | the `.node` addon — in-process bridge from the core to Node (+ stateful `Session`) |
+| `turbo-surf-mcp` | stdio JSON-RPC MCP server — native binary, full 60-tool surface (parity with the JS server) over a stateful session |
 
 `cargo test` runs the full offline suite across the workspace (200+ tests);
 `cargo clippy --workspace --all-targets` and `cargo fmt` are clean.
 
-## Tier 1 — `turbo-crawl-core`
+## Tier 1 — `turbo-surf-core`
 
 Direct ports of the JS modules, same behavior and edge cases:
 
@@ -46,14 +46,14 @@ Direct ports of the JS modules, same behavior and edge cases:
   `Navigator` trait (tier-2 `Page` implements it).
 - `cache` / `measure` — `ResponseCache` (304/storageState) and crawl summaries.
 
-## Tier 2 — `turbo-crawl-page`
+## Tier 2 — `turbo-surf-page`
 
 `TurboNavigator` implements `crawl::Navigator` — fetches via `net::fetch_html`,
 parses with `Tree::parse`, projects a `Nav` (title + absolute-resolved `<a href>`s).
 The tier-1 `crawl::crawl(opts, nav)` driver runs unchanged over it. `parse_nav` is
 pure (no network) and offline-tested end to end against the scheduler.
 
-## views — `turbo-crawl-view`
+## views — `turbo-surf-view`
 
 The extraction/interaction surface over the same `rtdom::Tree`: `extract`, `visible`
 (cascade), `aria`/`ax`/`aria_snapshot`, `locator` (by_role/text/label), `markdown`,
@@ -61,7 +61,7 @@ The extraction/interaction surface over the same `rtdom::Tree`: `extract`, `visi
 select), `actions` (fill/submit/click-intent). All pure + offline-tested; a
 differential `tests/parity.rs` checks them against a committed JS golden.
 
-## Tier 3 — `turbo-crawl-render`
+## Tier 3 — `turbo-surf-render`
 
 The JS-execution path, end to end over a **real DOM**. The page's own scripts run on
 a `deno_core` V8 isolate against a genuine `document`, mutate the turbo-dom tree in
@@ -73,11 +73,11 @@ place, and the render returns the hydrated HTML (the Lane B contract).
   [turbo-test](../../turbo-test) (its battle-tested binding that runs React +
   Testing Library). A JS DOM node is a V8 object holding a turbo-dom handle in an
   internal field; methods/accessors are native callbacks straight onto `Tree`. No
-  JS-DOM-in-JS-VM indirection. See [`src/browser_env.rs`](crates/turbo-crawl-render/src/browser_env.rs)
+  JS-DOM-in-JS-VM indirection. See [`src/browser_env.rs`](crates/turbo-surf-render/src/browser_env.rs)
   for the vendor/sync story (verbatim copy + a one-command re-vendor script; the
-  turbo-crawl-specific deltas — `install_html`/`document_html` and the env bootstrap
+  turbo-surf-specific deltas — `install_html`/`document_html` and the env bootstrap
   — live separately and are never patched into the upstream file).
-- The runtime in [`src/runtime.rs`](crates/turbo-crawl-render/src/runtime.rs) grafts
+- The runtime in [`src/runtime.rs`](crates/turbo-surf-render/src/runtime.rs) grafts
   that binding onto deno_core's context, then layers the non-DOM `window` env a real
   page needs (`navigator`, `location`, virtual timers + real microtasks, `fetch`/XHR
   **over the tier-1 net stack**, `URL`, `crypto`(+`subtle`), `MessageChannel`,
@@ -89,12 +89,12 @@ place, and the render returns the hydrated HTML (the Lane B contract).
 - `run_with_dom` (the sync `page.evaluate` path) reuses a **thread-persistent
   isolate across pages** — the ~20 ms boot is paid once, then ~5 ms/call. Page-JS
   isolation across pages is intentionally relaxed (a crawl doesn't need it).
-- `transform` (`turbo-crawl-transform`, swc) turns a TS/JSX bundle into classic JS
+- `transform` (`turbo-surf-transform`, swc) turns a TS/JSX bundle into classic JS
   so it runs under the tier.
 
-## glue — `turbo-crawl-napi` + the Playwright shim
+## glue — `turbo-surf-napi` + the Playwright shim
 
-`turbo-crawl-napi` is the `.node` addon: a stateless functional surface (markdown /
+`turbo-surf-napi` is the `.node` addon: a stateless functional surface (markdown /
 text / links / extract / getBy / accessors / actions / evaluate / render / transform)
 plus async `fetchHtml` / `request` / `crawl` and a stateful `Session` (retained tree,
 worker thread), plus `nodeSnapshot` (a one-crossing batch of a node's state reads).
@@ -111,5 +111,5 @@ cd rust
 cargo test --workspace        # full offline suite
 cargo clippy --workspace --all-targets
 cargo fmt
-cargo build --release -p turbo-crawl-napi   # build the .node addon (then node addon tests / harness)
+cargo build --release -p turbo-surf-napi   # build the .node addon (then node addon tests / harness)
 ```

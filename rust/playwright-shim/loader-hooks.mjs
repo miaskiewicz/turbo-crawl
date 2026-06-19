@@ -1,5 +1,5 @@
 // Module-resolution redirect: rewrite bare `@playwright/test` / `playwright` /
-// `playwright-core` imports to the napi-backed turbo-crawl shim, so existing
+// `playwright-core` imports to the napi-backed turbo-surf shim, so existing
 // Playwright specs run on the no-browser Rust engine with no spec edits.
 // Installed (opt-in) by `./register.mjs`.
 

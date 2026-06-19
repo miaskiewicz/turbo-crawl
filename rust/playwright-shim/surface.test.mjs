@@ -438,7 +438,7 @@ test("BrowserContext: pages / cookies / storageState / addCookies / clearCookies
 
 test("BrowserContext: browser()/request() + no-op permission/geo/offline", async () => {
   const ctx = new BrowserContext();
-  assert.equal(ctx.browser().version(), "turbo-crawl");
+  assert.equal(ctx.browser().version(), "turbo-surf");
   assert.ok(ctx.request());
   await ctx.grantPermissions(["clipboard-read"]);
   await ctx.clearPermissions();
@@ -596,7 +596,7 @@ pw.describe("describe + hooks", () => {
   pw("a nested test with steps + testInfo", async ({ page }, info) => {
     assert.ok(page);
     assert.equal(typeof info.outputPath(), "string");
-    assert.equal(info.project.name, "turbo-crawl");
+    assert.equal(info.project.name, "turbo-surf");
     await pw.step("a step", async () => assert.ok(true));
     order.push("test");
   });

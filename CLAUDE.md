@@ -1,6 +1,6 @@
-# CLAUDE.md — working rules for turbo-crawl
+# CLAUDE.md — working rules for turbo-surf
 
-turbo-crawl is a **browserless, native-speed crawler + MCP server for AI agents**,
+turbo-surf is a **browserless, native-speed crawler + MCP server for AI agents**,
 a **Rust engine** built on the [turbo-dom](https://github.com/miaskiewicz/turbo-dom)
 crate. It fetches + parses + acts on pages with **no Chromium**. For JS-gated pages
 it runs the page's own scripts in a **true V8 isolate** (a `deno_core` runtime over
@@ -16,19 +16,19 @@ docs [`rust/README.md`](./rust/README.md) + [`rust/HEADLESS-HYDRATION.md`](./rus
 
 - **Engine: Rust** (`rust/` — a 7-crate workspace on the `turbo-dom` crate, edition
   2021). Source is `.mjs`-free except a thin JS launcher + the dev harness.
-- **Crates:** `turbo-crawl-core` (net/cookies/robots/url/frontier/crawl/cache),
-  `turbo-crawl-page` (navigator), `turbo-crawl-view` (extract/visible/aria/locator/
-  markdown/query/xpath/hydration/actions/…), `turbo-crawl-render` (deno_core V8 +
-  the vendored `browser_env` rtdom↔V8 DOM binding), `turbo-crawl-transform` (swc),
-  `turbo-crawl-napi` (dev/harness in-process addon), `turbo-crawl-mcp` (the stdio
+- **Crates:** `turbo-surf-core` (net/cookies/robots/url/frontier/crawl/cache),
+  `turbo-surf-page` (navigator), `turbo-surf-view` (extract/visible/aria/locator/
+  markdown/query/xpath/hydration/actions/…), `turbo-surf-render` (deno_core V8 +
+  the vendored `browser_env` rtdom↔V8 DOM binding), `turbo-surf-transform` (swc),
+  `turbo-surf-napi` (dev/harness in-process addon), `turbo-surf-mcp` (the stdio
   MCP **binary** the launcher spawns).
 - **JS surface:** `cli.js` + `index.js` (the launcher), `harness/` (benchmarks),
   `rust/playwright-shim/` (a drop-in `@playwright/test` façade over the
-  `turbo-crawl-napi` addon — Page/Locator/expect/context/fixtures, no browser;
+  `turbo-surf-napi` addon — Page/Locator/expect/context/fixtures, no browser;
   see its [`LIMITATIONS.md`](./rust/playwright-shim/LIMITATIONS.md)).
-- **Vendored, never hand-edit:** `rust/crates/turbo-crawl-render/src/browser_env{.rs,_upstream.rs,.js}`
+- **Vendored, never hand-edit:** `rust/crates/turbo-surf-render/src/browser_env{.rs,_upstream.rs,.js}`
   — re-vendor from turbo-test's committed HEAD via
-  `rust/crates/turbo-crawl-render/scripts/vendor-browser-env.sh`.
+  `rust/crates/turbo-surf-render/scripts/vendor-browser-env.sh`.
 
 ## The gates
 
@@ -43,7 +43,7 @@ bypass with `--no-verify`.
 ## Testing rules
 
 - Rust: `cargo test` — `node:test`-style unit tests live in each crate; deno_core
-  render tests are in `rust/crates/turbo-crawl-render/tests/render.rs` (a separate
+  render tests are in `rust/crates/turbo-surf-render/tests/render.rs` (a separate
   binary, so they don't share a V8-platform init with the vendored binding's
   standalone-V8 unit test).
 - **Deterministic + offline**: tests parse fixtures / hit a localhost server, never
@@ -87,15 +87,15 @@ full checklist. In short: bump every version string to the SAME `X.Y.Z`
 `core`/`mcp` `VERSION`, napi `version()` + its `package.json`, README status line),
 green the gate (`cd rust && cargo test/clippy/fmt`), update `CHANGELOG.md`, commit
 `chore(release): vX.Y.Z`, tag, push. On the tag, `release.yml` builds the
-`turbo-crawl-mcp` binary per platform and publishes the launcher npm package, and
+`turbo-surf-mcp` binary per platform and publishes the launcher npm package, and
 `rust-crates-publish.yml` publishes the crates. Irreversible — only tag when asked
 to ship/publish/release.
 
 ## Adding a capability (checklist)
 
-1. Implement in the right crate (`rust/crates/turbo-crawl-*`), functions small.
-2. Expose over napi (`turbo-crawl-napi`) if Node/harness needs it, and/or as an MCP
-   tool (`turbo-crawl-mcp` `tools()` + dispatch) if agent-facing.
+1. Implement in the right crate (`rust/crates/turbo-surf-*`), functions small.
+2. Expose over napi (`turbo-surf-napi`) if Node/harness needs it, and/or as an MCP
+   tool (`turbo-surf-mcp` `tools()` + dispatch) if agent-facing.
 3. Tests in the crate (offline; localhost server for net).
 4. `cd rust && cargo test --workspace && cargo clippy --workspace --all-targets &&
    cargo fmt` green.

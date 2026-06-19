@@ -1,6 +1,6 @@
 # Headless hydration — requirements & status (Rust port)
 
-"Headless hydration" in turbo-crawl means two distinct things. Both are tracked
+"Headless hydration" in turbo-surf means two distinct things. Both are tracked
 here so the requirements are explicit.
 
 ## 1. No-JS hydration-state mining (`hydration.mjs`)
@@ -14,18 +14,18 @@ that frameworks inline:
 - `window.__INITIAL_STATE__ / __APOLLO_STATE__ / __PRELOADED_STATE__ / __NUXT__ /
   __remixContext` — `window.X = <json>` assignments parsed **without eval**
 
-**Requirements for the Rust port:** a `hydration` module in `turbo-crawl-view`
+**Requirements for the Rust port:** a `hydration` module in `turbo-surf-view`
 over `rtdom::Tree` — `query_selector(_all)` for the script tags, `text_content`
 for the JSON, plus a tiny tolerant scanner for the `window.X = {...};` globals
 (balanced-brace slice → `serde_json`). No turbo-dom additions needed.
 
-**Status:** ✅ ported — `hydration` in `turbo-crawl-view` over `rtdom::Tree`
+**Status:** ✅ ported — `hydration` in `turbo-surf-view` over `rtdom::Tree`
 (exposed via napi `hydrationState`). Offline-tested.
 
 ## 2. JS-execution hydration (the render tier)
 
 Run the page's **own** scripts so a client-rendered SPA hydrates, then read the
-resulting DOM. This is `turbo-crawl-render` (deno_core isolate over the turbo-dom
+resulting DOM. This is `turbo-surf-render` (deno_core isolate over the turbo-dom
 `Tree`).
 
 Requirements and where each stands:
@@ -37,15 +37,15 @@ Requirements and where each stands:
 | `window`/`navigator`/`location`/`localStorage`/`console` + Event classes | ✅ binding + env bootstrap |
 | Timers (`setTimeout`/`rAF`/`queueMicrotask`) | ✅ virtual (drained by delay) |
 | Promise / `async`-`await` / microtask resolution (event loop) | ✅ `render_html_async` |
-| `fetch` + `XMLHttpRequest` over the real net stack (relative-URL aware) | ✅ `op_fetch` → `turbo_crawl_core::net` |
+| `fetch` + `XMLHttpRequest` over the real net stack (relative-URL aware) | ✅ `op_fetch` → `turbo_surf_core::net` |
 | `document.cookie` ↔ `CookieJar` bridge | ✅ `op_cookie_get/set` |
 | `MutationObserver`/`IntersectionObserver`/`ResizeObserver`, history API | ✅ (observers are no-op stubs; history updates `location.href`) |
-| TS/JSX bundle support | ✅ `turbo-crawl-transform` (swc) |
+| TS/JSX bundle support | ✅ `turbo-surf-transform` (swc) |
 | Entry point | ✅ `render_page(html, base_url, script)` → hydrated HTML |
 
 Validated end to end: a mock SPA hydrates into `#root`, an XHR/`fetch`-driven page
 fills from a localhost server, and **real jQuery** (`quotes.toscrape.com/js`) renders
-its 10 quotes — see `crates/turbo-crawl-render/tests/render.rs`.
+its 10 quotes — see `crates/turbo-surf-render/tests/render.rs`.
 
 **Known gaps / not-yet-required:**
 
@@ -55,7 +55,7 @@ its 10 quotes — see `crates/turbo-crawl-render/tests/render.rs`.
 
 ## Lane routing (when to hydrate)
 
-`detect` (Lane B heuristic, ported to `turbo-crawl-view`) decides whether a page is
+`detect` (Lane B heuristic, ported to `turbo-surf-view`) decides whether a page is
 JS-gated and worth the isolate: near-empty rendered text + heavy external scripts, or
 an empty known SPA mount (`#root`/`#app`/`#__next`/`[data-reactroot]`). A caller picks
 Lane A (no-JS parse) vs Lane B (`render_page`) from its verdict.

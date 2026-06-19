@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 "use strict";
-// Thin launcher for the native turbo-crawl MCP server. Resolves the prebuilt binary
+// Thin launcher for the native turbo-surf MCP server. Resolves the prebuilt binary
 // for this platform and spawns it, forwarding argv and inheriting stdio (the server
 // speaks newline-delimited JSON-RPC 2.0 over stdin/stdout). ALL engine logic —
 // fetch/parse/view/crawl, the V8 JS-render tier, the MCP protocol — lives in the
@@ -23,14 +23,14 @@ function isMusl() {
 
 function binaryPath() {
   const ext = process.platform === "win32" ? ".exe" : "";
-  const base = `turbo-crawl-mcp-${process.platform}-${process.arch}`;
+  const base = `turbo-surf-mcp-${process.platform}-${process.arch}`;
   const names = isMusl() ? [`${base}-musl${ext}`, `${base}${ext}`] : [`${base}${ext}`];
   for (const name of names) {
     const p = path.join(__dirname, "bin", name);
     if (fs.existsSync(p)) return p;
   }
   // dev fallback: a cargo build in this repo
-  const dev = path.join(__dirname, "rust", "target", "release", `turbo-crawl-mcp${ext}`);
+  const dev = path.join(__dirname, "rust", "target", "release", `turbo-surf-mcp${ext}`);
   if (fs.existsSync(dev)) return dev;
   return null;
 }
@@ -39,14 +39,14 @@ function main() {
   const bin = binaryPath();
   if (!bin) {
     console.error(
-      `turbo-crawl: no prebuilt binary for ${process.platform}-${process.arch}.\n` +
-        `Build from source (requires Rust): cargo build --release -p turbo-crawl-mcp (in the turbo-crawl rust/ workspace).`,
+      `turbo-surf: no prebuilt binary for ${process.platform}-${process.arch}.\n` +
+        `Build from source (requires Rust): cargo build --release -p turbo-surf-mcp (in the turbo-surf rust/ workspace).`,
     );
     process.exit(1);
   }
   const res = spawnSync(bin, process.argv.slice(2), { stdio: "inherit" });
   if (res.error) {
-    console.error("turbo-crawl:", res.error.message);
+    console.error("turbo-surf:", res.error.message);
     process.exit(1);
   }
   process.exit(res.status == null ? 1 : res.status);

@@ -1,6 +1,6 @@
 // A vanilla Playwright spec — imports straight from "@playwright/test". Run with
 //   node --import ./playwright-shim/register.mjs --test playwright-shim/dropin.spec.mjs
-// the register redirects it to the napi-backed turbo-crawl engine (no browser),
+// the register redirects it to the napi-backed turbo-surf engine (no browser),
 // with NO edits to this spec.
 import { expect, test } from "@playwright/test";
 

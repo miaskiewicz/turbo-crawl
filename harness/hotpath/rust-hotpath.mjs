@@ -12,7 +12,7 @@ import { createRequire } from "node:module";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
 const require = createRequire(import.meta.url);
-const native = require("../../rust/crates/turbo-crawl-napi/index.js");
+const native = require("../../rust/crates/turbo-surf-napi/index.js");
 
 const SAMPLE_URL = "https://en.wikipedia.org/wiki/Web_crawler";
 const CACHE = "/tmp/turbo-hotpath-sample.html";

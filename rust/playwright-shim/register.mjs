@@ -3,7 +3,7 @@
 //
 //   node --import ./register.mjs --test 'e2e/**/*.spec.mjs'
 //
-// Every `import … from "@playwright/test"` then resolves to the turbo-crawl shim.
+// Every `import … from "@playwright/test"` then resolves to the turbo-surf shim.
 // Toggle off without dropping the flag: TURBO_PLAYWRIGHT_SHIM=0.
 
 import { registerHooks } from "node:module";

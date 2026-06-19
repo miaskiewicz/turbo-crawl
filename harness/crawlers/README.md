@@ -1,6 +1,6 @@
 # Crawl benchmark
 
-A **multi-page crawl** benchmark: turbo-crawl's `Crawler` vs other open-source
+A **multi-page crawl** benchmark: turbo-surf's `Crawler` vs other open-source
 crawlers on a real, paginated, live site. For each engine we measure **throughput**
 (pages/s) and **correctness** (items extracted) on the *same* target, the *same*
 page cap, and counted with the *same* selector — so a fast crawler that misses
@@ -24,23 +24,23 @@ per-request delay so we don't hammer toscrape.com.
 **Set A — non-JS** (`--set=nojs`): crawlers that fetch + parse HTML without running
 page JS. Target: `https://books.toscrape.com/` — a server-rendered, paginated
 catalog. Item metric: product titles (`.product_pod h3 a`). Compared against
-**turbo-crawl (no-js)**.
+**turbo-surf (no-js)**.
 
 **Set B — JS** (`--set=js`): crawlers that execute page JS in a real engine.
 Target: `https://quotes.toscrape.com/js/` (+ `/js/page/N/`) — quotes are built
 client-side via `document.write` + jQuery, so a **non-JS crawler extracts ~0
-quotes** while a JS crawler gets 10/page. Item metric: `.quote .text`. turbo-crawl
+quotes** while a JS crawler gets 10/page. Item metric: `.quote .text`. turbo-surf
 runs the page JS in its V8 isolate.
 
 ## Engines (auto-detected)
 
-turbo-crawl runs whenever the native addon is built (`cargo build --release -p
-turbo-crawl-napi`). Every competitor is lazy-loaded; if its package isn't installed
+turbo-surf runs whenever the native addon is built (`cargo build --release -p
+turbo-surf-napi`). Every competitor is lazy-loaded; if its package isn't installed
 the row reads `skipped (not installed)`.
 
 | engine | set | needs |
 |---|---|---|
-| `turbo-crawl (no-js)` | nojs | built addon |
+| `turbo-surf (no-js)` | nojs | built addon |
 | `spider-rs (Rust)` | nojs | `@spider-rs/spider-rs` + `cheerio` |
 | `Scrapy (Python)` | nojs | `scrapy` on PATH (CLI subprocess) |
 | `Colly (Go)` | nojs | `go` on PATH (CLI subprocess) |
@@ -48,7 +48,7 @@ the row reads `skipped (not installed)`.
 | `got + cheerio` (hand-rolled BFS) | nojs | `got` + `cheerio` |
 | `node-crawler (crawler)` | nojs | `crawler` |
 | `x-ray` | nojs | `x-ray` |
-| `turbo-crawl (js)` | js | built addon |
+| `turbo-surf (js)` | js | built addon |
 | `crawlee PlaywrightCrawler` | js | `crawlee` + `playwright` + browser |
 | `crawlee PuppeteerCrawler` | js | `crawlee` + `puppeteer` + browser |
 | `puppeteer-cluster` | js | `puppeteer-cluster` + browser |
@@ -90,7 +90,7 @@ brew install go
 
 ## Output
 
-A table per set: `crawler | pages | items | median ms | pages/s`, turbo-crawl rows
+A table per set: `crawler | pages | items | median ms | pages/s`, turbo-surf rows
 flagged with `»`. Each engine is warmed once (untimed), then run `--iters` times;
 the reported time is the median.
 
@@ -100,7 +100,7 @@ the reported time is the median.
   crawler counts items identically.
 - `crawlers.mjs` — the registry. Each entry is
   `{ name, set, available(), crawl(target, opts) → { pages, items, ms } }`.
-  turbo-crawl entries run the whole crawl in Rust via the napi addon (`native.crawl`
+  turbo-surf entries run the whole crawl in Rust via the napi addon (`native.crawl`
   for no-js; a JS BFS over the render tier for the `js` set).
   before extraction.
 - `run.mjs` — the CLI/runner: detect, warm, time, report.

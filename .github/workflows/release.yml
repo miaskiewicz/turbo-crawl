@@ -1,5 +1,5 @@
-# Release — on a `v*` tag, build the standalone `turbo-crawl-mcp` binary for every
-# platform and publish `@miaskiewicz/turbo-crawl` (the thin launcher npm package,
+# Release — on a `v*` tag, build the standalone `turbo-surf-mcp` binary for every
+# platform and publish `turbo-surf` (the thin launcher npm package,
 # which spawns the binary). No napi, no Node hosting Rust — same model as
 # turbo-test. The Rust crates publish separately (rust-crates-publish.yml).
 name: Release
@@ -31,13 +31,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with: { targets: "${{ matrix.target }}" }
       - name: Build the MCP binary
-        run: cargo build --release -p turbo-crawl-mcp --target ${{ matrix.target }} --manifest-path rust/Cargo.toml
+        run: cargo build --release -p turbo-surf-mcp --target ${{ matrix.target }} --manifest-path rust/Cargo.toml
       - name: Stage platform binary
         shell: bash
         run: |
           mkdir -p out
-          cp "rust/target/${{ matrix.target }}/release/turbo-crawl-mcp${{ matrix.ext }}" \
-             "out/turbo-crawl-mcp-${{ matrix.node }}${{ matrix.ext }}"
+          cp "rust/target/${{ matrix.target }}/release/turbo-surf-mcp${{ matrix.ext }}" \
+             "out/turbo-surf-mcp-${{ matrix.node }}${{ matrix.ext }}"
       - uses: actions/upload-artifact@v4
         with:
           name: bin-${{ matrix.node }}
@@ -57,7 +57,7 @@ jobs:
       - name: Collect prebuilt binaries into bin/
         run: |
           mkdir -p bin
-          find artifacts -type f -name 'turbo-crawl-mcp-*' -exec cp {} bin/ \;
+          find artifacts -type f -name 'turbo-surf-mcp-*' -exec cp {} bin/ \;
           chmod +x bin/* || true
           ls -la bin/
       - run: npm publish --provenance --access public

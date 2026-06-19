@@ -1,7 +1,7 @@
 // Engine registry for the competitive harness. Every engine exposes the SAME
 // Playwright Page API (goto/getByRole/click/fill/evaluate/goBack/…), so one
 // routine runs unmodified across all of them. Each engine is auto-detected — only
-// the ones actually installed run. turbo-crawl needs no browser; the rest need
+// the ones actually installed run. turbo-surf needs no browser; the rest need
 // their package + (for real browsers) a downloaded binary.
 
 import { existsSync } from "node:fs";
@@ -38,11 +38,11 @@ async function loadPkgChromium(pkg) {
 }
 
 // Candidate engines, in report order. `headless` engines take launch opts.
-// turbo-crawl is the native Rust engine (napi addon): no-js (Lane A) and js (the
+// turbo-surf is the native Rust engine (napi addon): no-js (Lane A) and js (the
 // deno_core V8 render tier). The rest are real browsers, compared against Chromium.
 const CANDIDATES = [
-  { name: "turbo-crawl (no-js)", oracle: false, load: () => loadTurboRust(null), headless: false },
-  { name: "turbo-crawl (js)", oracle: false, load: () => loadTurboRust("js"), headless: false },
+  { name: "turbo-surf (no-js)", oracle: false, load: () => loadTurboRust(null), headless: false },
+  { name: "turbo-surf (js)", oracle: false, load: () => loadTurboRust("js"), headless: false },
   { name: "chromium", oracle: true, load: () => loadReal("chromium"), headless: true },
   { name: "firefox", oracle: false, load: () => loadReal("firefox"), headless: true },
   { name: "webkit", oracle: false, load: () => loadReal("webkit"), headless: true },
