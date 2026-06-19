@@ -139,11 +139,18 @@ pub fn query(html: String, selector: String, kind: Option<String>) -> String {
 #[napi]
 pub fn get_by(html: String, kind: String, value: String, name: Option<String>) -> String {
     let tree = parsed(&html);
-    let nm = name.as_deref().map(|n| (n, TextMode::Substring));
+    let mode_for = |s: &str| {
+        if view::locator::is_regex_literal(s) {
+            TextMode::Regex
+        } else {
+            TextMode::Substring
+        }
+    };
+    let nm = name.as_deref().map(|n| (n, mode_for(n)));
     let hits = match kind.as_str() {
         "role" => view::by_role(&tree, &value, nm),
-        "text" => view::by_text(&tree, &value, TextMode::Substring),
-        "label" => view::by_label(&tree, &value, TextMode::Substring),
+        "text" => view::by_text(&tree, &value, mode_for(&value)),
+        "label" => view::by_label(&tree, &value, mode_for(&value)),
         _ => Vec::new(),
     };
     let out: Vec<Value> = hits

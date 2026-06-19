@@ -329,9 +329,16 @@ class Locator {
     return undefined;
   }
 
+  // No layout engine → no geometry. Playwright returns `null` for an element
+  // with no bounding box, so we return null too (honest: there genuinely is no
+  // box) rather than throwing — geometry-conditional helpers (smooth-scroll,
+  // visibility-by-rect) then no-op cleanly instead of crashing the test.
+  async boundingBox() {
+    return null;
+  }
+
   // --- unsupported (no rendering surface / no input hardware) → honest throws ---
   screenshot = UNSUPPORTED("locator.screenshot", PIXEL);
-  boundingBox = UNSUPPORTED("locator.boundingBox", PIXEL);
   hover = UNSUPPORTED("locator.hover", INPUT);
   dragTo = UNSUPPORTED("locator.dragTo", INPUT);
   selectText = UNSUPPORTED("locator.selectText", INPUT);
@@ -1025,10 +1032,34 @@ function makeResponse(r) {
 // ---------------------------------------------------------------------------
 class BrowserContext {
   constructor(opts = {}) {
-    this._cookies = JSON.stringify(opts.storageState?.cookies ?? []);
+    const cookies = opts.storageState?.cookies ?? [];
     // `playwright.config` `use: { baseURL, testIdAttribute }` isn't read by the
     // shim runner, so the register step maps it in via env (TURBO_SHIM_*).
     this._baseURL = opts.baseURL ?? process.env.TURBO_SHIM_BASE_URL ?? null;
+    // Locale: real Playwright runs `devices['Desktop Chrome']` (locale en-US), and the
+    // app picks UI language from the `NEXT_LOCALE` cookie (next-intl) — with none it
+    // defaults to es-MX, so English text/role-name assertions miss. Seed NEXT_LOCALE to
+    // match the browser locale (default en-US) unless the caller already provided one.
+    this._locale = opts.locale ?? process.env.TURBO_SHIM_LOCALE ?? "en-US";
+    if (this._locale && !cookies.some((c) => c.name === "NEXT_LOCALE")) {
+      let host = "localhost";
+      try {
+        host = new URL(this._baseURL || "http://localhost").hostname;
+      } catch {
+        /* keep */
+      }
+      cookies.push({
+        name: "NEXT_LOCALE",
+        value: this._locale,
+        domain: host,
+        path: "/",
+        secure: false,
+        http_only: false,
+        same_site: "lax",
+        expires_at: 1900000000000,
+      });
+    }
+    this._cookies = JSON.stringify(cookies);
     // Custom User-Agent → page-JS navigator.userAgent + page fetches (newContext({userAgent})).
     this._userAgent = opts.userAgent ?? process.env.TURBO_SHIM_USER_AGENT ?? null;
     this._headers = opts.extraHTTPHeaders ?? {};
@@ -1488,11 +1519,43 @@ function makeBaseFixtures() {
   };
 }
 
+// Playwright shares one fixture set (the same `page`/`context`) across a test's
+// beforeEach → body → afterEach. node:test runs those as separate callbacks, so
+// we stash the active set in `_current` (suite runs serially — workers:1) and
+// reuse it everywhere. Teardown is deferred to the *next* test's beforeEach (and
+// a final afterAll) so an afterEach hook still sees a live, logged-in page —
+// without this, cleanup hooks like `revokeActiveGrantIfAny({page})` get an
+// undefined page, crash, and leak server-side state into later tests.
+let _current = null;
+let _fixtureHooksWired = false;
+function wireFixtureHooks(open) {
+  if (_fixtureHooksWired) return;
+  _fixtureHooksWired = true;
+  const teardownCurrent = async () => {
+    if (!_current) return;
+    const c = _current;
+    _current = null;
+    await c.teardown();
+  };
+  // Registered before any user beforeEach (this fires on the first test/hook
+  // registration), so the set is open by the time user hooks and the body run.
+  beforeEach(async () => {
+    await teardownCurrent();
+    _current = await open(makeTestInfo("test"));
+  });
+  after(teardownCurrent);
+}
+
 function makeTestFn(baseDefs, extDefs = {}) {
   const open = (testInfo) => openFixtures(baseDefs, extDefs, testInfo);
-  const run = (name, fn) =>
+  const run = (name, fn) => {
+    wireFixtureHooks(open);
     nodeTest(name, async () => {
       const testInfo = makeTestInfo(name);
+      if (_current) {
+        await fn(_current.arg, testInfo);
+        return;
+      }
       const { arg, teardown } = await open(testInfo);
       try {
         await fn(arg, testInfo);
@@ -1500,6 +1563,7 @@ function makeTestFn(baseDefs, extDefs = {}) {
         await teardown();
       }
     });
+  };
   run.describe = makeDescribe();
   run.skip = (name, fn) => nodeTest.skip(name, async () => fn?.({}, makeTestInfo(name)));
   run.only = (name, fn) => nodeTest.only(name, async () => runWith(open, name, fn));
@@ -1510,8 +1574,14 @@ function makeTestFn(baseDefs, extDefs = {}) {
   run.use = () => {};
   run.step = async (_name, body) => body();
   run.info = () => makeTestInfo("");
-  run.beforeEach = (fn) => beforeEach(async () => fn((await open(makeTestInfo("beforeEach"))).arg));
-  run.afterEach = (fn) => afterEach(async () => fn({}));
+  run.beforeEach = (fn) => {
+    wireFixtureHooks(open);
+    beforeEach(async () => fn(_current?.arg ?? {}));
+  };
+  run.afterEach = (fn) => {
+    wireFixtureHooks(open);
+    afterEach(async () => fn(_current?.arg ?? {}));
+  };
   run.beforeAll = (fn) => before(async () => fn({}));
   run.afterAll = (fn) => after(async () => fn({}));
   // A new fixture name extends; reusing a base/ext name OVERRIDES it but the

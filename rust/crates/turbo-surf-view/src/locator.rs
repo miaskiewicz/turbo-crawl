@@ -11,11 +11,31 @@ use turbo_dom_parser::rtdom::Tree;
 const ELEMENT_NODE: u8 = 1;
 
 /// Text match mode. `Exact` compares trimmed strings; `Substring` is a
-/// case-insensitive `contains` (the Playwright default).
+/// case-insensitive `contains` (the Playwright default); `Regex` treats `want`
+/// as a `/source/flags` literal (Playwright passes `RegExp` names this way).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum TextMode {
     Exact,
     Substring,
+    Regex,
+}
+
+/// Is `want` a `/source/flags` regex literal (how a JS `RegExp` stringifies)?
+pub fn is_regex_literal(want: &str) -> bool {
+    want.len() >= 2 && want.starts_with('/') && want[1..].rfind('/').is_some()
+}
+
+/// `/source/flags` → compiled `Regex` (`i` flag honored via inline `(?i)`).
+fn compile_regex_literal(want: &str) -> Option<regex::Regex> {
+    let body = want.strip_prefix('/')?;
+    let last = body.rfind('/')?;
+    let (src, flags) = (&body[..last], &body[last + 1..]);
+    let pattern = if flags.contains('i') {
+        format!("(?i){src}")
+    } else {
+        src.to_string()
+    };
+    regex::Regex::new(&pattern).ok()
 }
 
 /// Does `value` match `want` under `mode` (after trimming)?
@@ -24,6 +44,7 @@ pub fn text_match(value: &str, want: &str, mode: TextMode) -> bool {
     match mode {
         TextMode::Exact => v == want,
         TextMode::Substring => v.to_lowercase().contains(&want.to_lowercase()),
+        TextMode::Regex => compile_regex_literal(want).is_some_and(|re| re.is_match(v)),
     }
 }
 
@@ -132,7 +153,7 @@ pub fn by_label(tree: &Tree, want: &str, mode: TextMode) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use TextMode::{Exact, Substring};
+    use TextMode::{Exact, Regex, Substring};
 
     #[test]
     fn text_match_modes() {
@@ -148,6 +169,21 @@ mod tests {
         assert_eq!(by_role(&tree, "button", None).len(), 2);
         assert_eq!(by_role(&tree, "button", Some(("Save", Exact))).len(), 1);
         assert_eq!(by_role(&tree, "link", None).len(), 1);
+    }
+
+    #[test]
+    fn by_role_regex_name() {
+        // Playwright `getByRole('button', { name: /add employee/i })` arrives as
+        // the stringified RegExp "/add employee/i".
+        let tree = Tree::parse("<button>Add employee</button><button>Cancel</button>");
+        assert!(is_regex_literal("/add employee/i"));
+        assert!(!is_regex_literal("Add employee"));
+        assert_eq!(
+            by_role(&tree, "button", Some(("/add employee/i", Regex))).len(),
+            1
+        );
+        assert_eq!(by_role(&tree, "button", Some(("/ADD/", Regex))).len(), 0);
+        assert_eq!(by_role(&tree, "button", Some(("/ADD/i", Regex))).len(), 1);
     }
 
     #[test]
