@@ -4,8 +4,8 @@
 //! the lib binary, and the two platform initializations must not share a process.
 
 use turbo_surf_render::{
-    render_html, render_html_async, render_hydrate, render_page, render_page_with_budget,
-    run_with_dom, PageSession, DEFAULT_RENDER_BUDGET_MS,
+    render_html, render_html_async, render_hydrate, render_hydrate_with_budget, render_page,
+    render_page_with_budget, run_with_dom, PageSession, DEFAULT_RENDER_BUDGET_MS,
 };
 
 // --- reads over a real parsed DOM -------------------------------------------
@@ -771,6 +771,115 @@ async fn nomodule_scripts_are_skipped() {
             "[{attr}] the non-nomodule script must still run: {out}"
         );
     }
+}
+
+// Dev-build support (B): an injected script that reads `import.meta.url` must NOT
+// abort the page. We run every <script> as a CLASSIC script, where `import.meta` is a
+// SyntaxError ("Cannot use 'import.meta' outside a module") — a turbopack `next dev`
+// HMR runtime trips exactly this. The rewrite maps it onto the `__importMeta` global, so
+// the read works AND a following script still runs.
+#[tokio::test]
+async fn import_meta_in_injected_script_does_not_abort_page() {
+    let html = r#"<body><div id="root"></div>
+      <script>
+        const u = import.meta.url;
+        const a = document.createElement('div');
+        a.setAttribute('data-testid', 'import-meta');
+        a.setAttribute('data-url', String(u));
+        document.getElementById('root').appendChild(a);
+      </script>
+      <script>
+        const b = document.createElement('div');
+        b.setAttribute('data-testid', 'after-import-meta');
+        document.getElementById('root').appendChild(b);
+      </script></body>"#;
+    let out = render_hydrate(html, "https://app.test/dashboard")
+        .await
+        .unwrap();
+    assert!(
+        out.contains(r#"data-testid="import-meta""#),
+        "the import.meta script must run (not abort): {out}"
+    );
+    assert!(
+        out.contains(r#"data-url="https://app.test/dashboard""#),
+        "import.meta.url must read the page URL: {out}"
+    );
+    assert!(
+        out.contains(r#"data-testid="after-import-meta""#),
+        "the FOLLOWING script must still run after the import.meta one: {out}"
+    );
+}
+
+// Dev-build support (B): a script using real `import`/`export` STATEMENTS can't run
+// classically (no module loader headless) — it must be SKIPPED gracefully so the rest
+// of the page still hydrates, not abort the whole pump.
+#[tokio::test]
+async fn esm_import_export_statements_skip_gracefully() {
+    for esm in [
+        "import x from '/y.js';",
+        "export const v = 1;",
+        "export {};",
+    ] {
+        let html = format!(
+            r#"<body><div id="root"></div>
+              <script>{esm}</script>
+              <script>
+                const ok = document.createElement('div');
+                ok.setAttribute('data-testid', 'after-esm');
+                document.getElementById('root').appendChild(ok);
+              </script></body>"#
+        );
+        let out = render_hydrate(&html, "https://app.test/").await.unwrap();
+        assert!(
+            out.contains(r#"data-testid="after-esm""#),
+            "[{esm}] a following script must still run after a skipped ESM script: {out}"
+        );
+    }
+}
+
+// Dev-build support (A): a page whose hydration never reaches idle (a dev-mode React
+// loop) must return the BEST-EFFORT partial DOM rendered before the budget tripped,
+// not an error — that partial render is what readable-error probes read.
+#[tokio::test]
+async fn hydrate_returns_partial_dom_on_budget_exceed() {
+    // A first script renders real content, then a second spins forever. Pre-budget the
+    // content is in the DOM; the spin trips the watchdog. We must get the content back.
+    let html = r#"<body><div id="root"></div>
+      <script>
+        const m = document.createElement('div');
+        m.setAttribute('data-testid', 'rendered-before-spin');
+        document.getElementById('root').appendChild(m);
+      </script>
+      <script>while (true) {}</script></body>"#;
+    let out = render_hydrate_with_budget(html, "https://app.test/", "", "", 300)
+        .await
+        .expect("budget-exceed must return best-effort DOM, not Err");
+    assert!(
+        out.contains(r#"data-testid="rendered-before-spin""#),
+        "partial DOM rendered before the budget must be returned: {out}"
+    );
+}
+
+// Dev-build support (A): a live session whose open() loops past the budget must still
+// open (keeping the partial render + the live app), not fail.
+#[tokio::test]
+async fn live_session_opens_best_effort_on_budget_exceed() {
+    let html = r#"<body><div id="root"></div>
+      <script>
+        const m = document.createElement('div');
+        m.setAttribute('data-testid', 'open-partial');
+        document.getElementById('root').appendChild(m);
+      </script>
+      <script>while (true) {}</script></body>"#;
+    let session = PageSession::open(html, "https://app.test/", "", "", 300)
+        .await
+        .expect("open() must succeed best-effort on a budget-exceed");
+    let out = session.serialize();
+    session.close();
+    assert!(
+        out.contains(r#"data-testid="open-partial""#),
+        "the live session must keep the partial render: {out}"
+    );
 }
 
 // --- network: fetch / XHR over the tier-1 stack -----------------------------
