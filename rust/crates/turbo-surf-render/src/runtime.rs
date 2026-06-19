@@ -300,6 +300,21 @@ globalThis.fetch = async (url, init) => {
   if (body != null && typeof body !== "string") {
     try { body = String(body); } catch (_e) { body = ""; }
   }
+  // Next.js App Router CLIENT navigation (`router.push`/`replace`, e.g. the post-login
+  // redirect) fetches the target route's RSC flight with an `RSC` header — a PREFETCH
+  // adds `Next-Router-Prefetch`. We don't do in-place RSC soft-nav (it never completes
+  // headlessly, so `location`/`history` never advance and a `waitForURL` hangs). Record
+  // the navigation target on `__rscNav`; the live-session driver re-loads that route as
+  // a fresh page (the browser hard-nav equivalent), following the redirect chain hop by
+  // hop. Prefetches are ignored.
+  try {
+    const lc = {};
+    for (const k in (hdrs || {})) lc[k.toLowerCase()] = hdrs[k];
+    if (lc.rsc && !lc["next-router-prefetch"]) {
+      const u = new URL(String((url && url.url) || url), globalThis.location.href);
+      if (u.pathname !== globalThis.location.pathname) globalThis.__rscNav = u.pathname;
+    }
+  } catch (_e) {}
   const initJson = JSON.stringify({ method: o.method, headers: hdrs || undefined, body });
   const r = await ops.op_fetch(String((url && url.url) || url), initJson);
   const headers = new globalThis.Headers();

@@ -485,6 +485,20 @@ class Page {
     } catch {
       /* keep prior url */
     }
+    // Next App Router client navigation (router.push) doesn't change location.href in our
+    // engine — it fetches the target's RSC flight, which the runtime records on __rscNav.
+    // Treat that as the navigation target (the post-login redirect chain rides this).
+    try {
+      const nav = await native.liveEval(
+        this._session,
+        "globalThis.__RESULT = globalThis.__rscNav || ''; globalThis.__rscNav = '';",
+      );
+      if (nav && pathOf(nav) !== this._loadedPath) {
+        this._url = this._resolveUrl(nav);
+      }
+    } catch {
+      /* no pending rsc nav */
+    }
     try {
       this._cookies = native.liveCookies(this._session);
     } catch {
