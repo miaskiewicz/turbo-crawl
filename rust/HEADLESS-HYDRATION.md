@@ -165,14 +165,38 @@ fullscreen APIs, analytics) — one needs a host API our env lacks or mis-stubs.
   exactly what a real browser does — **browser-accurate, not a bug**. So (a) needs
   no further fix; dev-build support is complete via the merged #2.
 
-**Status: banked as a known limitation.** Confirmed it's NOT null-return /
-suspense / missing-module / data-fetch / redirect / grid-throw (all ruled out by
-direct probes). The remaining unknown — why prod commits empty with no catchable
-throw in the people subtree — is blocked by headless React error-swallowing + dev
-best-effort eval. **To finish:** one diagnostic run in a real browser (read the
-actual console error), or inject `onCaughtError`/`onUncaughtError` into the App
-Router's `hydrateRoot` to capture the error our way. The full login→dashboard path
-+ many surfaces work; segments mounting the `DataTable` grid render empty.
+**RESOLVED via a real-Chromium oracle (the decisive tool).** Driving the route in
+actual Playwright/Chromium against the SAME servers showed the dominant cause was
+**the environment, not turbo-surf**:
+
+1. **Prod CSP blocked the backend.** `next build` emits a strict CSP whose
+   `connect-src` omits `http://localhost:*` (only dev allows it), so the browser
+   blocks `GET http://localhost:3001/auth/me`. Real Chromium hit this too → blank.
+   (e2e normally runs the dev CSP.)
+2. **Stale backend → `auth/me` 500.** flux-apis HEAD is *Release 11 March 2026*
+   but its DB has *June* migrations applied — the June migration **dropped the
+   `entity_invitations` table**, yet the March `auth/me` code still `SELECT`s it →
+   SQL error → 500 → auth fails → empty. Recreating the table makes `auth/me` 200.
+   With CSP + table fixed, **real Chromium renders `/people/active` fully** (5
+   tabs + the add-employee button; only `/employments` still 500s → empty grid).
+
+3. **turbo-surf has full auth parity.** Its cookie jar carries the cross-domain
+   `refresh_token` cookie (`*.propelauthtest.com`); it performs
+   `GET …/api/v1/refresh_token` (×2) → `GET …/auth/me`, **all `200`** — same as
+   Chromium.
+
+4. **Residual turbo-surf gap (precisely isolated).** With auth at parity, Chromium
+   commits a real DOM (507 chars) but turbo-surf's React fires `onCommitFiberRoot`
+   **12× to EMPTY host DOM** — not a loop (finite), not auth, not CSP, not maps
+   (blocking maps didn't help), not a throw (error boundary around the grid caught
+   nothing), not suspense. A deep **DOM-binding/reconciliation fidelity gap** in
+   the render tier for this specific component tree (the `DataTable` grid),
+   reachable only by diffing React's committed fiber tree vs Chromium's — beyond
+   black-box probing.
+
+**Net:** the headline blocker (backend env) is fixed and `/people/active` renders
+in a real browser; turbo-surf is reduced to one precise residual fidelity gap.
+The full login→dashboard path + many surfaces work.
 
 ### Probing gotchas (reusable)
 
