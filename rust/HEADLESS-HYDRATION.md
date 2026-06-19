@@ -53,6 +53,50 @@ its 10 quotes — see `crates/turbo-surf-render/tests/render.rs`.
   fetched/linked (the harness adapter concatenates a page's classic `<script>`s).
 - Observers are inert stubs (no live mutation callbacks over the static tree).
 
+## 3. Driving an authenticated SPA (live sessions)
+
+Beyond one-shot render, `PageSession` (render tier) keeps a hydrated app **alive
+across calls** — the V8 isolate, React fibers, closures, and delegated listeners
+persist, so dispatched events re-enter the running app and the re-render is
+observable (the one-shot `render_*` paths serialize + reset after each call,
+killing the app). Thread-per-session (the isolate is `!Send`); `eval` drains to a
+stable-DOM signal and returns best-effort on the budget. napi:
+`liveOpen`/`liveEval`/`liveSerialize`/`liveCookies`/`liveClose`; the Playwright
+shim opens a live session on a `networkidle` `goto` and dispatches real
+click/fill events (fill bypasses React's `_valueTracker` via the native value
+setter; click fires mousedown→focus→mouseup→click + the form submit default).
+
+**Validated end to end (no browser):** a real PropelAuth login —
+`fill email/password → click submit → onSubmit → POST login (200) → session
+cookie → client redirect chain (login → /post-login → /auth/me →
+/entity/{id}/admin/home)` — renders the authed dashboard fully. In-app redirects
+(a path change in the live session) re-load the new route as a fresh page
+carrying cookies, so the redirect chain completes hop-by-hop. Test:
+`live_session_dispatches_events_into_running_app`.
+
+**Open limitation — cold deep-route loads render empty.** A *cold*
+`goto('/entity/{id}/admin/people/active', {networkidle})` (cookie carried, no
+prior in-app nav) commits an **empty app-root `div`** — all chunks execute, no
+error / no rejection / no data fetch, the RSC flight payload is complete and
+valid, yet React's App Router flight client never reconciles a tree (the same
+shell/providers render fine for `/admin/home`). This is the next investigation
+(React's flight-client no-commit on deeper nested-segment routes); it's why most
+authed-page e2e specs still fail "locator matched no elements". A few specs
+(`boundingBox`) need a real browser by design.
+
+### Probing gotchas (reusable)
+
+- **`fetchHtml`/`fetchWithCookies` (napi) return a JSON string**
+  (`{"html":...,"status":...}`), not raw HTML — `JSON.parse(...).html` before
+  `hydrate`. Passing the raw JSON in JSON-escapes every `"`, so the inline
+  `__next_f.push` flight scripts fail to eval.
+- **`next build --turbopack` + `next start` is unreliable for prod probes** here
+  (`routesManifest.dataRoutes is not iterable`; a stale `.next` serves a 404ing
+  runtime chunk → false "empty render"). Use a standard webpack `rm -rf .next &&
+  npm run build && npx next start`, and verify the referenced runtime chunk
+  returns 200 first. The dev server is the reliable target.
+- Cap probes at the Node level and `pkill -f turbo-surf` after.
+
 ## Lane routing (when to hydrate)
 
 `detect` (Lane B heuristic, ported to `turbo-surf-view`) decides whether a page is
