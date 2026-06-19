@@ -3,6 +3,28 @@
 All notable changes to turbo-surf are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer.
 
+## [0.2.1]
+
+### Fixed
+
+- **Authenticated SPA pages now render headlessly.** Heavy authed routes (e.g. a
+  payroll people/grid page) previously committed an empty body in the render tier
+  while rendering fine in a real browser. Two render-tier bugs let third-party
+  scripts spin to the render budget so React never committed:
+  - **Virtual-clock timers.** `__runTimers` used `delay` only as a sort key, so a
+    self-rescheduling `setTimeout` poll (analytics SDKs do this) fired until the
+    raw count cap, starving the budget. A virtual clock now gates delayed timers
+    (`due = now + delay`, advance on fire, stop past a 15s virtual ceiling) so
+    polls fire a browser-like number of times and the page quiesces.
+  - **`<iframe>` `contentWindow`.** Analytics SDKs read a builtin's native
+    prototype off a throwaway iframe's `contentWindow`; with none present they
+    recreated an iframe on every lookup (hundreds of churned iframes). Iframes now
+    get a lightweight stub whose `contentWindow` is the current realm (the lookup
+    caches, the loop stops) and that never enters the rtdom tree.
+
+  New tests: `virtual_clock_bounds_self_rescheduling_timers`,
+  `iframe_content_window_exposes_builtins`.
+
 ## [0.2.0]
 
 **turbo-surf is a browserless, native-speed crawler _and_ Playwright-compatible
