@@ -28,6 +28,10 @@ struct Base(String);
 /// state behind `Rc<RefCell<…>>` since ops borrow it across the isolate.
 type Jar = Rc<RefCell<CookieJar>>;
 
+/// Custom User-Agent for this page: drives `navigator.userAgent` and the page-fetch
+/// `User-Agent` header. Empty = the engine default. Stored in op state.
+struct Ua(String);
+
 /// `fetch` result marshaled back to JS as a `Response`-like object.
 #[derive(serde::Serialize)]
 struct FetchOut {
@@ -43,6 +47,13 @@ struct FetchOut {
 fn op_cookie_get(state: &mut OpState) -> String {
     let base = state.borrow::<Base>().0.clone();
     state.borrow::<Jar>().borrow().cookie_header(&base, 0.0)
+}
+
+// The custom User-Agent (empty if none) — `navigator.userAgent` reads this.
+#[op2]
+#[string]
+fn op_user_agent(state: &mut OpState) -> String {
+    state.borrow::<Ua>().0.clone()
 }
 
 // `document.cookie` setter: ingest a `name=value; attrs` line against the base.
@@ -65,9 +76,13 @@ async fn op_fetch(
     #[string] url: String,
     #[string] init_json: String,
 ) -> FetchOut {
-    let (base, jar_rc) = {
+    let (base, jar_rc, ua) = {
         let s = state.borrow();
-        (s.borrow::<Base>().0.clone(), s.borrow::<Jar>().clone())
+        (
+            s.borrow::<Base>().0.clone(),
+            s.borrow::<Jar>().clone(),
+            s.borrow::<Ua>().0.clone(),
+        )
     };
     let target = resolve(&base, &url).unwrap_or(url);
     // Honor the `fetch(url, init)` request: method, headers, body. Without this every
@@ -94,6 +109,10 @@ async fn op_fetch(
         headers
             .entry("Referer".to_string())
             .or_insert_with(|| base.clone());
+    }
+    // Custom User-Agent (if set) overrides the net default for page fetches.
+    if !ua.is_empty() {
+        headers.insert("user-agent".to_string(), ua);
     }
     // Carry the page's cookies on same-origin fetches and ingest Set-Cookie back, so
     // session-authenticated hydration works (e.g. an auth SDK fetching the current user
@@ -136,7 +155,10 @@ fn page_origin(base: &str) -> Option<String> {
     (base.starts_with("http://") || base.starts_with("https://")).then(|| origin.to_string())
 }
 
-deno_core::extension!(turbo_dom, ops = [op_cookie_get, op_cookie_set, op_fetch],);
+deno_core::extension!(
+    turbo_dom,
+    ops = [op_cookie_get, op_cookie_set, op_fetch, op_user_agent],
+);
 
 // Non-DOM browser globals, layered over the ops AFTER the native DOM binding is
 // installed (`browser_env` owns document/Element/window/navigator/Event/etc.; this
@@ -157,7 +179,8 @@ globalThis.self = globalThis;
 // cookie when the browser reports online — an undefined/falsy onLine made a cold load of
 // an authed page skip the refresh and render nothing.
 globalThis.navigator = {
-  userAgent: "turbo-crawl", language: "en-US", languages: ["en-US"], onLine: true,
+  userAgent: (Deno.core.ops.op_user_agent && Deno.core.ops.op_user_agent()) || "turbo-crawl",
+  language: "en-US", languages: ["en-US"], onLine: true,
 };
 globalThis.location = globalThis.location || { href: "about:blank", protocol: "about:", host: "", pathname: "blank" };
 globalThis.localStorage = (() => {
@@ -1060,7 +1083,7 @@ globalThis.__domSig = () => {
 })();
 })();"##;
 
-fn make_runtime(base: &str, cookies: &str) -> JsRuntime {
+fn make_runtime(base: &str, cookies: &str, ua: &str) -> JsRuntime {
     let rt = JsRuntime::new(RuntimeOptions {
         extensions: vec![turbo_dom::init()],
         ..Default::default()
@@ -1074,6 +1097,7 @@ fn make_runtime(base: &str, cookies: &str) -> JsRuntime {
     let mut state = state.borrow_mut();
     state.put::<Base>(Base(base.to_string()));
     state.put::<Jar>(Rc::new(RefCell::new(jar)));
+    state.put::<Ua>(Ua(ua.to_string()));
     drop(state);
     rt
 }
@@ -1133,7 +1157,7 @@ pub fn run_with_dom(html: &str, script: &str) -> Result<String, String> {
     EVAL_RT.with(|cell| {
         let mut slot = cell.borrow_mut();
         if slot.is_none() {
-            *slot = Some((make_runtime("about:blank", ""), String::new()));
+            *slot = Some((make_runtime("about:blank", "", ""), String::new()));
         }
         let (rt, installed) = slot.as_mut().expect("eval runtime present");
         if installed != html {
@@ -1153,7 +1177,7 @@ pub fn run_with_dom(html: &str, script: &str) -> Result<String, String> {
 /// document HTML. The Lane B render contract: JS-gated page in, HTML after the
 /// page's own scripts ran out. (Sync; no event loop — see [`render_page`].)
 pub fn render_html(html: &str, script: &str) -> Result<String, String> {
-    let mut rt = make_runtime("about:blank", "");
+    let mut rt = make_runtime("about:blank", "", "");
     let out = run_sync(&mut rt, html, script);
     crate::browser_env::reset();
     out
@@ -1206,7 +1230,7 @@ pub async fn render_page_with_budget(
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
-    let mut rt = make_runtime(base, "");
+    let mut rt = make_runtime(base, "", "");
     let handle = rt.v8_isolate().thread_safe_handle();
     let done = Arc::new(AtomicBool::new(false));
     let watch = done.clone();
@@ -1251,22 +1275,23 @@ async fn run_async(
 /// mounts. No bundle concatenation by the caller, no framework runtime from us: the
 /// page's own bundle drives itself. Bounded by [`DEFAULT_RENDER_BUDGET_MS`].
 pub async fn render_hydrate(html: &str, base: &str) -> Result<String, String> {
-    render_hydrate_with_budget(html, base, "", DEFAULT_RENDER_BUDGET_MS).await
+    render_hydrate_with_budget(html, base, "", "", DEFAULT_RENDER_BUDGET_MS).await
 }
 
 /// [`render_hydrate`] with the page's cookies (a `storageState` JSON string, "" for
-/// none) seeded into the jar so session-authenticated hydration works, plus an
-/// explicit execution budget (ms) + runaway watchdog.
+/// none) seeded into the jar so session-authenticated hydration works, a custom
+/// User-Agent ("" for the default), plus an explicit execution budget (ms) + watchdog.
 pub async fn render_hydrate_with_budget(
     html: &str,
     base: &str,
     cookies: &str,
+    ua: &str,
     budget_ms: u64,
 ) -> Result<String, String> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
-    let mut rt = make_runtime(base, cookies);
+    let mut rt = make_runtime(base, cookies, ua);
     let handle = rt.v8_isolate().thread_safe_handle();
     let done = Arc::new(AtomicBool::new(false));
     let watch = done.clone();
@@ -1296,7 +1321,7 @@ pub async fn render_hydrate_with_budget(
 pub async fn eval_async(html: &str, base: &str, script: &str) -> Result<String, String> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
-    let mut rt = make_runtime(base, "");
+    let mut rt = make_runtime(base, "", "");
     let handle = rt.v8_isolate().thread_safe_handle();
     let done = Arc::new(AtomicBool::new(false));
     let watch = done.clone();
@@ -1456,9 +1481,10 @@ impl PageSession {
         html: &str,
         base: &str,
         cookies: &str,
+        ua: &str,
         budget_ms: u64,
     ) -> Result<Self, String> {
-        let mut rt = make_runtime(base, cookies);
+        let mut rt = make_runtime(base, cookies, ua);
         let result = {
             let _wd = Watchdog::start(rt.v8_isolate().thread_safe_handle(), budget_ms);
             run_hydrate(&mut rt, html, base).await

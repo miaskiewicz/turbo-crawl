@@ -180,10 +180,15 @@ async fn live_session_dispatches_events_into_running_app() {
       </script>
     </body>"#;
 
-    let mut session =
-        PageSession::open(html, "https://example.test/", "", DEFAULT_RENDER_BUDGET_MS)
-            .await
-            .expect("session opens");
+    let mut session = PageSession::open(
+        html,
+        "https://example.test/",
+        "",
+        "",
+        DEFAULT_RENDER_BUDGET_MS,
+    )
+    .await
+    .expect("session opens");
 
     // Dispatch a bubbling click on the deep button — must reach the document listener.
     let click = r#"document.getElementById('btn').dispatchEvent(
@@ -276,7 +281,10 @@ fn create_tree_walker_walks_the_dom() {
         "#,
     )
     .unwrap();
-    assert_eq!(out, "a1,a2,a3", "TreeWalker must visit accepted <a> in document order");
+    assert_eq!(
+        out, "a1,a2,a3",
+        "TreeWalker must visit accepted <a> in document order"
+    );
 }
 
 // Next.js's webpack runtime resolves chunk paths via `document.currentScript`

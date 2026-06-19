@@ -225,6 +225,7 @@ pub struct HydrateTask {
     html: String,
     base_url: String,
     cookies: String,
+    user_agent: String,
 }
 
 #[napi]
@@ -241,6 +242,7 @@ impl Task for HydrateTask {
             &self.html,
             &self.base_url,
             &self.cookies,
+            &self.user_agent,
             turbo_crawl_render::DEFAULT_RENDER_BUDGET_MS,
         ))
         .map_err(Error::from_reason)
@@ -252,11 +254,17 @@ impl Task for HydrateTask {
 }
 
 #[napi]
-pub fn hydrate(html: String, base_url: String, cookies: Option<String>) -> AsyncTask<HydrateTask> {
+pub fn hydrate(
+    html: String,
+    base_url: String,
+    cookies: Option<String>,
+    user_agent: Option<String>,
+) -> AsyncTask<HydrateTask> {
     AsyncTask::new(HydrateTask {
         html,
         base_url,
         cookies: cookies.unwrap_or_default(),
+        user_agent: user_agent.unwrap_or_default(),
     })
 }
 

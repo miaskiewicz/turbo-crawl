@@ -438,7 +438,12 @@ class Page {
   // `waitUntil: 'networkidle'` navigation / waitForLoadState('networkidle').
   async _openLiveSession() {
     this._closeSession();
-    this._session = await native.liveOpen(this._html, this._url, this._cookies);
+    this._session = await native.liveOpen(
+      this._html,
+      this._url,
+      this._cookies,
+      this._context._userAgent ?? undefined,
+    );
     this._hydrated = true;
     this._loadedPath = pathOf(this._url);
     await this._refreshFromSession();
@@ -652,7 +657,12 @@ class Page {
     if (this._hydrated) return this._html; // already run this document's JS
     // Pass the page's cookies so session-authenticated SPAs hydrate as the logged-in
     // user (the auth SDK's "fetch current user" call carries the session cookie).
-    this._html = await native.hydrate(this._html, this._url, this._cookies);
+    this._html = await native.hydrate(
+      this._html,
+      this._url,
+      this._cookies,
+      this._context._userAgent ?? undefined,
+    );
     this._hydrated = true;
     return this._html;
   }
@@ -973,6 +983,8 @@ class BrowserContext {
     // `playwright.config` `use: { baseURL, testIdAttribute }` isn't read by the
     // shim runner, so the register step maps it in via env (TURBO_SHIM_*).
     this._baseURL = opts.baseURL ?? process.env.TURBO_SHIM_BASE_URL ?? null;
+    // Custom User-Agent → page-JS navigator.userAgent + page fetches (newContext({userAgent})).
+    this._userAgent = opts.userAgent ?? process.env.TURBO_SHIM_USER_AGENT ?? null;
     this._headers = opts.extraHTTPHeaders ?? {};
     this._viewport = opts.viewport ?? { width: 1280, height: 720 };
     this._testIdAttribute =
@@ -982,7 +994,10 @@ class BrowserContext {
     this._listeners = new Map();
   }
   _headersJson() {
-    return Object.keys(this._headers).length ? JSON.stringify(this._headers) : null;
+    // Merge the context User-Agent into the request headers (so goto/request fetches
+    // carry it too, matching the live session's navigator.userAgent).
+    const h = this._userAgent ? { "user-agent": this._userAgent, ...this._headers } : this._headers;
+    return Object.keys(h).length ? JSON.stringify(h) : null;
   }
   async newPage() {
     const p = new Page(this);

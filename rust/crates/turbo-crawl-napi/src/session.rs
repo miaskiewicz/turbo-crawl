@@ -235,6 +235,7 @@ pub struct LiveOpenTask {
     html: String,
     base_url: String,
     cookies: String,
+    user_agent: String,
 }
 
 #[napi]
@@ -248,6 +249,7 @@ impl Task for LiveOpenTask {
         let html = std::mem::take(&mut self.html);
         let base = std::mem::take(&mut self.base_url);
         let cookies = std::mem::take(&mut self.cookies);
+        let ua = std::mem::take(&mut self.user_agent);
         thread::spawn(move || {
             let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -263,6 +265,7 @@ impl Task for LiveOpenTask {
                 &html,
                 &base,
                 &cookies,
+                &ua,
                 DEFAULT_RENDER_BUDGET_MS,
             )) {
                 Ok(s) => {
@@ -316,11 +319,13 @@ pub fn live_open(
     html: String,
     base_url: String,
     cookies: Option<String>,
+    user_agent: Option<String>,
 ) -> AsyncTask<LiveOpenTask> {
     AsyncTask::new(LiveOpenTask {
         html,
         base_url,
         cookies: cookies.unwrap_or_default(),
+        user_agent: user_agent.unwrap_or_default(),
     })
 }
 
