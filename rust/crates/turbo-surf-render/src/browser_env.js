@@ -204,6 +204,26 @@
   // document extras (pure-JS shims over the native tree).
   var d = g.document;
   d.defaultView = g;
+  // Constructable stylesheets — emotion/MUI do `new CSSStyleSheet()` then
+  // `document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet]`. There is
+  // no layout engine here, so the rule list is an inert store that satisfies the API;
+  // a missing `CSSStyleSheet` reference aborts the chunk mid-hydration, blanking the tree.
+  if (typeof g.CSSStyleSheet === 'undefined') {
+    g.CSSStyleSheet = function CSSStyleSheet(){ this.cssRules = []; this.rules = this.cssRules; };
+    g.CSSStyleSheet.prototype.insertRule = function(rule, index){
+      var i = (index == null) ? this.cssRules.length : index;
+      this.cssRules.splice(i, 0, { cssText: String(rule) });
+      return i;
+    };
+    g.CSSStyleSheet.prototype.deleteRule = function(index){ this.cssRules.splice(index, 1); };
+    g.CSSStyleSheet.prototype.replace = function(text){ this.cssRules = [{ cssText: String(text) }]; return Promise.resolve(this); };
+    g.CSSStyleSheet.prototype.replaceSync = function(text){ this.cssRules = [{ cssText: String(text) }]; };
+  }
+  // adoptedStyleSheets — must be a real, settable ARRAY (a non-iterable getter or
+  // absent prop both break the read-modify-write spread above).
+  if (!Array.isArray(d.adoptedStyleSheets)) {
+    try { d.adoptedStyleSheets = []; } catch (e) {}
+  }
   // document.title reflects the <title> element's text (jsdom semantics). Ensure a <title> exists in
   // <head> so code that does querySelector('title').textContent = … (usePageMetadata) has a target,
   // and reading document.title returns it.

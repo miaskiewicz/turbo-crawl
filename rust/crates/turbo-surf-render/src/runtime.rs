@@ -425,31 +425,8 @@ if (typeof globalThis.customElements === "undefined") {
     upgrade() {},
   };
 }
-// CSSStyleSheet — constructable stylesheets. emotion/MUI (and other CSS-in-JS
-// runtimes) do `new CSSStyleSheet()` + push to `document.adoptedStyleSheets`; with
-// no constructor the chunk threw "CSSStyleSheet is not defined" mid-hydration,
-// blanking the whole tree. We don't apply styles (no layout engine), so the rules
-// list is an inert store that satisfies the API surface.
-if (typeof globalThis.CSSStyleSheet === "undefined") {
-  globalThis.CSSStyleSheet = class CSSStyleSheet {
-    constructor() { this.cssRules = []; this.rules = this.cssRules; }
-    insertRule(rule, index) {
-      const i = index == null ? this.cssRules.length : index;
-      this.cssRules.splice(i, 0, { cssText: String(rule) });
-      return i;
-    }
-    deleteRule(index) { this.cssRules.splice(index, 1); }
-    replace(text) { this.cssRules = [{ cssText: String(text) }]; return Promise.resolve(this); }
-    replaceSync(text) { this.cssRules = [{ cssText: String(text) }]; }
-  };
-}
-// adoptedStyleSheets — the array CSS-in-JS runtimes assign their constructed sheets
-// to (they read-modify-write: `[...document.adoptedStyleSheets, sheet]`). Ensure it
-// is an actual array (a non-iterable stub or absent prop both break the spread).
-// (The HTML*Element constructor family is provided by the vendored browser_env.)
-if (!Array.isArray(globalThis.document.adoptedStyleSheets)) {
-  try { globalThis.document.adoptedStyleSheets = []; } catch (_e) {}
-}
+// (CSSStyleSheet, document.adoptedStyleSheets, and the HTML*Element constructor
+// family are all provided by the vendored browser_env binding.)
 // MessageChannel — React 18's scheduler drains its work queue by posting to a
 // MessagePort and running the handler on the other port's onmessage. Route the
 // message through the timer queue (setTimeout 0) so the hydration pump drains it;
