@@ -259,6 +259,26 @@ fn whatwg_url_available_for_hydration() {
     );
 }
 
+// document.createTreeWalker — MUI's DataGrid / focus-trap walks the tree with it; its
+// absence threw "createTreeWalker is not a function" and blanked the whole page.
+#[test]
+fn create_tree_walker_walks_the_dom() {
+    let out = run_with_dom(
+        "<body><div id='r'><a id='a1'>1</a><span><a id='a2'>2</a></span><a id='a3'>3</a></div></body>",
+        r#"
+        const root = document.getElementById('r');
+        const w = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
+          acceptNode: (n) => n.tagName === 'A' ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP,
+        });
+        const ids = [];
+        let n; while ((n = w.nextNode())) ids.push(n.getAttribute('id'));
+        ids.join(',');
+        "#,
+    )
+    .unwrap();
+    assert_eq!(out, "a1,a2,a3", "TreeWalker must visit accepted <a> in document order");
+}
+
 // Next.js's webpack runtime resolves chunk paths via `document.currentScript`
 // (getPathFromScript → currentScript.getAttribute(...)). Our tier ran scripts as
 // one blob with no currentScript, so hydration crashed with "Cannot read
