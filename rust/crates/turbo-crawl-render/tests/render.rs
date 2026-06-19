@@ -444,6 +444,42 @@ async fn web_platform_globals_for_hydration() {
     );
 }
 
+// Constructable stylesheets (emotion/MUI) + the extra HTML*Element constructors the
+// vendored browser_env's ctor list omits. A missing `CSSStyleSheet`/`HTMLDialogElement`
+// reference aborted the chunk mid-hydration and blanked the whole tree.
+#[tokio::test]
+async fn constructable_stylesheet_and_extra_html_element_ctors() {
+    let out = render_html(
+        "<body><dialog id='d'></dialog><div id='root'></div></body>",
+        r#"
+        const sheet = new CSSStyleSheet();
+        sheet.replaceSync("a{color:red}");
+        sheet.insertRule("b{color:blue}", 0);
+        document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+        const root = document.getElementById('root');
+        root.setAttribute('data-rules', String(sheet.cssRules.length));
+        root.setAttribute('data-adopted', String(document.adoptedStyleSheets.length));
+        root.setAttribute('data-ctors', [typeof CSSStyleSheet, typeof HTMLDialogElement, typeof HTMLTableRowElement].join(','));
+        // tag-keyed instanceof on a real node
+        root.setAttribute('data-isdialog', String(document.getElementById('d') instanceof HTMLDialogElement));
+        "#,
+    )
+    .unwrap();
+    assert!(out.contains(r#"data-rules="2""#), "cssRules: {out}");
+    assert!(
+        out.contains(r#"data-adopted="1""#),
+        "adoptedStyleSheets: {out}"
+    );
+    assert!(
+        out.contains(r#"data-ctors="function,function,function""#),
+        "ctors defined: {out}"
+    );
+    assert!(
+        out.contains(r#"data-isdialog="true""#),
+        "dialog node instanceof HTMLDialogElement: {out}"
+    );
+}
+
 // crypto.subtle.digest (real SHA-256), BroadcastChannel, and WebSocket — auth SDKs
 // (PropelAuth) + analytics use these during hydration. WebSocket must not hang/throw.
 #[tokio::test]

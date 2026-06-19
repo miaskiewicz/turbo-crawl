@@ -425,6 +425,69 @@ if (typeof globalThis.customElements === "undefined") {
     upgrade() {},
   };
 }
+// CSSStyleSheet — constructable stylesheets. emotion/MUI (and other CSS-in-JS
+// runtimes) do `new CSSStyleSheet()` + push to `document.adoptedStyleSheets`; with
+// no constructor the chunk threw "CSSStyleSheet is not defined" mid-hydration,
+// blanking the whole tree. We don't apply styles (no layout engine), so the rules
+// list is an inert store that satisfies the API surface.
+if (typeof globalThis.CSSStyleSheet === "undefined") {
+  globalThis.CSSStyleSheet = class CSSStyleSheet {
+    constructor() { this.cssRules = []; this.rules = this.cssRules; }
+    insertRule(rule, index) {
+      const i = index == null ? this.cssRules.length : index;
+      this.cssRules.splice(i, 0, { cssText: String(rule) });
+      return i;
+    }
+    deleteRule(index) { this.cssRules.splice(index, 1); }
+    replace(text) { this.cssRules = [{ cssText: String(text) }]; return Promise.resolve(this); }
+    replaceSync(text) { this.cssRules = [{ cssText: String(text) }]; }
+  };
+}
+// adoptedStyleSheets — the array CSS-in-JS runtimes assign their constructed sheets
+// to (they read-modify-write: `[...document.adoptedStyleSheets, sheet]`). Ensure it
+// is an actual array (a non-iterable stub or absent prop both break the spread).
+if (!Array.isArray(globalThis.document.adoptedStyleSheets)) {
+  try { globalThis.document.adoptedStyleSheets = []; } catch (_e) {}
+}
+// Extra HTML*Element constructors the vendored browser_env's ctor list omits. App
+// bundles reference these for feature-detect / instanceof / subclassing (MUI's
+// Dialog touches HTMLDialogElement); an undefined reference aborts the chunk
+// mid-hydration, blanking the tree. Each is a stub extending HTMLElement, with a
+// tag-keyed `instanceof` where the element maps to a single tag.
+(function () {
+  const base = globalThis.HTMLElement || function () {};
+  const extra = {
+    HTMLDialogElement: "dialog", HTMLDataListElement: "datalist", HTMLFieldSetElement: "fieldset",
+    HTMLLegendElement: "legend", HTMLOListElement: "ol", HTMLDListElement: "dl", HTMLPreElement: "pre",
+    HTMLTableRowElement: "tr", HTMLTableCellElement: null, HTMLTableSectionElement: null,
+    HTMLTableColElement: "col", HTMLTableCaptionElement: "caption", HTMLProgressElement: "progress",
+    HTMLMeterElement: "meter", HTMLDetailsElement: "details", HTMLPictureElement: "picture",
+    HTMLSourceElement: "source", HTMLMediaElement: null, HTMLVideoElement: "video", HTMLAudioElement: "audio",
+    HTMLTemplateElement: "template", HTMLSlotElement: "slot", HTMLBodyElement: "body", HTMLHtmlElement: "html",
+    HTMLHeadElement: "head", HTMLMetaElement: "meta", HTMLLinkElement: "link", HTMLTitleElement: "title",
+    HTMLBaseElement: "base", HTMLBRElement: "br", HTMLHRElement: "hr", HTMLOptGroupElement: "optgroup",
+    HTMLMapElement: "map", HTMLAreaElement: "area", HTMLObjectElement: "object", HTMLEmbedElement: "embed",
+    HTMLOutputElement: "output", HTMLQuoteElement: null, HTMLMenuElement: "menu", HTMLDataElement: "data",
+    HTMLTimeElement: "time", HTMLUnknownElement: null,
+  };
+  for (const name of Object.keys(extra)) {
+    if (typeof globalThis[name] !== "undefined") continue;
+    const f = function () {};
+    f.prototype = Object.create((base && base.prototype) || {});
+    try { Object.defineProperty(f, "name", { value: name, configurable: true }); } catch (e) {}
+    const tag = extra[name];
+    if (tag) {
+      try {
+        Object.defineProperty(f, Symbol.hasInstance, {
+          configurable: true,
+          value: (o) => o != null && typeof o === "object" && o.nodeType === 1 &&
+            String(o.tagName).toUpperCase() === tag.toUpperCase(),
+        });
+      } catch (e) {}
+    }
+    globalThis[name] = f;
+  }
+})();
 // MessageChannel — React 18's scheduler drains its work queue by posting to a
 // MessagePort and running the handler on the other port's onmessage. Route the
 // message through the timer queue (setTimeout 0) so the hydration pump drains it;
