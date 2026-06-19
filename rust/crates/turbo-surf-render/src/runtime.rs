@@ -993,6 +993,19 @@ try {
   }
 } catch (_e) {}
 
+// `import.meta` shim. A turbopack/webpack DEV runtime injects scripts that read
+// `import.meta.url` (and friends), but we run every <script> as a CLASSIC script via
+// `(0, eval)` — and classic V8 rejects `import.meta` with a SyntaxError ("Cannot use
+// 'import.meta' outside a module"), which aborted the whole chunk. There's no module
+// record to attach a real `import.meta` to, so expose a stand-in global the script
+// rewrite below maps `import.meta` onto. `url` is the page URL; `env` is empty (no
+// build-time define table headless); `resolve` echoes the spec back as an absolute URL.
+globalThis.__importMeta = {
+  get url() { return (globalThis.location && globalThis.location.href) || ""; },
+  env: {},
+  resolve(spec) { try { return new globalThis.URL(spec, globalThis.location.href).href; } catch (_e) { return String(spec); } },
+};
+
 // --- hydration pump: the browser's script-loading model -----------------------
 // Real SPAs (Next.js/webpack) don't ship their code inline — they BOOT a tiny
 // runtime that injects more <script src> chunks at runtime and waits for each
@@ -1006,6 +1019,32 @@ function __fireScriptEvent(el, kind, err) {
   const ev = { type: kind, target: el, currentTarget: el, error: err };
   try { const h = kind === "load" ? el.onload : el.onerror; if (typeof h === "function") h.call(el, ev); } catch (_e) {}
   try { if (typeof el.dispatchEvent === "function") el.dispatchEvent(ev); } catch (_e) {}
+}
+// Make an ESM-flavored injected script runnable as a CLASSIC script (or signal skip).
+// Returns rewritten code to eval, or `null` to skip the script gracefully.
+//   - `import.meta` → the `__importMeta` global (the dev HMR runtime reads `.url`/`.env`).
+//   - top-level `import`/`export` STATEMENTS → no module loader headless, so skip (the
+//     dev runtime ships these only in the rare static-ESM chunk; running a broken
+//     classic eval of them would abort, and we can't resolve the graph anyway).
+// A coarse source rewrite, not a parse: `import.meta` is unambiguous, and import/export
+// STATEMENTS are detected only at statement starts (line start / after `;`/`{`/`}`) so
+// `export`-as-property or `import(` dynamic-import calls aren't misfired on.
+globalThis.__rewriteEsmForClassic = function __rewriteEsmForClassic(code, label) {
+  if (typeof code !== "string" || !code) return code;
+  // Real module-graph syntax we can't honor classically → skip with a log.
+  // `import x from`, `import {`, `import 'side-effect'`, `import * as`, `export …`,
+  // `export default`, `export {` — anchored at a statement boundary.
+  const MODULE_STMT = /(^|[;{}\n\r])\s*(import\s+[^(]|import\s*['"]|export\s+|export\s*\{|export\s*\*)/;
+  if (MODULE_STMT.test(code)) {
+    Deno.core.print("script skipped (" + label + "): ESM import/export not supported in the classic render tier\n");
+    return null;
+  }
+  // `import.meta` is safe to rewrite onto the global stub. Match the `import.meta`
+  // token (with optional whitespace before `.`) and leave everything else intact.
+  if (/import\s*\.\s*meta/.test(code)) {
+    code = code.replace(/import\s*\.\s*meta/g, "globalThis.__importMeta");
+  }
+  return code;
 }
 globalThis.__execScriptEl = async function (el) {
   if (!el || el.__tcDone) return;
@@ -1029,6 +1068,16 @@ globalThis.__execScriptEl = async function (el) {
     } else {
       code = el.textContent || el.text || "";
     }
+    // A turbopack/webpack DEV runtime injects scripts written with ESM-only syntax
+    // (`import.meta`, bare `import`/`export`), but we run every <script> as a CLASSIC
+    // script, and classic V8 rejects those tokens with a SyntaxError that aborts the
+    // whole chunk. `import.meta` is the common, fixable case (the dev HMR runtime reads
+    // `import.meta.url`/`.env`): rewrite it onto the `__importMeta` global so the read
+    // works. Real `import`/`export` statements need a module loader + resolved graph we
+    // don't have headless — those scripts are SKIPPED gracefully (logged) rather than
+    // hung/aborted.
+    code = globalThis.__rewriteEsmForClassic(code, src || "inline");
+    if (code === null) { __fireScriptEvent(el, "load"); return; } // skipped (real module graph)
     // Set document.currentScript to THIS element during execution, like a browser.
     // Turbopack/webpack chunk runtimes do `TURBOPACK.push([document.currentScript, …])`
     // to correlate each chunk with the element that loaded it — a single static
@@ -1354,9 +1403,32 @@ pub async fn render_hydrate_with_budget(
     let result = run_hydrate(&mut rt, html, base).await;
     done.store(true, Ordering::Relaxed);
     let _ = watchdog.join();
-    let out = result.map_err(|e| budget_msg(&e, budget_ms));
+    // Best-effort on a budget-exceed: a dev-mode SPA (Next `next dev`) can loop past the
+    // budget without ever reaching idle, yet the partial DOM rendered so far is exactly
+    // what a probe (readable-React-error diagnosis) needs. Mirror `PageSession.eval`:
+    // clear the terminate state so the isolate is usable, then return the reached DOM
+    // instead of discarding it. Genuine non-budget errors (install/parse) still propagate.
+    let out = best_effort_on_budget(&mut rt, result, budget_ms);
     crate::browser_env::reset();
     out
+}
+
+// Resolve a hydrate-path result into best-effort HTML: a clean `Ok` passes through;
+// a budget-terminate is downgraded to the partial serialized DOM (terminate state
+// cleared first so the read can run); any other error propagates relabeled.
+fn best_effort_on_budget(
+    rt: &mut JsRuntime,
+    result: Result<String, String>,
+    budget_ms: u64,
+) -> Result<String, String> {
+    match result {
+        Ok(html) => Ok(html),
+        Err(e) if e.contains("terminat") || e.contains("execution") => {
+            rt.v8_isolate().cancel_terminate_execution();
+            Ok(crate::browser_env::document_html())
+        }
+        Err(e) => Err(budget_msg(&e, budget_ms)),
+    }
 }
 
 /// Run `script` over `html`'s DOM, drive the event loop + hydration drain, then
@@ -1540,6 +1612,19 @@ impl PageSession {
                 budget_ms,
                 closed: false,
             }),
+            // Best-effort on a budget-exceed: a dev-mode SPA whose hydration never reaches
+            // idle still produced a partial DOM and a live app. Clear the terminate state
+            // (so later `eval`s run) and KEEP the session alive — discarding it would lose
+            // the partial render and force the caller back to the static HTML. Genuine
+            // non-budget errors (install/parse) still fail the open.
+            Err(e) if e.contains("terminat") || e.contains("execution") => {
+                rt.v8_isolate().cancel_terminate_execution();
+                Ok(PageSession {
+                    rt,
+                    budget_ms,
+                    closed: false,
+                })
+            }
             Err(e) => {
                 crate::browser_env::reset();
                 Err(budget_msg(&e, budget_ms))
