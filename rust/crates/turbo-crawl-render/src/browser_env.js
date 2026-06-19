@@ -168,6 +168,31 @@
   iface('HTMLInputElement', function(o){ return isNode(o) && o.nodeType === 1 && String(o.tagName).toUpperCase() === 'INPUT'; });
   iface('HTMLTextAreaElement', function(o){ return isNode(o) && o.nodeType === 1 && String(o.tagName).toUpperCase() === 'TEXTAREA'; });
   iface('HTMLSelectElement', function(o){ return isNode(o) && o.nodeType === 1 && String(o.tagName).toUpperCase() === 'SELECT'; });
+  // Extra HTML*Element constructors the base ctor list omits. App bundles reference these for
+  // feature-detect / instanceof / subclassing (MUI's Dialog touches HTMLDialogElement); an
+  // undefined reference aborts the chunk mid-hydration, blanking the tree. Single-tag elements get
+  // a tag-keyed `instanceof`; abstract / multi-tag interfaces fall back to a generic element check.
+  var htmlByTag = {
+    DIALOG:'HTMLDialogElement', DATALIST:'HTMLDataListElement', FIELDSET:'HTMLFieldSetElement',
+    LEGEND:'HTMLLegendElement', OL:'HTMLOListElement', DL:'HTMLDListElement', PRE:'HTMLPreElement',
+    TR:'HTMLTableRowElement', COL:'HTMLTableColElement', CAPTION:'HTMLTableCaptionElement',
+    PROGRESS:'HTMLProgressElement', METER:'HTMLMeterElement', DETAILS:'HTMLDetailsElement',
+    PICTURE:'HTMLPictureElement', SOURCE:'HTMLSourceElement', VIDEO:'HTMLVideoElement',
+    AUDIO:'HTMLAudioElement', TEMPLATE:'HTMLTemplateElement', SLOT:'HTMLSlotElement',
+    BODY:'HTMLBodyElement', HTML:'HTMLHtmlElement', HEAD:'HTMLHeadElement', META:'HTMLMetaElement',
+    LINK:'HTMLLinkElement', TITLE:'HTMLTitleElement', BASE:'HTMLBaseElement', BR:'HTMLBRElement',
+    HR:'HTMLHRElement', OPTGROUP:'HTMLOptGroupElement', MAP:'HTMLMapElement', AREA:'HTMLAreaElement',
+    OBJECT:'HTMLObjectElement', EMBED:'HTMLEmbedElement', OUTPUT:'HTMLOutputElement',
+    MENU:'HTMLMenuElement', DATA:'HTMLDataElement', TIME:'HTMLTimeElement',
+  };
+  // abstract base / multi-tag interfaces (no single tag → generic nodeType-1 instanceof).
+  var htmlAbstract = ['HTMLMediaElement','HTMLTableCellElement','HTMLTableSectionElement','HTMLQuoteElement','HTMLUnknownElement'];
+  (function(){
+    var baseProto = (g.HTMLElement && g.HTMLElement.prototype) || {};
+    var mk = function(name){ var f = g[name]; if (typeof f !== 'function') { f = function(){}; f.prototype = Object.create(baseProto); try { Object.defineProperty(f, 'name', { value: name, configurable: true }); } catch(e){} g[name] = f; } return f; };
+    Object.keys(htmlByTag).forEach(function(tag){ var name = htmlByTag[tag]; mk(name); iface(name, (function(t){ return function(o){ return isNode(o) && o.nodeType === 1 && String(o.tagName).toUpperCase() === t; }; })(tag)); });
+    htmlAbstract.forEach(function(name){ mk(name); iface(name, function(o){ return isNode(o) && o.nodeType === 1; }); });
+  })();
   // window-level event listeners — a real registry so window.addEventListener('keydown', …) +
   // window.dispatchEvent(new KeyboardEvent(...)) work (e.g. global keyboard shortcuts).
   if (!g.__winListeners) {
