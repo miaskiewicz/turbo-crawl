@@ -76,13 +76,33 @@ carrying cookies, so the redirect chain completes hop-by-hop. Test:
 
 **Open limitation — cold deep-route loads render empty.** A *cold*
 `goto('/entity/{id}/admin/people/active', {networkidle})` (cookie carried, no
-prior in-app nav) commits an **empty app-root `div`** — all chunks execute, no
-error / no rejection / no data fetch, the RSC flight payload is complete and
-valid, yet React's App Router flight client never reconciles a tree (the same
-shell/providers render fine for `/admin/home`). This is the next investigation
-(React's flight-client no-commit on deeper nested-segment routes); it's why most
-authed-page e2e specs still fail "locator matched no elements". A few specs
-(`boundingBox`) need a real browser by design.
+prior in-app nav) commits an **empty app-root `div`** while `/admin/home` (same
+shell + providers) renders fully. It's why many authed-page e2e specs still fail
+"locator matched no elements". A few specs (`boundingBox`) need a real browser by
+design.
+
+Diagnosis so far (via a React-DevTools-hook probe over the live isolate):
+- **React is NOT parked/suspended** — it fires `onCommitFiberRoot` 12× for the
+  empty route (19× for the rendering one). It commits; the people segment just
+  reconciles to **empty host DOM**.
+- **Not a missing module/chunk** — all client-reference modules register and all
+  chunks load `200`. **Not data-suspense** — the app has no `useSuspenseQuery`
+  and no data fetch fires. **Not an error** — the only console error is a benign
+  `Cannot read properties of undefined (reading 'prototype')` that appears
+  *identically* on the route that DOES render (red herring).
+- Both routes render `Providers` + `Theme` identically; divergence is deeper, in
+  the segment subtree, and **silent**. Other deep authed routes (e.g.
+  company-settings) render fine — so it's specific to certain segments.
+- Pinpointing the exact null-returning component is blocked on the prod build:
+  minified component names + our V8 isolate captures **no stack frames** (even
+  with `Error.stackTraceLimit` raised), and fiber-tree dumps overflow a probe
+  attribute before reaching the divergence.
+
+**Decisive next step:** probe a **`next dev` build** (run it on a spare port
+against the same backend) — dev React emits readable component names, full error
++ component stacks, and hydration-mismatch warnings, which should name the
+null-returning component immediately. Then map it to source and fix the engine
+gap it depends on.
 
 ### Probing gotchas (reusable)
 
