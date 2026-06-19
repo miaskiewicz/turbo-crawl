@@ -316,7 +316,28 @@ globalThis.fetch = async (url, init) => {
     }
   } catch (_e) {}
   const initJson = JSON.stringify({ method: o.method, headers: hdrs || undefined, body });
-  const r = await ops.op_fetch(String((url && url.url) || url), initJson);
+  // Count in-flight fetches so the hydration/interaction drain doesn't quiesce while a
+  // request is outstanding — otherwise a save POST resolves AFTER the drain gives up
+  // (the DOM looks "stable" while waiting) and its success re-render (modal close,
+  // redirect) is lost.
+  globalThis.__pendingFetches = (globalThis.__pendingFetches || 0) + 1;
+  let r;
+  try {
+    r = await ops.op_fetch(String((url && url.url) || url), initJson);
+  } finally {
+    globalThis.__pendingFetches = Math.max(0, (globalThis.__pendingFetches || 1) - 1);
+  }
+  // Network log: the Playwright shim drains this to emit `page.on('response')`
+  // events (tests subscribe to capture API payloads — payroll period, employments).
+  try {
+    globalThis.__netLog = globalThis.__netLog || [];
+    globalThis.__netLog.push({
+      url: String((url && url.url) || url),
+      status: r.status, ok: r.ok, method: (o.method || "GET"),
+      contentType: r.content_type || "", body: r.body,
+    });
+    if (globalThis.__netLog.length > 1000) globalThis.__netLog.splice(0, globalThis.__netLog.length - 1000);
+  } catch (_e) {}
   const headers = new globalThis.Headers();
   if (r.content_type) headers.set("content-type", r.content_type);
   return {
@@ -1149,10 +1170,14 @@ globalThis.__hydrate = async function (maxRounds = 300, timerBudget = 200000) {
     if (!ranScript && fired === 0) break;
   }
 };
-// Pending-work signal for the Rust pump loop: "1" while timers are queued or a
-// <script> hasn't run (more to do after the next async drain), else "0".
+// Pending-work signal for the Rust pump loop: "1" while timers are queued, a
+// <script> hasn't run, or a fetch is in-flight (more to do after the next async
+// drain), else "0".
 globalThis.__pendingWork = () =>
-  __timers.length > 0 || Array.prototype.some.call(document.querySelectorAll("script"), (s) => !s.__tcDone) ? "1" : "0";
+  (globalThis.__pendingFetches || 0) > 0 || __timers.length > 0 || Array.prototype.some.call(document.querySelectorAll("script"), (s) => !s.__tcDone) ? "1" : "0";
+// In-flight fetch count — the interaction drain must keep pumping while > 0 even if
+// the visible tree looks stable (the response's re-render hasn't happened yet).
+globalThis.__pendingFetchCount = () => String(globalThis.__pendingFetches || 0);
 
 // A cheap "has the DOM changed?" signal for the interaction drain: element count + the
 // total length of input values (so a controlled-input edit registers). Lets the drain
@@ -1647,10 +1672,20 @@ async fn drain_to_quiescence(rt: &mut JsRuntime) -> Result<(), String> {
         let sig_v = rt
             .execute_script("<domsig>", "__domSig()")
             .map_err(|e| e.to_string())?;
+        let fetches = rt
+            .execute_script("<fetches>", "__pendingFetchCount()")
+            .map_err(|e| e.to_string())?;
         let still = read_string(rt, pending)? == "1";
         let fired_any = read_string(rt, fired)? != "0";
+        let awaiting_fetch = read_string(rt, fetches)? != "0";
         if !still && !fired_any {
             break; // genuinely idle
+        }
+        // A request is outstanding: keep pumping (don't let the stable-DOM early-out
+        // fire) so the response's re-render — a modal close, a redirect — lands.
+        if awaiting_fetch {
+            stable = 0;
+            continue;
         }
         let sig = read_string(rt, sig_v)?;
         if sig == last_sig {

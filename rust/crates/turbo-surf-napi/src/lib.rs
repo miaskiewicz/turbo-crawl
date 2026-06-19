@@ -153,9 +153,15 @@ pub fn get_by(html: String, kind: String, value: String, name: Option<String>) -
         "label" => view::by_label(&tree, &value, mode_for(&value)),
         _ => Vec::new(),
     };
+    // `idx` = the element's position in document order (querySelectorAll('*')), so the
+    // Playwright shim can drive a getBy* match in the LIVE isolate by index (these
+    // locators have no CSS selector to dispatch through).
+    let all: Vec<u32> = tree.query_selector_all("*").iter().copied().collect();
     let out: Vec<Value> = hits
         .iter()
-        .map(|&h| json!({ "node": h, "text": view::text(&tree, h) }))
+        .map(|&h| {
+            json!({ "node": h, "text": view::text(&tree, h), "idx": all.iter().position(|&x| x == h) })
+        })
         .collect();
     Value::Array(out).to_string()
 }

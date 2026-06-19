@@ -239,16 +239,22 @@ class Locator {
   // is CSS-selector-backed, so the live isolate can re-resolve it). getBy{Role,Text,…}
   // locators aren't selector-backed → fall back to the static/intent path.
   get _canDriveLive() {
-    return this._page._live && !!this._selector;
+    return this._page._live;
+  }
+  // Dispatch an interaction into the LIVE isolate. Selector-backed locators dispatch
+  // through their CSS selector; getBy*/filtered locators have none, so we target the
+  // matched element by its document-order index (`querySelectorAll('*')[idx]`) — this
+  // is what lets getByRole/getByLabel/getByText drive the running app (fill/click), not
+  // just mutate the static HTML snapshot.
+  async _driveLive(kind, value) {
+    if (this._selector)
+      return this._page._sessionDispatch(this._selector, this._index ?? 0, kind, value);
+    const m = this._all();
+    if (!m.length || m[0].idx == null) throw new Error("turbo-surf: locator matched no elements");
+    return this._page._sessionDispatch("*", m[0].idx, kind, value);
   }
   async fill(value) {
-    if (this._canDriveLive)
-      return void (await this._page._sessionDispatch(
-        this._selector,
-        this._index,
-        "fill",
-        String(value),
-      ));
+    if (this._canDriveLive) return void (await this._driveLive("fill", String(value)));
     this._page._html = native.fillNode(this._html, this._requireNode(), String(value));
   }
   async clear() {
@@ -261,13 +267,11 @@ class Locator {
     return this.fill(value);
   }
   async check() {
-    if (this._canDriveLive)
-      return void (await this._page._sessionDispatch(this._selector, this._index, "check"));
+    if (this._canDriveLive) return void (await this._driveLive("check"));
     this._page._html = native.setCheckedNode(this._html, this._requireNode(), true);
   }
   async uncheck() {
-    if (this._canDriveLive)
-      return void (await this._page._sessionDispatch(this._selector, this._index, "uncheck"));
+    if (this._canDriveLive) return void (await this._driveLive("uncheck"));
     this._page._html = native.setCheckedNode(this._html, this._requireNode(), false);
   }
   async setChecked(on) {
@@ -277,7 +281,7 @@ class Locator {
     const v = Array.isArray(value) ? value[0] : value;
     const sval = String(v?.value ?? v);
     if (this._canDriveLive) {
-      await this._page._sessionDispatch(this._selector, this._index, "select", sval);
+      await this._driveLive("select", sval);
       return [sval];
     }
     this._page._html = native.selectOptionNode(this._html, this._requireNode(), sval);
@@ -286,7 +290,7 @@ class Locator {
   async click() {
     if (this._canDriveLive) {
       const urlBefore = this._page._url;
-      await this._page._sessionDispatch(this._selector, this._index, "click");
+      await this._driveLive("click");
       // A JS handler that navigated changed the URL (SPA router / form POST + redirect).
       // If the URL is unchanged, the click hit a plain <a>/<form> whose browser default
       // action our event dispatch doesn't perform — follow the static intent (anchor
@@ -317,7 +321,6 @@ class Locator {
   }
   async focus() {}
   async blur() {}
-  async dispatchEvent() {}
   async scrollIntoViewIfNeeded() {}
   async highlight() {}
   async waitFor() {
@@ -340,9 +343,15 @@ class Locator {
   // Hover has no rendering effect here, but JS hover handlers (menu-open) are real.
   // Drive the live app with mouseenter/over events; otherwise best-effort no-op.
   async hover() {
-    if (this._canDriveLive)
-      return void (await this._page._sessionDispatch(this._selector, this._index, "hover"));
     await this._page._ensureLive();
+    if (this._page._live) return void (await this._driveLive("hover"));
+  }
+
+  // dispatchEvent(type) — fire a named DOM event into the live app (e.g. a row
+  // checkbox's 'click'). Static snapshot has no JS handlers, so it needs the isolate.
+  async dispatchEvent(type) {
+    await this._page._ensureLive();
+    if (this._page._live) return void (await this._driveLive("dispatch", String(type)));
   }
 
   // setInputFiles: read the file bytes in Node, build File objects in the isolate, and
@@ -351,13 +360,7 @@ class Locator {
   async setInputFiles(files) {
     const payload = normalizeInputFiles(files);
     await this._page._ensureLive();
-    if (this._canDriveLive)
-      return void (await this._page._sessionDispatch(
-        this._selector,
-        this._index,
-        "setfiles",
-        payload,
-      ));
+    if (this._page._live) return void (await this._driveLive("setfiles", payload));
   }
 
   // --- unsupported (no rendering surface / no input hardware) → honest throws ---
@@ -457,6 +460,26 @@ function interactionScript(selector, index, kind, value) {
       if (typeof el.focus === "function") el.focus();
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
+      globalThis.__RESULT = "OK";
+    } })();`;
+  }
+  if (kind === "dispatch") {
+    // Fire a named event (value = type) on the deepest descendant. A click on a
+    // checkbox/radio also performs the browser default (toggle + change).
+    return `(() => { ${pick} else {
+      let t = el; while (t.firstElementChild) t = t.firstElementChild;
+      const type = ${val};
+      const mouse = /^(click|dblclick|mouse|pointer|contextmenu|auxclick)/.test(type);
+      const box = el.tagName === "INPUT" && (el.type === "checkbox" || el.type === "radio");
+      if (type === "click" && box) el.checked = el.type === "radio" ? true : !el.checked;
+      const ev = mouse
+        ? new MouseEvent(type, { bubbles: true, cancelable: true, view: globalThis })
+        : new Event(type, { bubbles: true, cancelable: true });
+      t.dispatchEvent(ev);
+      if (type === "click" && box) {
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      }
       globalThis.__RESULT = "OK";
     } })();`;
   }
@@ -607,6 +630,7 @@ class Page {
     } catch {
       /* keep prior cookies */
     }
+    await this._drainNetworkEvents();
     // The app navigated to a different route within the live session (a post-login
     // redirect, router.push/replace). Our engine doesn't do Next's in-place RSC
     // soft-nav, so re-LOAD that route as a fresh page (carrying cookies) — its own
@@ -622,6 +646,52 @@ class Page {
       this._navHops++;
       await this._reopen(this._url);
     }
+  }
+
+  // Re-pump the live app and pull its DOM forward. Backs web-first assertion retry:
+  // a UI change that lands just after an action (a modal close, an async-loaded row)
+  // becomes observable on the next poll. No-op without a live session.
+  async _redrain() {
+    if (this._session == null) return;
+    try {
+      await native.liveEval(this._session, "globalThis.__RESULT = '';");
+    } catch {
+      /* terminated mid-drain — refresh reads best-effort state */
+    }
+    await this._refreshFromSession();
+  }
+
+  // Drain the live app's network log and emit Playwright `response` events. Tests
+  // subscribe with `page.on('response', …)` to capture API payloads (the payroll
+  // period, employments lists). Each entry → a minimal Response (url/status/json/text).
+  async _drainNetworkEvents() {
+    if (this._session == null) return;
+    if (!this._listeners.has("response") && !this._listeners.has("requestfinished")) return;
+    let raw;
+    try {
+      raw = await native.liveEval(
+        this._session,
+        "globalThis.__RESULT = JSON.stringify((globalThis.__netLog || []).splice(0));",
+      );
+    } catch {
+      return;
+    }
+    if (!raw) return;
+    let entries;
+    try {
+      entries = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    this._recentResponses = this._recentResponses ?? [];
+    for (const e of entries) {
+      const resp = makeNetResponse(e);
+      this._recentResponses.push(resp);
+      this._emit("response", resp);
+      this._emit("requestfinished", resp.request());
+    }
+    if (this._recentResponses.length > 100)
+      this._recentResponses.splice(0, this._recentResponses.length - 100);
   }
 
   // Follow an in-app navigation: load `url` fresh (fetch + hydrate) WITHOUT resetting the
@@ -984,9 +1054,36 @@ class Page {
   async waitForEvent() {
     return undefined;
   }
-  async waitForResponse(_matcher) {
-    // No network event bus; surface the last navigation as a synthetic response.
-    return makeResponse({ status: 200, finalUrl: this._url });
+  async waitForResponse(matcher, opts = {}) {
+    const test = (resp) => {
+      try {
+        if (typeof matcher === "function") return !!matcher(resp);
+        if (matcher instanceof RegExp) return matcher.test(resp.url());
+        return resp.url().includes(String(matcher));
+      } catch {
+        return false;
+      }
+    };
+    // A matching response may already have been captured (e.g. it landed during an
+    // action that ran before this call) — check the recent buffer first.
+    const buffered = (this._recentResponses ?? []).find(test);
+    if (buffered) return buffered;
+    return new Promise((resolve) => {
+      // On timeout resolve a synthetic response rather than rejecting: many callers
+      // use `Promise.all([waitForResponse(...), action()])` and only need the action
+      // to run — a hard reject there would fail otherwise-passing flows.
+      const timer = setTimeout(() => {
+        this.off("response", onResp);
+        resolve(makeResponse({ status: 200, finalUrl: this._url }));
+      }, opts.timeout ?? 15000);
+      const onResp = (resp) => {
+        if (!test(resp)) return;
+        clearTimeout(timer);
+        this.off("response", onResp);
+        resolve(resp);
+      };
+      this.on("response", onResp);
+    });
   }
   async waitForRequest() {
     return { url: () => this._url, method: () => "GET" };
@@ -1124,6 +1221,35 @@ function makeResponse(r) {
     },
     async json() {
       return JSON.parse(r.html ?? "null");
+    },
+  };
+}
+
+// A Playwright-like Response built from a captured live-app fetch (net-log entry),
+// for `page.on('response')` subscribers.
+function makeNetResponse(e) {
+  const req = {
+    url: () => e.url,
+    method: () => e.method || "GET",
+    headers: () => (e.contentType ? { "content-type": e.contentType } : {}),
+    postData: () => null,
+    resourceType: () => "fetch",
+  };
+  return {
+    url: () => e.url,
+    status: () => e.status,
+    statusText: () => "",
+    ok: () => !!e.ok,
+    headers: () => (e.contentType ? { "content-type": e.contentType } : {}),
+    async text() {
+      return e.body ?? "";
+    },
+    async json() {
+      return JSON.parse(e.body ?? "null");
+    },
+    request: () => req,
+    async finished() {
+      return null;
     },
   };
 }
@@ -1285,64 +1411,109 @@ class BaseExpect {
   _ok(pass, message) {
     if (pass === this._neg) throw new Error(message);
   }
+  // Web-first assertion retry: re-evaluate `thunk` (re-pumping the live app between
+  // tries) until it satisfies the (possibly negated) expectation or `timeout`
+  // elapses. Mirrors Playwright's auto-retrying assertions — a UI change that lands
+  // shortly after an action (modal close, async row) is observed instead of missed.
+  async _retry(thunk, opts) {
+    const timeout = opts?.timeout ?? 5000;
+    // Locator → its page; Page assertion → the page itself.
+    const page =
+      this._v && (this._v._page ?? (typeof this._v._redrain === "function" ? this._v : null));
+    const start = Date.now();
+    const run = async () => {
+      try {
+        return !!(await thunk());
+      } catch {
+        return false;
+      }
+    };
+    let pass = await run();
+    while ((this._neg ? pass : !pass) && Date.now() - start < timeout) {
+      if (!page || !page._live) break;
+      await page._redrain();
+      pass = await run();
+    }
+    return pass;
+  }
 }
 
 class LocatorExpect extends BaseExpect {
   get not() {
     return new LocatorExpect(this._v, !this._neg);
   }
-  async _snap() {
-    const s = this._v._snapshot();
-    if (s == null) this._ok(false, "expected element to exist, but locator matched none");
-    return s ?? {};
+  _snap() {
+    return this._v._snapshot() ?? {};
   }
-  async toBeVisible() {
-    this._ok((await this._snap()).visible, "expected element to be visible");
+  async toBeVisible(opts) {
+    this._ok(await this._retry(() => this._snap().visible, opts), "expected element to be visible");
   }
-  async toBeHidden() {
-    this._ok(!(await this._snap()).visible, "expected element to be hidden");
+  async toBeHidden(opts) {
+    this._ok(await this._retry(() => !this._snap().visible, opts), "expected element to be hidden");
   }
-  async toBeAttached() {
-    this._ok((await this._v.count()) > 0, "expected element to be attached");
+  async toBeAttached(opts) {
+    this._ok(
+      await this._retry(async () => (await this._v.count()) > 0, opts),
+      "expected element to be attached",
+    );
   }
-  async toBeChecked() {
-    this._ok((await this._snap()).checked, "expected element to be checked");
+  async toBeChecked(opts) {
+    this._ok(await this._retry(() => this._snap().checked, opts), "expected element to be checked");
   }
-  async toBeEnabled() {
-    this._ok((await this._snap()).enabled, "expected element to be enabled");
+  async toBeEnabled(opts) {
+    this._ok(await this._retry(() => this._snap().enabled, opts), "expected element to be enabled");
   }
-  async toBeDisabled() {
-    this._ok(!(await this._snap()).enabled, "expected element to be disabled");
+  async toBeDisabled(opts) {
+    this._ok(
+      await this._retry(() => this._snap().enabled === false, opts),
+      "expected element to be disabled",
+    );
   }
-  async toBeEditable() {
-    this._ok((await this._snap()).editable, "expected element to be editable");
+  async toBeEditable(opts) {
+    this._ok(
+      await this._retry(() => this._snap().editable, opts),
+      "expected element to be editable",
+    );
   }
-  async toBeEmpty() {
-    this._ok((await this._snap()).empty, "expected element to be empty");
+  async toBeEmpty(opts) {
+    this._ok(await this._retry(() => this._snap().empty, opts), "expected element to be empty");
   }
   async toBeFocused() {
     this._ok(false === this._neg ? false : true, "focus state unavailable on a static DOM");
   }
-  async toBeInViewport() {
-    this._ok((await this._snap()).visible, "expected element to be in viewport");
+  async toBeInViewport(opts) {
+    this._ok(
+      await this._retry(() => this._snap().visible, opts),
+      "expected element to be in viewport",
+    );
   }
-  async toHaveCount(n) {
-    const c = await this._v.count();
-    this._ok(c === n, `expected count ${n}, got ${c}`);
+  async toHaveCount(n, opts) {
+    const pass = await this._retry(async () => (await this._v.count()) === n, opts);
+    this._ok(pass, `expected count ${n}, got ${await this._v.count()}`);
   }
-  async toHaveText(s) {
-    const t = normWs((await this._snap()).text ?? "");
-    const pass = s instanceof RegExp ? s.test(t) : t === normWs(s);
-    this._ok(pass, `expected text ${s}, got "${t}"`);
+  async toHaveText(s, opts) {
+    const test = () => {
+      const t = normWs(this._snap().text ?? "");
+      return s instanceof RegExp ? s.test(t) : t === normWs(s);
+    };
+    this._ok(
+      await this._retry(test, opts),
+      `expected text ${s}, got "${normWs(this._snap().text ?? "")}"`,
+    );
   }
-  async toContainText(s) {
-    const t = normWs((await this._snap()).text ?? "");
-    const pass = s instanceof RegExp ? s.test(t) : t.includes(normWs(s));
-    this._ok(pass, `expected text to contain "${s}", got "${t}"`);
+  async toContainText(s, opts) {
+    const test = () => {
+      const t = normWs(this._snap().text ?? "");
+      return s instanceof RegExp ? s.test(t) : t.includes(normWs(s));
+    };
+    this._ok(
+      await this._retry(test, opts),
+      `expected text to contain "${s}", got "${normWs(this._snap().text ?? "")}"`,
+    );
   }
-  async toHaveValue(value) {
-    const got = (await this._snap()).value ?? "";
-    this._ok(matchText(value, got), `expected value ${value}, got "${got}"`);
+  async toHaveValue(value, opts) {
+    const pass = await this._retry(() => matchText(value, this._snap().value ?? ""), opts);
+    this._ok(pass, `expected value ${value}, got "${this._snap().value ?? ""}"`);
   }
   async toHaveValues(values) {
     const got = await this._v.selectedValues();
@@ -1363,11 +1534,15 @@ class LocatorExpect extends BaseExpect {
     const got = (await this._snap()).description;
     this._ok(matchText(d, got), `expected accessible description ${d}, got "${got}"`);
   }
-  async toHaveAttribute(name, value) {
-    const got = await this._v.getAttribute(name);
+  async toHaveAttribute(name, value, opts) {
+    const test = async () => {
+      const got = await this._v.getAttribute(name);
+      if (value === undefined) return got !== null;
+      return value instanceof RegExp ? value.test(got ?? "") : got === value;
+    };
     this._ok(
-      value === undefined ? got !== null : got === value,
-      `expected attribute ${name}=${value}, got ${got}`,
+      await this._retry(test, opts),
+      `expected attribute ${name}=${value}, got ${await this._v.getAttribute(name)}`,
     );
   }
   async toHaveClass(cls) {
@@ -1402,9 +1577,9 @@ class PageExpect extends BaseExpect {
   get not() {
     return new PageExpect(this._v, !this._neg);
   }
-  async toHaveURL(url) {
-    const u = this._v.url();
-    this._ok(matchText(url, u), `expected url ${url}, got "${u}"`);
+  async toHaveURL(url, opts) {
+    const pass = await this._retry(() => matchText(url, this._v.url()), opts);
+    this._ok(pass, `expected url ${url}, got "${this._v.url()}"`);
   }
   async toHaveTitle(t) {
     const got = await this._v.title();
