@@ -145,15 +145,34 @@ data-fetch / redirect (all ruled out). The throw is in `DataTable`'s render-phas
 hooks (it pulls `useMediaQuery`, `useTableStickyPositions` (DOM measurement),
 fullscreen APIs, analytics) — one needs a host API our env lacks or mis-stubs.
 
-**Last mile (small):** name the exact throwing line. Either (a) finish dev-build
-support — a remaining external dev chunk still fails classic eval with
-`Unexpected token '.'` (a #2 follow-up); fixing it lets dev React log the error +
-component stack directly — or (b) add a `try/catch` around `DataTableCore`'s hook
-calls in the vendored grid source and log the caught error.
+**Last-mile attempt (deep instrumentation) — refined, partly inconclusive:**
+- **Dev throw is real but the error is unreadable headlessly.** Dev renders the
+  root-boundary "Application error", but React **swallows the caught error** in our
+  env (no DevTools overlay; `console.error` is re-patched by Next dev and even a
+  `defineProperty`-locked hook captured nothing), and dev sessions open
+  **best-effort** (dev React loops past budget → terminated isolate → `liveEval`
+  returns `""` for everything, even `1+1`). So globals/console can't be read off a
+  dev session.
+- **On PROD the grid does NOT throw.** Wrapping `DataTableCore`'s body in
+  try/catch (catches its hooks incl `useTableStickyPositions`) → `data-griderr`
+  empty. Adding a real **error boundary around the grid's children** → still
+  empty. So neither the grid's hooks nor its descendants throw on the prod build,
+  yet `BODYLEN=0`. **The prod-empty and the dev-"Application error" look like
+  different failure modes** — the earlier "grid subtree throws" was over-attributed
+  to the grid.
+- The `Unexpected token '.'` dev chunk turned out to be **CSS inside a `<script>`**
+  (Next devtools styles). Running it + logging a SyntaxError + continuing is
+  exactly what a real browser does — **browser-accurate, not a bug**. So (a) needs
+  no further fix; dev-build support is complete via the merged #2.
 
-**Status:** banked as a known limitation — the full login→dashboard path + many
-surfaces work; segments that mount this `DataTable` grid (people, and similar)
-throw to the root boundary and render empty.
+**Status: banked as a known limitation.** Confirmed it's NOT null-return /
+suspense / missing-module / data-fetch / redirect / grid-throw (all ruled out by
+direct probes). The remaining unknown — why prod commits empty with no catchable
+throw in the people subtree — is blocked by headless React error-swallowing + dev
+best-effort eval. **To finish:** one diagnostic run in a real browser (read the
+actual console error), or inject `onCaughtError`/`onUncaughtError` into the App
+Router's `hydrateRoot` to capture the error our way. The full login→dashboard path
++ many surfaces work; segments mounting the `DataTable` grid render empty.
 
 ### Probing gotchas (reusable)
 
