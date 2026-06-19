@@ -854,9 +854,11 @@ class Page {
   async evaluate(script, arg) {
     if (this._live) {
       const body = evalSource(script, arg);
+      // Await a returned Promise (e.g. navigator.clipboard.readText()) so evaluate
+      // resolves the value, not "[object Promise]". The drain runs the microtask.
       const out = await native.liveEval(
         this._session,
-        `globalThis.__RESULT = (() => { return ${body}; })();`,
+        `(async () => { return ${body}; })().then((r) => { globalThis.__RESULT = r === undefined ? "" : r; }, () => { globalThis.__RESULT = ""; });`,
       );
       await this._refreshFromSession();
       return out;
