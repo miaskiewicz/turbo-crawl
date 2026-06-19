@@ -723,6 +723,14 @@ class Page {
     if (r === "NO_MATCH") throw new Error("turbo-surf: locator matched no elements");
     return r;
   }
+  // Run arbitrary JS in the live isolate, then refresh the Page snapshot. Backs the
+  // keyboard (key-event dispatch) and other live-only side effects.
+  async _sessionEval(script) {
+    if (this._session == null) return undefined;
+    const r = await native.liveEval(this._session, script);
+    await this._refreshFromSession();
+    return r;
+  }
   get _cookies() {
     return this._context._cookies;
   }
@@ -1185,7 +1193,7 @@ class Page {
     return mouseStub;
   }
   get keyboard() {
-    return keyboardStub;
+    return makeKeyboard(this);
   }
   get touchscreen() {
     return touchStub;
@@ -1200,13 +1208,33 @@ const mouseStub = {
   up: UNSUPPORTED("mouse.up", INPUT),
   wheel: UNSUPPORTED("mouse.wheel", INPUT),
 };
-const keyboardStub = {
-  press: UNSUPPORTED("keyboard.press", INPUT),
-  down: UNSUPPORTED("keyboard.down", INPUT),
-  up: UNSUPPORTED("keyboard.up", INPUT),
-  type: UNSUPPORTED("keyboard.type", INPUT),
-  insertText: UNSUPPORTED("keyboard.insertText", INPUT),
-};
+// Keyboard: no hardware, but key events are real JS. Dispatch keydown/keyup (with a
+// keypress for printable keys) on the focused element (or document) in the live app —
+// covers Escape-to-close-popover, Enter-to-submit, etc. No-op without a live session.
+function makeKeyboard(page) {
+  const dispatch = async (key) => {
+    if (!page._live) return;
+    const k = JSON.stringify(String(key));
+    await page._sessionEval(`(() => {
+      const key = ${k};
+      const el = document.activeElement || document.body || document.documentElement;
+      if (!el) return;
+      const opt = { bubbles: true, cancelable: true, key, code: key, view: globalThis };
+      el.dispatchEvent(new KeyboardEvent("keydown", opt));
+      if (key.length === 1) el.dispatchEvent(new KeyboardEvent("keypress", opt));
+      el.dispatchEvent(new KeyboardEvent("keyup", opt));
+    })();`);
+  };
+  return {
+    press: (key) => dispatch(key),
+    down: (key) => dispatch(key),
+    up: async () => {},
+    type: async (text) => {
+      for (const ch of String(text)) await dispatch(ch);
+    },
+    insertText: async (text) => dispatch(String(text)),
+  };
+}
 const touchStub = { tap: UNSUPPORTED("touchscreen.tap", INPUT) };
 
 function makeResponse(r) {

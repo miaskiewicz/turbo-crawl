@@ -181,6 +181,9 @@ globalThis.self = globalThis;
 globalThis.navigator = {
   userAgent: (Deno.core.ops.op_user_agent && Deno.core.ops.op_user_agent()) || "turbo-surf",
   language: "en-US", languages: ["en-US"], onLine: true,
+  // In-memory clipboard: an app that writeText()s a value (e.g. a copy-link button)
+  // and reads it back round-trips, with no OS clipboard.
+  clipboard: (() => { let v = ""; return { writeText: async (t) => { v = String(t == null ? "" : t); }, readText: async () => v }; })(),
 };
 globalThis.location = globalThis.location || { href: "about:blank", protocol: "about:", host: "", pathname: "blank" };
 globalThis.localStorage = (() => {
