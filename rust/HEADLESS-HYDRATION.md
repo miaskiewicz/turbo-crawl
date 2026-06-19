@@ -190,31 +190,35 @@ actual Playwright/Chromium against the SAME servers showed the dominant cause wa
    `auth/me` returns the **complete** user + organizations payload (len 2040),
    identical to Chromium.
 
-4. **Residual turbo-surf gap (exhaustively isolated).** With everything at parity,
-   Chromium renders `/people/active` (459 DOM tags) but turbo-surf commits a bare
-   empty `<div>` (2 tags). Ruled out by direct probes, every one: not auth, not
-   data (stubbing `/employments` to a clean 200 didn't help — and Chromium renders
-   even WITH its 500), not CSP, not maps, not a loop (`onCommitFiberRoot` fires a
-   finite 12×), not a throw / error (locked-console + Error-patch + grid error
-   boundary all caught nothing), not suspense. **Every component renders** — app
-   markers + grid markers fire all the way down (`DataTableCore`/`Header`/`Body`
-   all execute) — yet React's commit materializes **no host DOM**. React's DOM
-   mutations go through the **native rtdom binding** (JS-level `appendChild`
-   overrides see 0 calls on both routes), so this is a **native rtdom↔React
-   commit-binding gap** specific to this component tree, not anything observable
-   from page JS.
+4. **Residual turbo-surf gap — FIXED (commit `2a92f36`).** With env at parity,
+   turbo-surf still committed an empty `<div>` because the page **never quiesced**
+   within the render budget — two timer/host bugs let third-party scripts spin:
+   - **No virtual clock in `__runTimers`.** `delay` was only a sort key, so a
+     self-rescheduling `setTimeout` poll (analytics SDKs do this) fired until the
+     raw count cap — spinning the whole budget so React never committed. Binding
+     instrumentation (file-logged from Rust) showed `/people` doing 1150 creates /
+     1319 appends and the hydrate running the FULL 30s budget with the body still
+     empty. Fix: a virtual clock — `due = __now + delay`; the drain advances `__now`
+     to each fired timer's due and stops delayed timers past a 15s virtual ceiling,
+     so polls fire a browser-like ~tens of times and the page quiesces.
+   - **`<iframe>` had no `contentWindow`.** PostHog reads a builtin's native
+     prototype off a throwaway iframe's `contentWindow`; with none it bailed
+     without caching and recreated an iframe on EVERY lookup — **776** iframe
+     create/remove churn that also starved the budget. Fix: iframes get a
+     lightweight stub whose `contentWindow` IS our realm (lookup resolves + caches
+     → loop stops, 776→4) and which never enters the rtdom tree.
 
-   **Next step (Rust-side):** instrument `turbo-surf-render`'s rtdom binding /
-   vendored `browser_env` DOM-mutation ops (createElement / appendChild /
-   insertBefore / setAttribute) during a `/people/active` commit and diff against
-   `/home` (which commits 459 tags fine) — find the op/element that silently no-ops
-   or fails in the commit path. Or diff React's committed fiber `current` vs
-   `alternate` trees (the commit may be swapping in an empty tree).
+   Result: `/people/active` 2 tags → **485 tags in ~2.2s**; `/home` (459) and
+   company-settings (557) also drop to ~1.4–2.2s (were near/over budget). Verified
+   with real Chromium as oracle. Tests: `virtual_clock_bounds_self_rescheduling_timers`,
+   `iframe_content_window_exposes_builtins`.
 
-**Net:** the headline blocker (stale backend env) is identified + partially fixed —
-`/people/active` now renders in a real browser. turbo-surf is reduced to ONE
-precise residual: a native commit-binding gap, with a concrete Rust-side repro
-path. The full login→dashboard flow + many surfaces work.
+**Net: cause #2 fully resolved.** The dominant blocker was a stale local backend
+(March code vs June DB → `auth/me` 500); recreating the dropped `entity_invitations`
+table makes auth 200. The turbo-surf side was two budget-starving spin loops
+(timer virtual clock + iframe contentWindow), now fixed — authed SPA pages render
+headlessly. (The local backend still needs code↔DB sync for `/employments` etc.;
+that's an env fix, not turbo-surf.)
 
 ### Probing gotchas (reusable)
 
