@@ -22,8 +22,10 @@
       "**/dist/**",
       "**/node_modules/**",
       "**/coverage/**",
+      "**/target/**",
       "test/fixtures/**",
-      "**/storage/**"
+      "**/storage/**",
+      "**/browser_env.js"
     ]
   }
 }

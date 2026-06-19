@@ -1,0 +1,28 @@
+[package]
+name = "turbo-surf-mcp"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "turbo-surf MCP server — native Rust binary, stdio JSON-RPC (no Node)"
+
+[lib]
+name = "turbo_surf_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "turbo-surf-mcp"
+path = "src/main.rs"
+
+[dependencies]
+turbo-surf-core = { path = "../turbo-surf-core", version = "0.2.0" }
+turbo-surf-view = { path = "../turbo-surf-view", version = "0.2.0" }
+turbo-surf-page = { path = "../turbo-surf-page", version = "0.2.0" }
+turbo-surf-render = { path = "../turbo-surf-render", version = "0.2.0" }
+turbo-dom-parser = { package = "turbo-dom", version = "0.3.5" }
+async-trait = "0.1"
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt", "io-std", "io-util", "net", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "io-util"] }

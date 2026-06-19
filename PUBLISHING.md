@@ -1,82 +1,58 @@
-# Publishing `@miaskiewicz/turbo-crawl`
+# Publishing turbo-surf
 
-turbo-crawl is **pure ESM JavaScript** — there is nothing to compile, no native
-binaries, and no per-platform build matrix. Publishing is therefore a single
-gate-then-publish step.
+turbo-surf ships from **one `v*` git tag**, which fires two GitHub Actions
+workflows. The engine is a standalone Rust binary; the npm package is a thin
+launcher that spawns it (no napi, no Node hosting Rust — same model as turbo-test).
 
-The package ships only:
+| Workflow | Publishes | Where | Auth secret |
+|---|---|---|---|
+| `release.yml` | `turbo-surf` — builds the `turbo-surf-mcp` binary for every platform, drops them in `bin/`, publishes the launcher (`cli.js`/`index.js` + `bin/`) | npm | `NPM_TOKEN` |
+| `rust-crates-publish.yml` | the Rust crates, in dep order: `core → view → page → render → mcp` | crates.io | `CARGO_REGISTRY_TOKEN` |
 
-- `src/**/*.mjs`, `mcp/**/*.mjs`, `playwright/**/*.mjs`
-- `index.d.ts`, `LICENSE`, `README.md`, `SPEC.md`
+Both trigger on `push: tags: ['v*']`. (The `turbo-surf-napi` cdylib + `turbo-surf-transform`
+crate are not published — napi is dev/harness-only now.)
 
-Everything else (`test/`, `harness/`, `bench/`, `docs/`, `scripts/`,
-`node_modules/`, lockfile) is excluded by the `files` allowlist in
-`package.json`. Verify with `npm pack --dry-run` before any release.
+## The one rule: every version string must match the tag
 
-## Automated release (recommended)
+No single source of truth, so the bump must be applied everywhere before tagging,
+or a workflow ships a mismatched version. Bump to the SAME `X.Y.Z`:
 
-Releases are cut by the `Release` GitHub Actions workflow
-(`.github/workflows/release.yml`), which fires on any `v*` tag.
+- `package.json` → `"version"`
+- `rust/Cargo.toml` → `[workspace.package] version` **and** every crate's path-dep
+  `version = "X.Y.Z"` (core/view/page/render/mcp/napi Cargo.toml)
+- `rust/crates/turbo-surf-core/src/lib.rs` + `turbo-surf-mcp/src/lib.rs` → `VERSION`
+- `rust/crates/turbo-surf-napi/src/lib.rs` → `version()` and its `package.json`
+- `README.md` status line
 
-1. Bump the version in `package.json` (e.g. `0.1.0` → `0.1.1`). Keep it in sync
-   with the tag you are about to push.
+Sanity check (should print nothing): `grep -rn "<old-version>" package.json rust/
+README.md | grep -v /target/`.
 
-   ```sh
-   npm version patch   # or: minor | major — also creates the matching git tag
-   ```
+## Cut a release
 
-   (`npm version` updates `package.json`, commits, and creates the `vX.Y.Z`
-   tag in one step. If you bump by hand, create the tag yourself.)
+1. Bump all the version strings above to `X.Y.Z` (keep them identical).
+2. Green gate locally: `cd rust && cargo test --workspace && cargo clippy --workspace
+   --all-targets && cargo fmt --check`; from the root `npm run lint && npm run
+   format:check` (the launcher JS).
+3. Add the new version's entry to `CHANGELOG.md`.
+4. Commit (`chore(release): vX.Y.Z`), tag (`git tag -a vX.Y.Z -m vX.Y.Z`), push the
+   commit **and** the tag (`git push origin <branch> && git push origin vX.Y.Z`).
+5. The workflows build + publish. Verify after CI:
+   - `npm view turbo-surf version` (and that `bin/` shipped:
+     `npm pack turbo-surf --dry-run`)
+   - the crate pages on crates.io (`turbo-surf-core`, …)
 
-2. Push the commit and the tag:
-
-   ```sh
-   git push origin main
-   git push origin vX.Y.Z
-   ```
-
-3. The `Release` workflow then:
-   - checks out the tagged commit,
-   - sets up Node 22 with the npm registry,
-   - runs `npm ci`,
-   - runs the full gate (`npm run check` — lint + format + cc + tsgo + test),
-   - publishes with `npm publish --access public --provenance`.
-
-   Authentication uses the **`NPM_TOKEN`** repository secret (already
-   configured) via `NODE_AUTH_TOKEN`. Provenance is signed using the workflow's
-   OIDC token (`id-token: write`).
-
-You can also trigger the workflow manually from the Actions tab
-(`workflow_dispatch`) — useful for re-running a failed publish on an existing
-tag.
-
-## Manual fallback
-
-If CI is unavailable, publish locally:
-
-```sh
-npm run check                      # gate must be green
-npm publish --access public        # prepublishOnly re-runs `npm run check`
-```
-
-You must be authenticated to npm (`npm whoami`) with publish rights to the
-`@miaskiewicz` scope. `prepublishOnly` runs `npm run check` automatically, so a
-broken tree cannot be published.
+Publishing is **outward-facing + irreversible** (npm + crates.io versions can't be
+reused) — only cut a tag when a release is intended.
 
 ## Notes
 
-- `publishConfig.access` is `public`, so the scoped package publishes publicly
-  without extra flags.
-- The heavy browser packages used only by the competitive harness
-  (`playwright`, `patchright`, `playwright-extra`, `rebrowser-playwright`,
-  `puppeteer-extra-plugin-stealth`) are **not** committed dependencies. Install
-  them ad-hoc if you want to run `npm run harness`:
-
-  ```sh
-  npm i -D playwright patchright playwright-extra rebrowser-playwright puppeteer-extra-plugin-stealth
-  ```
-
-- `esbuild` is a regular dependency (pure-Go prebuilt; JS-render module bundling).
-  `isolated-vm` is an `optionalDependency` (native; only the `secure` render
-  backend needs it). Neither is required for the core fetch/parse/extract/crawl
-  flow; `mode:"secure"` throws an actionable error if `isolated-vm` is absent.
+- The launcher's `files` allowlist ships `bin/` (the per-platform binaries CI
+  builds), `cli.js`, `index.js`, `LICENSE`, `README.md`, `CHANGELOG.md`. `rust/`,
+  `harness/`, `docs/` are excluded. Verify with `npm pack --dry-run`.
+- `cli.js`/`index.js` resolve `bin/turbo-surf-mcp-<platform>-<arch>` at runtime
+  (musl-detected on Linux), with a dev fallback to a local
+  `rust/target/release/turbo-surf-mcp` build.
+- crates publish in dependency order so each dependent resolves its just-published
+  dep; path deps carry an explicit `version` so crates.io accepts them.
+- Browser/crawler packages used only by the harness (`playwright`, `crawlee`, …) are
+  not committed deps — install ad-hoc to run the benchmarks.

@@ -5,20 +5,21 @@
 //   items — total matches of target.itemSelector across those pages (correctness)
 //   ms    — wall time for the crawl
 //
-// turbo-crawl entries always run (only the repo's existing deps + network). Every
+// turbo-surf entries always run (only the repo's existing deps + network). Every
 // competitor is lazy-loaded behind available(): if its package isn't installed,
 // available() returns false and run.mjs prints "skipped (not installed)".
 //
 // Sets:
-//   nojs — compared against turbo-crawl (no-js): fetch+parse HTML, no page JS.
-//   js   — compared against turbo-crawl (js-fast) AND (js-secure): execute page JS
-//          in a real engine (browser, or turbo-crawl's render tier).
+//   nojs — compared against turbo-surf (no-js): fetch+parse HTML, no page JS.
+//   js   — compared against turbo-surf (js-fast) AND (js-secure): execute page JS
+//          in a real engine (browser, or turbo-surf's render tier).
 //
 // FAIRNESS: every engine uses the SAME target.itemSelector to count items, the
 // SAME page cap, the SAME tiny politeness delay, stays same-host, and is warmed
 // once by run.mjs before the timed iterations.
 
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -117,49 +118,94 @@ function cheerioLinks($, baseUrl, host, allow) {
 
 const sleep = (n) => new Promise((r) => setTimeout(r, n));
 
-// ── turbo-crawl ────────────────────────────────────────────────────────────
-// One implementation for all three turbo-crawl flavors; `render` picks the JS
-// tier (null = no-js Lane A). Uses the real Crawler with a schema so item
-// counting goes through turbo-crawl's own extraction.
-async function turboCrawl(target, opts, render) {
-  const { Crawler, jsRenderer } = await import("../../src/index.mjs");
-  const schema = {
-    items: { selector: target.itemSelector, attr: target.itemAttr, list: true },
-  };
-  let renderer = null;
-  const crawlerOpts = {
-    start: target.start,
-    maxPages: opts.pages,
-    maxDepth: Number.POSITIVE_INFINITY,
-    concurrency: CONCURRENCY,
-    perHostConcurrency: CONCURRENCY,
-    politenessMs: POLITENESS_MS,
-    sameHostOnly: true,
-    schema,
-  };
-  if (target.allow) crawlerOpts.allow = target.allow;
-  if (render) {
-    renderer = jsRenderer({ mode: render });
-    // Execute page JS for every fetch so client-rendered content is present
-    // before extraction (the no-js gate would otherwise skip a page that has a
-    // server-rendered shell). followRequests:false keeps us off XHR side-quests.
-    crawlerOpts.fetchHtml = renderer.fetchHtml;
-    crawlerOpts.followRequests = false;
+// ── turbo-surf: the whole crawl runs in Rust via the napi addon ─────────────
+// `native.crawl` does the BFS, fetch (pooled client), parse, same-host gate, and
+// per-page item count (itemSelector) entirely in Rust — only the JSON result
+// crosses to Node. Same page cap / concurrency / politeness as every other engine.
+let turboRustNative;
+function loadTurboRustNative() {
+  if (turboRustNative === undefined) {
+    try {
+      const require = createRequire(import.meta.url);
+      turboRustNative = require("../../rust/crates/turbo-surf-napi/index.js");
+    } catch {
+      turboRustNative = null;
+    }
   }
+  return turboRustNative;
+}
 
+async function turboRustCrawl(target, opts) {
+  const native = loadTurboRustNative();
+  const t0 = process.hrtime.bigint();
+  const recs = JSON.parse(
+    await native.crawl(
+      JSON.stringify({
+        start: [target.start],
+        maxPages: opts.pages,
+        maxDepth: 1_000_000,
+        concurrency: CONCURRENCY,
+        perHostConcurrency: CONCURRENCY,
+        politenessMs: POLITENESS_MS,
+        sameHost: true,
+        itemSelector: target.itemSelector,
+      }),
+    ),
+  );
   let pages = 0;
   let items = 0;
-  const t0 = process.hrtime.bigint();
-  try {
-    for await (const rec of new Crawler(crawlerOpts)) {
+  for (const r of recs) {
+    if (!r.error) {
       pages++;
-      const got = rec.extracted?.items;
-      if (Array.isArray(got)) items += got.length;
+      items += r.items || 0;
     }
-  } finally {
-    await renderer?.close();
   }
   return { pages, items, ms: ms(t0) };
+}
+
+// ── turbo-rust (js): a JS BFS over the napi render tier (no browser) ──────────
+// Each page is fetched + its own scripts run in a true V8 isolate over the native
+// rtdom DOM (the same path that renders quotes.toscrape.com/js); items are counted
+// post-render, links enqueued same-host within the target's allow filter.
+async function turboRustJsCrawl(target, opts) {
+  const { loadTurboRust } = await import("../competitive/rust-engine.mjs");
+  const browser = await (await loadTurboRust("js")).launch();
+  const page = await browser.newPage();
+  const seen = new Set([target.start]);
+  const queue = [target.start];
+  let pages = 0;
+  let items = 0;
+  const countExpr = `document.querySelectorAll(${JSON.stringify(target.itemSelector)}).length`;
+  const hrefExpr = `Array.prototype.map.call(document.querySelectorAll('a[href]'), (a) => a.getAttribute('href'))`;
+  const t0 = process.hrtime.bigint();
+  while (queue.length && pages < opts.pages) {
+    const url = queue.shift();
+    await page.goto(url); // fetch + run the page's own JS, then read the hydrated DOM
+    pages++;
+    items += (await page.evaluate(countExpr)) || 0;
+    for (const href of (await page.evaluate(hrefExpr)) || []) {
+      let abs;
+      try {
+        abs = new URL(href, url).href;
+      } catch {
+        continue;
+      }
+      if (sameHost(abs, target.host) && (!target.allow || target.allow(abs)) && !seen.has(abs)) {
+        seen.add(abs);
+        queue.push(abs);
+      }
+    }
+    await sleep(POLITENESS_MS);
+  }
+  return { pages, items, ms: ms(t0) };
+}
+
+function sameHost(url, host) {
+  try {
+    return new URL(url).host === host;
+  } catch {
+    return false;
+  }
 }
 
 // ── got + cheerio (hand-rolled BFS) ──────────────────────────────────────────
@@ -440,11 +486,11 @@ async function puppeteerClusterCrawl(target, opts) {
 export const CRAWLERS = [
   // ── Set A: non-JS ──────────────────────────────────────────────────────────
   {
-    name: "turbo-crawl (no-js)",
+    name: "turbo-surf (no-js)",
     set: "nojs",
     turbo: true,
-    available: () => Promise.resolve(true),
-    crawl: (target, opts) => turboCrawl(target, opts, null),
+    available: () => Promise.resolve(loadTurboRustNative() != null),
+    crawl: turboRustCrawl,
   },
   {
     name: "spider-rs (Rust)",
@@ -492,19 +538,11 @@ export const CRAWLERS = [
 
   // ── Set B: JS-executing ─────────────────────────────────────────────────────
   {
-    name: "turbo-crawl (js-fast)",
+    name: "turbo-surf (js)",
     set: "js",
     turbo: true,
-    available: () => canImport("esbuild"),
-    crawl: (target, opts) => turboCrawl(target, opts, "fast"),
-  },
-  {
-    name: "turbo-crawl (js-secure)",
-    set: "js",
-    turbo: true,
-    // secure tier needs isolated-vm; skip cleanly if absent.
-    available: () => canImport("isolated-vm"),
-    crawl: (target, opts) => turboCrawl(target, opts, "secure"),
+    available: () => Promise.resolve(loadTurboRustNative() != null),
+    crawl: turboRustJsCrawl,
   },
   {
     name: "crawlee PlaywrightCrawler",

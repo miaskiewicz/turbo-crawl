@@ -1,157 +1,98 @@
-# turbo-crawl
+# turbo-surf
 
-> Native-speed, **browserless** web crawler **and Playwright-compatible script
-> runner** for AI agents — built on
-> [turbo-dom](https://github.com/miaskiewicz/turbo-dom). Fetch + parse + extract
-> + drive pages with no headless browser; 100×+ faster on server-rendered pages.
+> Native-speed, **browserless** web crawler + **MCP server** for AI agents — built
+> on [turbo-dom](https://github.com/miaskiewicz/turbo-dom). Fetch + parse + extract
+> + run page JS with no headless browser; 100×+ faster on server-rendered pages.
 
-turbo-crawl is two things in one engine, on its own native DOM:
+turbo-surf is a single native (Rust) engine — no Chromium, no pixels, no layout:
 
-- **A crawler** — point it at a domain and stream page records: indexed
-  interactive elements, a link/form graph, an accessibility tree, markdown and
-  plain-text views, rendered-HTML capture, CSS/XPath node queries, and
-  schema-driven structured extraction. Plus a 60-tool **MCP** interface agents
-  drive directly (incl. `crawl`, `batch`, `render`/`set_mode`, `eval_js`/
-  `inject_js`, cookies/headers, `snapshot`).
-- **A drop-in Playwright replacement** — the same `chromium.launch()` →
-  `page.goto()` → locators → actions → `expect` API, so existing Playwright
-  scripts and tests run **unchanged** — but against turbo-dom instead of a
-  browser. No Chromium, no pixels, no layout. Now with **network events**
-  (`page.on('response')`, `waitForResponse`), **request routing/mocking**
-  (`page.route`), and **persistent context state** (cookies + `localStorage` +
-  `storageState` across navigations).
+- **A crawler** — point it at a domain and stream page records: indexed interactive
+  elements, a link/form graph, an accessibility tree, markdown and plain-text views,
+  rendered-HTML capture, CSS/XPath node queries, and schema-driven structured
+  extraction.
+- **An agent tool** — a 60-tool **MCP** server agents drive directly over stdio
+  (`crawl`, `batch`, navigate, click/fill/submit, query, extract, accessibility
+  tree, markdown, `render`/`eval_js`/`inject_js`, cookies/headers, `snapshot`).
 
-For pages that need JavaScript it runs their scripts on turbo-dom (no browser),
-either by mining server-embedded hydration state or by executing page JS inside
-a **true V8 isolate** and re-rendering the DOM (see below).
+For pages that need JavaScript it runs their scripts — either by mining
+server-embedded hydration state or by executing page JS inside a **true V8 isolate**
+(no browser) and re-rendering the DOM. Its page API is Playwright-shaped: the
+benchmark suite drives the engine with unmodified Playwright scripts.
 
 ## What makes it different
 
 Most tools in this space pick one lane: a crawler **or** a browser-automation
 library, and they get their DOM from a real browser (Playwright/Puppeteer/
 Selenium) or an in-process fake DOM with no security isolation (jsdom,
-happy-dom). turbo-crawl is unusual on four axes at once:
+happy-dom). turbo-surf is unusual on four axes at once:
 
 1. **AI-agent-ready out of the box.** It ships a full **MCP server** (60 tools:
    navigate, click/fill/submit, query, extract, accessibility tree, markdown,
    `crawl` a whole site, `batch` a URL list, `render`/`set_mode` to run page JS,
    `eval_js`/`inject_js` against the live render heap with a DOM-history trail,
    cookies/headers, `snapshot`, …) so an agent drives real pages over stdio with
-   **no browser and no glue code** — `npx turbo-crawl-mcp`. Most crawlers are
+   **no browser and no glue code** — `npx turbo-surf-mcp`. Most crawlers are
    libraries you wrap yourself; this one is an agent tool on day one.
-2. **Crawler _and_ Playwright-API script runner on one native DOM.** The same
-   engine bulk-crawls a domain and runs Playwright-style scripts/tests — no
-   browser anywhere in the stack.
+2. **Crawler + agent surface on one native engine.** The same engine bulk-crawls a
+   domain and serves the MCP tools — no browser anywhere in the stack. Its page API
+   is Playwright-shaped (the benchmark harness runs unmodified Playwright routines
+   on it).
 3. **Its own DOM, not a browser's.** turbo-dom is a native + WASM HTML parser
    with a lazy copy-on-write DOM — native-speed parse, no pixels/layout/IPC.
-4. **A V8 isolate to run page JS + re-render.** The `secure` JS tier executes
-   page (or your own) JavaScript inside a real V8 isolate (`isolated-vm`) —
-   capped heap, no ambient host access — against a WASM DOM, then re-renders.
-   Most JS-capable crawlers instead drive a full headless browser, or run page
-   scripts in-process with a fake DOM that offers **no real security isolation**
-   (Node's `vm` is [explicitly not a security
+4. **A V8 isolate to run page JS + re-render.** Page (or your own) JavaScript runs
+   inside a real V8 isolate (a `deno_core` runtime — host heap unreachable from the
+   guest, with a runaway-execution budget) against the native rtdom DOM, then
+   re-renders. Most JS-capable crawlers instead drive a full headless browser, or
+   run page scripts in-process with a fake DOM that offers **no real security
+   isolation** (Node's `vm` is [explicitly not a security
    boundary](https://nodejs.org/api/vm.html); cf. happy-dom
    [CVE-2025-61927](https://github.com/capricorn86/happy-dom/wiki/JavaScript-Evaluation-Warning)).
    Running hostile page JS in a true isolate against a lightweight DOM is rare.
 
-See [SPEC.md](./SPEC.md) for the design and [STATUS.md](./STATUS.md) for current
-capabilities.
+See [CHANGELOG.md](./CHANGELOG.md) for what shipped and
+[rust/README.md](./rust/README.md) for the engine internals.
 
-Status: **v0.1.10 — working** ([npm](https://www.npmjs.com/package/@miaskiewicz/turbo-crawl)).
-Page + interaction, hardened networking (cookies / `document.cookie` bridge /
-robots + crawl-delay / charset / size + redirect caps, HTTP/2 + DNS-cache
-dispatcher, 304 conditional-request cache), crawl orchestration (`Crawler` +
-one-shot `crawlSite`) and a `batch` URL-list runner, structured extraction,
-CSS+XPath query, a Playwright compat façade with **events / network / routing /
-persistent context state**, a no-Chromium JS-execution render tier with
-**re-enterable live-heap `evalJs`/`injectJs` + a DOM-history trail**, and a
-60-tool MCP server. ~100% line coverage (`npm run test:cov`); benchmarked against
-other crawlers (above); a Playwright differential test (SPEC §14) bounds
-representation drift when Chromium is installed (dev-only).
+Status: **v0.2.0 — working** ([npm](https://www.npmjs.com/package/turbo-surf)).
+A native Rust engine (7-crate workspace on the `turbo-dom` crate): hardened
+networking (cookies / `document.cookie` bridge / robots + crawl-delay / charset /
+size + redirect caps, HTTP/2 + a pooled client, 304 conditional cache), crawl
+orchestration (global + per-host concurrency, token-bucket politeness, backoff/retry,
+canonical dedupe, depth/page caps), structured extraction, CSS+XPath query, a
+no-Chromium JS render tier (a true V8 isolate over the native DOM) with re-enterable
+live-heap `eval_js`/`inject_js` + a DOM-history trail, and a 60-tool MCP server
+(native binary). Benchmarked against real browsers + other crawlers (below).
 
 ## Install
 
+The npm package is a thin launcher that spawns the native binary:
+
 ```sh
-npm install @miaskiewicz/turbo-crawl
+npm install -g turbo-surf   # provides the `turbo-surf-mcp` command
+# …or run without installing:
+npx -y turbo-surf-mcp
 ```
 
-Pure ESM, Node ≥ 20.
+Node ≥ 20 to launch; the engine is a prebuilt per-platform native binary (no Node
+runtime hosts it).
 
-## Drive a page (no browser)
+### What ships where
 
-```js
-import { Page } from "@miaskiewicz/turbo-crawl";
+turbo-surf publishes from **one `v*` git tag** to two registries (see
+[PUBLISHING.md](./PUBLISHING.md)):
 
-// configure the pseudo-browser's navigator + HTTP User-Agent
-const page = new Page({
-  userAgent: "MyBot/2.0",                       // → navigator.userAgent + User-Agent header
-  navigator: { platform: "Win32", language: "de-DE", languages: ["de-DE", "en"] },
-});
-page.setUserAgent("MyBot/3.0");                 // also changeable at runtime
-await page.goto("https://example.com");
+| Artifact | Registry | What it is | For |
+|---|---|---|---|
+| [`turbo-surf`](https://www.npmjs.com/package/turbo-surf) | **npm** | A thin launcher (`cli.js`/`index.js`) **+ prebuilt `turbo-surf-mcp` binaries** for each platform in `bin/` (darwin x64/arm64, linux x64/arm64-gnu, win x64). `npx` resolves the right one and spawns it. | Running the **MCP server** / CLI. No Rust toolchain, no Chromium, no Node hosting Rust. |
+| `turbo-surf-core`, `-view`, `-page`, `-render`, `-mcp` | **crates.io** | The Rust crates, in dependency order. | **Embedding** the engine in a Rust program. |
 
-page.interactiveElements(); // [{ i, tag, role, name, href, visible, jsHandler, ref:WeakRef }]
-page.links();               // absolute http(s) targets
-page.markdown();            // readable Markdown of the main content
-page.text();                // plain text, line-broken at block boundaries
-page.html();                // serialized DOM (rendered DOM when using jsRenderer)
-page.accessibilityTree();   // { role, name, value?, children }
-
-// no-JS form flow: fill → submit → follow a result
-const q = page.interactiveElements().find((e) => e.tag === "input");
-page.fill(q.i, "widgets");
-await page.submit();
-await page.click(page.interactiveElements().find((e) => e.tag === "a").i);
-
-// recover SPA data with NO browser: mine server-embedded hydration state
-page.hydrationState(); // { next, jsonLd, json, states } from __NEXT_DATA__,
-                       // JSON-LD, __APOLLO_STATE__/__INITIAL_STATE__, etc.
-
-// query nodes by CSS or XPath → { node, html, text }
-page.query(".product .price");                 // CSS
-page.query("//a[@href]/@href");                // XPath (subset) → attribute values
-page.query("//li[contains(text(),'sale')]", { first: true });
-
-// structured extraction
-const data = page.extract({
-  name: { selector: "h1" },
-  price: { selector: ".price", type: "number" },
-  tags: { selector: ".tag", list: true },
-});
-```
-
-## Crawl a site
-
-```js
-import { Crawler, crawlSite, batch } from "@miaskiewicz/turbo-crawl";
-
-// streaming: backpressure-aware async iterator, one record at a time
-for await (const rec of new Crawler({ start, maxPages: 500, concurrency: 8 })) {
-  // rec.url, rec.status, rec.view.interactiveElements, rec.extracted
-}
-
-// one-shot: collect a whole crawl into an array (agent-friendly options)
-const recs = await crawlSite({
-  url: start,
-  maxPages: 200,
-  sameHost: true,
-  allow: "/blog/",        // URL regex to keep
-  deny: "\\?utm",         // URL regex to skip
-  mode: "fast",           // "no-js" (default) | "fast" | "secure" — JS-gated pages render
-});
-
-// fan out over a known URL list with a chosen execution mode
-const out = await batch([url1, url2, url3], { mode: "secure", view: "markdown" });
-```
-
-`Crawler` is the engine (streaming); `crawlSite` is a one-shot collect over it;
-`batch` runs a fixed URL list. Concurrency + per-host politeness, backoff/retry,
-canonical-form dedupe, robots + crawl-delay, and depth/page caps are all built in.
+The `turbo-surf-napi` cdylib and `turbo-surf-transform` crate are **not**
+published — napi is for the dev harness + the Playwright shim only. The Playwright
+shim (`rust/playwright-shim/`) is a dev/in-repo tool, not an npm artifact.
 
 ## MCP server (agents)
 
 ```sh
-npx turbo-crawl-mcp          # stdio MCP server (60 tools), e.g.:
+npx turbo-surf-mcp          # stdio MCP server (60 tools), e.g.:
 # navigation:  goto, go_back, go_forward, reload, set_user_agent
 # content:     interactive_elements, accessibility_tree, aria_snapshot, markdown,
 #              text, html, links, requests, snapshot, query, get_by,
@@ -163,247 +104,167 @@ npx turbo-crawl-mcp          # stdio MCP server (60 tools), e.g.:
 #              is_empty, aria_role, accessible_name, accessible_description
 # bulk:        crawl, batch
 # render/JS:   render, set_mode, eval_js, inject_js, latest_dom, dom_history,
-#              evaluate, detect_js
+#              evaluate, detect_js, run_playwright
 # session:     get_cookies, set_cookie, set_extra_headers, robots_check
 # direct:      fetch_json, fetch_raw
 ```
 
-`render`/`set_mode` switch the Page to the `fast`/`secure` JS tier; then `eval_js`
-and `inject_js` run against the **live render heap** (page globals, handlers) and
-each mutation appends to a DOM-history trail readable via `latest_dom`/
-`dom_history`. (`eval_js`/`inject_js` on the no-JS path run in a `node:vm` over the
-parsed DOM behind a best-effort guard — **not** a security sandbox; use `mode:
-secure` for untrusted JS.)
+`render`/`set_mode` switch the Page into the JS render tier (a true V8 isolate over
+the native DOM); then `eval_js` and `inject_js` run against the **live render heap**
+(page globals, handlers) and each mutation appends to a DOM-history trail readable
+via `latest_dom`/`dom_history`.
 
-Or embed: `import { createServer } from "@miaskiewicz/turbo-crawl/mcp"`.
+`run_playwright` executes a **Playwright-style script** directly — `page` /
+`locator` / `getBy*` / `expect` (with `.not`) / `test()` blocks — over the engine,
+no browser. Args: `{ script, url?, testIdAttribute? }` (a `url` navigates first,
+honoring `set_mode` so an SPA hydrates). It returns `{ ok, ran, logs }` or
+`{ ok:false, error, logs }` — a failed assertion is a result, not a tool error:
 
-## Run Playwright scripts (no browser)
-
-Drop-in compatibility layer so existing Playwright scripts run on the no-JS
-engine — **nothing loads playwright or chromium**:
-
-```js
-import { chromium, expect } from "@miaskiewicz/turbo-crawl/playwright";
-
-const browser = await chromium.launch({ mode: "fast" });   // run page JS
-const ctx = await browser.newContext({ storageState });     // reuse auth
-const page = await ctx.newPage();
-
-page.on("console", (m) => console.log(m.type(), m.text()));
-page.route("**/analytics/**", (route) => route.abort());    // block/mock requests
-
-await page.goto("https://example.com");
-const [resp] = await Promise.all([                          // assert on the network
-  page.waitForResponse((r) => r.url().includes("/api") && r.request().method() === "PUT"),
-  page.getByRole("button", { name: "Save" }).click(),
-]);
-await expect(page.getByText("Saved")).toBeVisible();
-const state = await ctx.storageState();                     // cookies + localStorage
+```jsonc
+// tools/call run_playwright
+{ "url": "https://example.com", "testIdAttribute": "data-test-id",
+  "script": "await expect(page.locator('h1')).toHaveText('Example Domain');\nawait page.fill('#q','rust');\nawait expect(page.locator('#q')).toHaveValue('rust');" }
 ```
 
-Locators (`getByRole/Text/Label/Placeholder/TestId/AltText/Title` — all accept a
-**RegExp** name/text, `locator(css)`, `first/last/nth/filter/count`), actions
-(`click/fill/check/uncheck/selectOption/press/type`), accessors, history
-(`goBack/goForward/reload`), `evaluate`/`$eval`/`$$eval`, **events** (`on`/`once`/
-`off` for `request`/`response`/`console`/`pageerror`/…, `waitForResponse`/
-`waitForRequest`/`waitForEvent`), **routing** (`route`/`unroute` →
-`fulfill`/`abort`/`continue`), **init scripts + headers** (`addInitScript`,
-`setExtraHTTPHeaders`), and **persistent context state** (cookie jar +
-`localStorage`/`sessionStorage` across navigations, `addCookies`/`cookies`/
-`storageState`) all work — events/routes/storage require a JS mode (`launch({ mode:
-"fast" | "secure" })`); without one the façade stays Lane A and still emits
-navigation request/response events. Genuinely pixel-only APIs (`screenshot`,
-`pdf`, `hover`) throw a clear "no-browser engine" error.
+### Set it up in Claude Code (step by step)
 
-### `test` runner (`@playwright/test` drop-in, no browser)
+Never set up an MCP server before? This is the whole thing — three commands.
 
-The façade also ships a `test` — a `@playwright/test`-style runner with fixtures,
-executed on **`node:test`** over the turbo engine. Import `test`/`expect` from here
-instead of `@playwright/test` so **no spec ever pulls in `@playwright/test` or
-launches Chromium** (the common leak: a shared `harness.ts` that does
-`import { test } from '@playwright/test'` runs its specs on real Chromium
-regardless of any page-fixture swap).
+**1. Check the prerequisites.** You need [Node ≥ 20](https://nodejs.org)
+(`node -v`) and the [Claude Code CLI](https://docs.claude.com/en/docs/claude-code)
+(`claude --version`). That's it — **no Rust, no Chromium, no build step**. `npx`
+downloads a small launcher plus the prebuilt native binary for your OS the first
+time you run it.
 
-```js
-import { test, expect } from "@miaskiewicz/turbo-crawl/playwright";
-
-test.use({ mode: "fast", baseURL: "http://localhost:3000" }); // omit mode → Lane A
-
-test.describe("auth", () => {
-  test.beforeEach(async ({ page }) => page.goto("/login"));
-  test("signs in", async ({ page }) => {
-    await page.getByLabel("Email").fill("a@b.test");
-    await page.getByRole("button", { name: "Sign in" }).click();
-    await expect(page.getByText("Welcome")).toBeVisible();
-  });
-});
-
-// shared base — every spec/harness extends this, never @playwright/test:
-export const authedTest = test.extend({
-  account: async ({ request, baseURL }, use) => use(await seed(request, baseURL)),
-});
-```
-
-**Zero-edit mode** — to flip an *existing* suite onto turbo without touching any
-`import` line (incl. a shared `harness.ts` that imports from `@playwright/test`),
-pass the loader flag when running:
+**2. Register the server.** Run this once (the `--` separates Claude's flags from
+the command Claude will spawn):
 
 ```sh
-node --import @miaskiewicz/turbo-crawl/playwright/register --test 'e2e/**/*.spec.mjs'
+claude mcp add turbo-surf -- npx -y turbo-surf-mcp
 ```
 
-It installs a resolution hook that rewrites `@playwright/test` (and
-`playwright`/`playwright-core`) to the turbo façade — so every spec gets turbo's
-`test`/`expect`/`chromium` and **no Chromium launches**. Toggle off without
-dropping the flag: `TURBO_PLAYWRIGHT_SHIM=0 node --import … --test …`. ESM only.
+That writes the server into your Claude Code config. `npx -y turbo-surf-mcp`
+resolves + spawns the native binary over stdio — one process, no Node hosting it,
+no browser.
 
-Run specs with **`node --test`** (ESM), not the `playwright` CLI — the CLI only
-discovers its own `test`. Built-in fixtures: `page`, `context`, `browser`,
-`request` (a minimal real-HTTP `APIRequestContext`), plus the option fixtures
-`baseURL` / `storageState` / `mode` / `browserName` / `launchOptions` (override via
-`test.use({…})`). Supported: `test.describe` (+`.serial`/`.parallel`/`.only`/
-`.skip`/`.configure`), `before/afterEach`, `before/afterAll`, `test.skip`/`only`/
-`fixme` (static **and** runtime `test.skip(cond?, reason?)`), `test.fail`,
-`test.use`, `test.step`, `test.extend`. Out of scope (node:test owns running):
-worker-scoped fixtures, projects, and the reporter/CLI surface. For a CJS test
-file, `require("@miaskiewicz/turbo-crawl/playwright/test")`'s engine graph can't be
-`require`d (turbo-dom top-level `await`) — run under ESM/`node --test`.
+**3. Verify it's connected.** List your servers (look for `turbo-surf` →
+`✓ connected`):
 
-### `expect(...)` web-first assertions
-
-`expect` from `@miaskiewicz/turbo-crawl/playwright` is a drop-in for
-`@playwright/test`'s `expect` (it must be — `@playwright/test`'s own `expect`
-brand-rejects a non-Playwright `Locator`). `expect(x)` dispatches on its argument:
-a **Locator**, a **Page**, an **APIResponse**, or any plain value. Every form
-supports `.not`; matchers run once (no auto-retry — nothing changes without JS).
-String/RegExp/array argument forms match Playwright.
-
-**CJS test runners** (`@playwright/test` resolves spec files with `require`) can't
-statically import the engine — turbo-dom's parser uses top-level `await`, so the
-`./playwright` graph is ESM-only. Load `chromium` with a dynamic `import()` (the
-page fixture already does), and `require` `expect` from the dedicated TLA-free
-subpath: `const { expect } = require("@miaskiewicz/turbo-crawl/playwright/expect")`.
-
-| Class | Supported matchers |
-| --- | --- |
-| **Locator** | `toBeAttached` · `toBeVisible` · `toBeHidden` · `toBeEnabled` · `toBeDisabled` · `toBeEditable` · `toBeChecked` · `toBeEmpty` · `toBeFocused` · `toBeInViewport` · `toHaveText` · `toContainText` · `toHaveValue` · `toHaveValues` · `toHaveCount` · `toHaveId` · `toHaveRole` · `toHaveClass` · `toContainClass` · `toHaveCSS` · `toHaveAttribute` · `toHaveAccessibleName` · `toHaveAccessibleDescription` · `toHaveAccessibleErrorMessage` · `toHaveJSProperty` · `toMatchAriaSnapshot` |
-| **Page** | `toHaveTitle` · `toHaveURL` · `toMatchAriaSnapshot` |
-| **APIResponse** | `toBeOK` |
-| **Generic value** | `toBe` · `toEqual` · `toStrictEqual` · `toBeTruthy` · `toBeFalsy` · `toBeNull` · `toBeDefined` · `toBeUndefined` · `toBeNaN` · `toBeGreaterThan(OrEqual)` · `toBeLessThan(OrEqual)` · `toBeCloseTo` · `toContain` · `toContainEqual` · `toHaveLength` · `toHaveProperty` · `toMatch` · `toMatchObject` · `toBeInstanceOf` · `toThrow` / `toThrowError` · `.resolves` / `.rejects` |
-
-`toHaveCSS` reads turbo-dom's **real computed-style cascade** (CSSOM);
-`toBeInViewport` uses its **geometry** (approximate flow layout — no real paint,
-enough for the in/out question). `toMatchAriaSnapshot` is built from the
-accessibility tree as a structural role/name *subset* match — Playwright's YAML
-extras (`[level=…]`, selected/checked properties, strict child nesting) are not
-modeled.
-
-Statics: `expect.extend({ … })` (custom matchers), `expect.poll(fn)`,
-`expect.configure(opts)`, `expect.soft` (no deferred aggregation without a test
-runner, so it throws like `expect`).
-
-#### Unsupported Playwright assertions (and why)
-
-Only the **pixel** matchers — they need a rasterizing renderer the no-Chromium
-engine has no equivalent for (same reason `page.screenshot()`/`pdf()` throw). They
-throw a clear error rather than silently passing:
-
-| Matcher | Why it can't be supported |
-| --- | --- |
-| `toHaveScreenshot` / `toMatchSnapshot` (image) | No pixel renderer to rasterize the page. |
-
-## JS-gated pages — no browser
-
-turbo-crawl ships **no browser**. For pages that need JavaScript:
-
-1. **Hydration state (now):** `page.hydrationState()` mines the data frameworks
-   embed server-side (`__NEXT_DATA__`, JSON-LD, `__APOLLO_STATE__`, …) — zero JS,
-   covers most "SPAs".
-2. **JS-execution tier:** run the page's own scripts on turbo-dom — Chromium-free
-   — and extract from the *rendered* DOM. Two backends:
-
-```js
-import { jsRenderer, Page, Crawler } from "@miaskiewicz/turbo-crawl";
-
-// "secure" (default): true V8 isolate (isolated-vm) on turbo-dom's WASM parser.
-// Safe for open-web/hostile pages. "fast": in-process vm + native parser, for
-// local/trusted targets only.
-const { fetchHtml, close } = jsRenderer({ mode: "secure" });
-const page = new Page({ fetchHtml });
-await page.goto("https://some-spa.example");   // scripts run; DOM is populated
-page.links(); page.markdown(); page.query("h1");
-
-// or auto-escalate only shell-only pages during a crawl:
-new Crawler({ start, fallback: jsRenderer({ mode: "secure" }).fetchHtml });
+```sh
+claude mcp list
 ```
 
-The render tier is **re-enterable**: bind it to a Page and `evalJs`/`injectJs` run
-against the **live render heap** (page globals, event handlers, React state) — not
-a re-parsed snapshot — while each mutation appends to a DOM-history trail:
+Now start (or restart) Claude Code and ask it to, e.g., *"use turbo-surf to fetch
+the markdown of example.com"* — the 60 tools above are available. Remove it later
+with `claude mcp remove turbo-surf`.
 
-```js
-const renderer = jsRenderer({ mode: "secure" });
-const page = new Page({ fetchHtml: renderer.fetchHtml }).setRenderer(renderer);
-await page.goto("https://some-spa.example");
+**Scope (where the server is registered).** By default it's registered for your
+user. To share it with a repo instead, add `--scope project` — that writes a
+`.mcp.json` you can commit:
 
-await page.evalJs("return window.__APP_STATE.user.id");   // reads the live heap
-await page.injectJs("document.querySelector('button').click()");
-await page.latestDom();    // serialized DOM after the click
-await page.domHistory();   // [render, …, post-click] snapshots, in order
+```jsonc
+// .mcp.json — committed; teammates get the server automatically
+{
+  "mcpServers": {
+    "turbo-surf": { "command": "npx", "args": ["-y", "turbo-surf-mcp"] }
+  }
+}
 ```
 
-On the no-JS path, `evalJs`/`injectJs` run in a `node:vm` over the parsed DOM
-behind a best-effort token guard — **not a security boundary** (Node's `vm` isn't
-one). Run untrusted JS with `mode: "secure"`, where the V8 isolate contains it.
+**Running from a checkout** (contributors) — point at a local build instead of npm:
 
-Classic + **ESM-module** scripts run (modules bundled via esbuild, honoring
-`<script type="importmap">`), and page-initiated **`fetch`** *and*
-**`XMLHttpRequest`** are bridged to the host net layer (cookies/UA), so
-client-only data loads render. URLs the page fetches are recorded — `page.requests()`,
-and `new Crawler({ fallback, followRequests: true })` feeds them into the frontier.
-`esbuild` ships as a dependency (pure-Go prebuilt, no native build). The `secure`
-backend additionally needs the **optional** native `isolated-vm` — `npm i
-isolated-vm`; without it `mode:"secure"` throws an actionable error (it never
-silently downgrades to the unsandboxed `fast` backend). See
-[docs/js-execution-tier.md](./docs/js-execution-tier.md).
+```sh
+cargo build --release -p turbo-surf-mcp --manifest-path rust/Cargo.toml
+claude mcp add turbo-surf -- "$PWD/rust/target/release/turbo-surf-mcp"
+```
 
-`detectJsRequired(document)` flags shell-only pages, and `Crawler` accepts a
-generic `{ fallback: fetchHtml }` to route them to whatever renderer you plug in.
+**Troubleshooting.** `command not found: claude` → install the Claude Code CLI.
+`npx` hangs the first run → it's downloading the binary; let it finish (or pre-warm
+with `npx -y turbo-surf-mcp` in a terminal, then Ctrl-C). Shows `✗ failed` in
+`claude mcp list` → run the command directly to see the error; on an unsupported
+platform there's no prebuilt binary (build from a checkout as above).
 
-> **Playwright is not a dependency.** It's a **dev-only** tool used solely by the
-> differential test (`test/differential.test.mjs`) to sanity-check output parity
-> against Chromium. Nothing in the shipped library loads Playwright or Chromium.
-> (Goal: *API* compatibility so Playwright-style scripts can run on this engine —
-> not running Playwright itself.)
+**Other MCP clients** (Claude Desktop, Cursor, …) — point their MCP config's
+`command` at `npx` with args `["-y", "turbo-surf-mcp"]`, or at the binary path.
+
+## Playwright drop-in (run your e2e specs with no browser)
+
+turbo-surf's page API is Playwright-shaped, and `rust/playwright-shim/` is a
+**drop-in `@playwright/test` replacement** backed by the native engine — **no
+Chromium**. A `register.mjs` module-resolution hook rewrites every
+`import … from "@playwright/test"` (and `playwright` / `playwright-core`) to the
+shim, so existing specs run **unchanged** on `node:test`:
+
+```sh
+node --import ./rust/playwright-shim/register.mjs --test 'e2e/**/*.spec.mjs'
+```
+
+It implements **Page**, **Locator**, **expect** (all five assertion classes),
+**BrowserContext**, **APIRequestContext**, and **test + fixtures** over the engine:
+navigation, every `getBy*` locator, locator composition/filtering, DOM actions
+(`click`/`fill`/`check`/`selectOption`/…), `evaluate`/`render` in the V8 tier,
+cookies + real `setExtraHTTPHeaders`, and the full matcher set. Most of the surface
+is pure JS and never crosses into Rust; only genuine DOM/render semantics do (and
+an `expect(locator)` chain is batched into one crossing).
+
+What a no-browser engine **physically can't do fails honestly** (it throws or
+no-ops — never a silent pass):
+
+| Bucket | Examples | Behavior |
+|---|---|---|
+| Pixels / layout | `screenshot`, `pdf`, `boundingBox`, `toHaveScreenshot`, `toMatchSnapshot` | **throws** |
+| Input hardware | `hover`, `dragTo`, `mouse`/`keyboard`/`touchscreen` | **throws** |
+| Network interception | `route`, `routeFromHAR`, `unroute` | **throws** |
+| JS↔host bindings | `exposeFunction`, `exposeBinding` | **throws** |
+| Truly-async/time | `waitFor*`, live `console`/`request` events, timer-driven mutation | resolve/no-op on the static DOM |
+| Layout-only state | `viewportSize`, `emulateMedia`, frames | stored / collapse to self |
+
+Full per-method coverage map: [`rust/playwright-shim/LIMITATIONS.md`](./rust/playwright-shim/LIMITATIONS.md).
+Best fit: **server-rendered and hydration-on-navigation** apps. A client-only SPA
+that paints entirely from JS after load (and never re-fetches) needs a real browser.
 
 ## Competitive benchmark
 
-`harness/competitive/` runs the **same Playwright script** on turbo-crawl and a
+`harness/competitive/` runs the **same Playwright script** on turbo-surf and a
 fleet of real browsers, scoring output **parity** against a Chromium oracle and
-timing each. `npm run harness`. Median ms over 5 runs (live network), parity is
-each engine's observations vs the Chromium oracle:
+timing each. `npm run harness`. turbo-surf drives every routine through its native
+engine — turbo-dom + a `deno_core` V8 render tier for page JS — with **no Chromium**.
+Median ms over 8 runs (live network), parity is each engine's observations vs the
+Chromium oracle:
 
-| engine | wikipedia | form | js-quotes | parity |
-|---|---|---|---|---|
-| **turbo-crawl (no-JS)** | **153** | 236 | — *(needs JS)* | ✓ |
-| **turbo-crawl (js-fast)** | 355 | **241** | **241** | ✓ |
-| **turbo-crawl (js-secure)** | 318 | 235 | 237 | ✓ |
-| chromium *(oracle)* | 947 | 652 | 895 | — |
-| firefox | 802 | 880 | 895 | ✓ |
-| webkit | 1295 | 851 | 847 | ✓ |
-| stealth (playwright-extra) | 1020 | 528 | 903 | ✓ |
-| patchright | 1029 | 538 | 894 | ✓ |
+| engine | wikipedia | js-quotes | parity |
+|---|---|---|---|
+| **turbo-surf (no-JS)** | **142** | — *(needs JS)* | ✓ |
+| **turbo-surf (JS)** | —‡ | **132** | ✓ |
+| chromium *(oracle)* | 932 | 933 | — |
+| firefox | 727 | 925 | ✓ |
+| webkit | 1232 | 964 | ✓ |
 
-Every turbo-crawl mode produces the **same observations** as Chromium / Firefox /
-WebKit / the stealth browsers — while running 2–6× faster. The harness
-auto-detects installed engines (`firefox`/`webkit`, and anti-detect browsers like
-`playwright-extra`/`patchright`/`rebrowser-playwright`); see
+Every engine produces the **same observations** as Chromium / Firefox / WebKit
+(parity ✓) — and turbo-surf is the **fastest in the table** on both axes. The
+Wikipedia click-through runs in **142 ms** (**~6.6× faster than Chromium**, 932),
+and the **real jQuery on `quotes.toscrape.com/js`** — the same 10 quotes Chromium
+extracts — in **132 ms** (**~7× faster than Chromium**, 933), inside a true V8
+isolate over a native rtdom DOM, **no Chromium process**. It stays network-bound
+via a **pooled HTTP client** (connection/TLS reuse across pages), a **persistent V8
+isolate** whose **DOM install is reused across same-page `page.evaluate`s** (parse
+once per page, ~0.5 ms/call after), an **external-script cache** (jQuery fetched
+once, not per page), a **per-page parse cache**, and a back-forward snapshot cache
+so `goBack` restores instead of re-fetching. Profilers: `cargo bench -p
+turbo-surf-view` (Rust microbench) + `harness/hotpath/rust-hotpath.mjs`.
+
+‡ JS mode runs the *page's own* scripts; on a server-rendered page like Wikipedia
+that over-runs (use no-JS there — 142 ms, 4/4). The `form` routine is omitted this
+run (httpbin.org was returning 503/timeouts for every engine).
+
+The harness auto-detects installed engines (`firefox`/`webkit`, and anti-detect
+browsers like `playwright-extra`/`patchright`/`rebrowser-playwright`); see
 [harness/competitive/README.md](./harness/competitive/README.md). (Numbers are
 network-bound and machine/run dependent.)
 
 ## Crawler-vs-crawler benchmark
 
-`harness/crawlers/` races turbo-crawl against other open-source crawlers on a
+`harness/crawlers/` races turbo-surf against other open-source crawlers on a
 real, paginated site — **same** 20-page same-host crawl of `books.toscrape.com`,
 **same** ~150 ms per-request politeness on every engine, items counted with the
 **same** CSS selector. Median of 3 timed runs, live network (`npm run
@@ -412,48 +273,68 @@ crawl-bench`):
 | crawler | runtime model | items | median ms | pages/s |
 |---|---|---|---|---|
 | crawlee `CheerioCrawler` | Node | 339 | 2767 | 7.2 |
-| **turbo-crawl (no-js)** | **Node, browserless** | 316 | 3261 | **6.1** |
+| **turbo-surf (no-js)** | **native Rust, browserless** | 339 | 3271 | **6.1** |
 | spider-rs | Rust + N-API | 194 | 3486 | 5.7 |
 | got + cheerio (hand-rolled) | Node | 339 | 5590 | 3.6 |
 | node-crawler (`crawler`) | Node | 339 | 49624 | 0.4 |
 | Scrapy | Python *(subprocess)* | 246 | 49270 | 0.4 |
 | Colly | Go *(subprocess)* | 320 | 45664 | 0.4 |
 
-At equal politeness the wall-clock is **network-bound**, so the in-process
-crawlers cluster together: turbo-crawl sits in the **top tier** alongside the
-dedicated speed engines (crawlee, spider-rs) and ahead of a hand-rolled
+**Head-to-head vs CheerioCrawler** (the closest competitor) — the **same** 20-page
+crawl, `maxConcurrency = 2`, median of 5 warm runs
+(`node harness/crawlers/head-to-head.mjs`). With throttling **off** (raw engine
+speed — the truest apples-to-apples, since the two *throttle models* differ)
+turbo-surf is clearly ahead:
+
+| engine | politeness | median ms | pages/s |
+|---|---|---|---|
+| **turbo-surf (no-js)** | none (raw) | **1977** | **10.1** |
+| crawlee CheerioCrawler | none (raw) | 2748 | 7.3 |
+| crawlee CheerioCrawler | 150 ms rate | 2634 | 7.6 |
+| **turbo-surf (no-js)** | 150 ms (strict) | 3307 | 6.0 |
+
+Raw, **turbo-surf is ~1.4× faster**. Under the "150 ms politeness" rows it looks
+slower only because turbo-surf's per-host gate is a **strict** interval (it really
+waits 150 ms between requests), whereas crawlee's `maxRequestsPerMinute` is a
+lenient sliding window that lets a short 20-page burst through near-raw. Same
+content (339 items), no browser.
+
+At equal politeness the multi-engine wall-clock is **network-bound**, so the
+in-process crawlers cluster together: turbo-surf sits in the **top tier** alongside
+the dedicated speed engines (crawlee, spider-rs) and ahead of a hand-rolled
 got+cheerio loop — while extracting equivalent content and running **no
-browser**. The heavyweight engines trail ~15×: Scrapy and Colly pay a fresh
+browser**. turbo-surf runs the whole BFS — fetch, parse, same-host gate, per-page
+item count — in its native Rust engine, and is **~13× ahead of Scrapy / Colly**.
+The heavyweight
+engines trail ~15×: Scrapy and Colly pay a fresh
 process startup per crawl (the harness shells out to their CLIs), and
 node-crawler's per-request overhead is high. turbo-dom's raw parse advantage
 doesn't show here — at 20 live pages, network swamps a sub-millisecond parse;
 it shows in-memory instead (links ~18k/s, crawl ~14k pages/s, below). And unlike
-every engine in this table, the *same* turbo-crawl also runs Playwright scripts
+every engine in this table, the *same* turbo-surf also runs Playwright scripts
 (parity table above).
 
-### JS-executing crawlers — turbo-crawl vs real browsers
+### JS-executing crawlers — turbo-surf vs real browsers
 
 The other set targets `quotes.toscrape.com/js`, where quotes are built
-client-side (a non-JS crawler sees ~0). Here turbo-crawl's JS tiers run the
-page's own scripts — `js-fast` in an in-process `vm`, `js-secure` in a true V8
-isolate — against turbo-dom, while every competitor drives a **real headless
-Chromium** (`npm run crawl-bench:js`, 10 pages, median of 3):
+client-side (a non-JS crawler sees ~0). turbo-surf runs the page's own scripts in
+a true V8 isolate over its native DOM, while every competitor drives a **real
+headless Chromium** (`npm run crawl-bench:js`, 10 pages, median of 3):
 
 | crawler | JS engine | items | median ms | pages/s |
 |---|---|---|---|---|
-| **turbo-crawl (js-secure)** | **V8 isolate, no browser** | 120 | 4096 | **2.4** |
-| **turbo-crawl (js-fast)** | **in-proc vm, no browser** | 100 | 4184 | **2.4** |
+| **turbo-surf (JS)** | **V8 isolate, no browser** | 100 | **2989** | **3.35** |
 | crawlee `PuppeteerCrawler` | headless Chromium | 100 | 5074 | 2.0 |
 | crawlee `PlaywrightCrawler` | headless Chromium | 100 | 6173 | 1.6 |
 | puppeteer-cluster | headless Chromium | 100 | 17062 | 0.6 |
 
-turbo-crawl executes the **same page JavaScript** and extracts the **same
-quotes** as a real browser — yet runs faster than every browser-driving crawler
-(and ~4× faster than puppeteer-cluster), with no Chromium process, even though
-turbo-crawl is the only engine here also honoring the 150 ms politeness delay.
-The `js-secure` row does this inside a **hardened V8 isolate** — most crawlers
-that run page JS either drive a full browser (this table) or use an in-process
-fake DOM with no real isolation. See
+turbo-surf runs each page's own scripts in a **true V8 isolate** over the native
+rtdom DOM (the same path that renders `quotes.toscrape.com/js`, external scripts
+cached across pages) — the **fastest engine here**, extracting the same 100 quotes
+a real browser does **~2–6× faster than the browser-driving crawlers**, with no
+Chromium process and honoring the 150 ms politeness delay. Running page JS in a
+true isolate against a lightweight DOM is rare — most crawlers either drive a full
+browser (this table) or use an in-process fake DOM with no real isolation. See
 [harness/crawlers/README.md](./harness/crawlers/README.md) — competitors
 auto-detect and missing ones are skipped; install them with
 `npm i -D @spider-rs/spider-rs crawlee cheerio got crawler` (+ `brew install
@@ -461,24 +342,23 @@ pipx go && pipx install scrapy` for Scrapy/Colly). (Machine/run dependent.)
 
 ## Development
 
+The engine is Rust (`rust/` workspace); the only JS is the launcher (`cli.js`/
+`index.js`) + the dev harness.
+
 ```sh
-npm install        # also wires the pre-commit hook (oxlint → biome → cc-check → tsgo)
-npm test           # node --test
-npm run test:cov   # coverage (src ~100% line-covered)
-npm run lint       # oxlint
-npm run format     # biome format --write
-npm run cc         # cyclomatic-complexity gate (cc < 6)
-npm run typecheck  # tsgo typecheck of the public types
-npm run check      # lint + format:check + cc + typecheck + test (the CI gate)
-npm run bench      # extract + crawl throughput
+cd rust
+cargo test --workspace                      # the offline suite
+cargo clippy --workspace --all-targets
+cargo fmt
+cargo build --release -p turbo-surf-mcp    # the MCP binary the launcher spawns
+cargo bench -p turbo-surf-view             # Rust microbench (parse / views)
 ```
 
-The differential test (`test/differential.test.mjs`, SPEC §14) compares output
-against a Chromium oracle; it auto-skips unless `playwright` and its browser are
-installed (`npm i -D playwright && npx playwright install chromium`).
-
-Benchmarks (Node 24, in-memory): full agent view ~2.5k pages/s, links ~18k/s,
-crawl ~14k pages/s with a flat heap.
+From the repo root: `npm run check` lints/formats the launcher JS, runs the Rust
+gate, and runs the **Playwright shim** suites (`npm run test:playwright` =
+`build:addon` → `test:shim` offline unit tests → `test:e2e` drop-in specs through
+`register.mjs`, no Chromium). `npm run harness` / `crawl-bench` / `hotpath` run the
+benchmarks (install `playwright` + `crawlee` ad-hoc for the competitor engines).
 
 ## License
 

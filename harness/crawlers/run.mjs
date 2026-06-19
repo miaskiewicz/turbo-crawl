@@ -1,4 +1,4 @@
-// Multi-page CRAWL benchmark: turbo-crawl vs other open-source crawlers on a real
+// Multi-page CRAWL benchmark: turbo-surf vs other open-source crawlers on a real
 // multi-page crawl. For each set we crawl the SAME live target, the SAME page cap,
 // and count items with the SAME selector — then report throughput + correctness.
 //
@@ -9,7 +9,7 @@
 //   npm run crawl-bench        /  npm run crawl-bench:js
 //
 // Needs LIVE network. Competitors that aren't installed are auto-skipped (their
-// rows read "skipped (not installed)"). turbo-crawl rows run with zero extra deps.
+// rows read "skipped (not installed)"). turbo-surf rows run with zero extra deps.
 
 import { crawlersForSet } from "./crawlers.mjs";
 import { targetForSet } from "./targets.mjs";
@@ -102,8 +102,8 @@ async function main() {
   const setArg = flag("set", null);
   const sets = setArg ? [setArg] : ["nojs", "js"];
 
-  console.log("turbo-crawl multi-page crawl benchmark");
-  console.log("» = turbo-crawl row   (competitors auto-detected; missing ones skipped)");
+  console.log("turbo-surf multi-page crawl benchmark");
+  console.log("» = turbo-surf row   (competitors auto-detected; missing ones skipped)");
 
   for (const set of sets) {
     if (set !== "nojs" && set !== "js") {

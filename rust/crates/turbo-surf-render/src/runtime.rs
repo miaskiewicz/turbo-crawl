@@ -1,0 +1,1621 @@
+//! Render runtime (tier 3). Page JS runs on a `deno_core` V8 isolate. The DOM is
+//! a real rtdom↔V8 binding ([`crate::browser_env`], vendored from turbo-test) so
+//! jQuery / React / hand-rolled bundles see a genuine `document`/Element. deno_core
+//! supplies the rest: the async event loop, `fetch`/cookies over the tier-1 net
+//! stack (`#[op2]` ops below), virtual timers, and the runaway-execution budget.
+//!
+//! Flow per render: build the runtime → graft the DOM binding onto its context with
+//! the fetched page parsed in ([`install_dom`]) → run the page script → drain the
+//! event loop + virtual timers → serialize the hydrated tree back to HTML.
+//!
+//! The binding stores V8 `Global` handles in thread-locals; they MUST be cleared
+//! (`browser_env::reset()`) while the isolate is still alive, before the runtime
+//! drops — otherwise a later drop on a dead isolate crashes. Every entry point
+//! resets on the way out.
+
+use deno_core::{op2, v8, JsRuntime, OpState, RuntimeOptions};
+use std::cell::RefCell;
+use std::rc::Rc;
+use turbo_surf_core::cookies::CookieJar;
+use turbo_surf_core::net::{fetch_html, FetchOptions};
+use turbo_surf_core::url::resolve;
+
+/// Page base URL (the `location.href`): the base for relative `fetch` and the
+/// scope for the `document.cookie` bridge. Stored in op state.
+struct Base(String);
+
+/// Shared cookie jar backing `document.cookie` (and page `fetch`). Stored in op
+/// state behind `Rc<RefCell<…>>` since ops borrow it across the isolate.
+type Jar = Rc<RefCell<CookieJar>>;
+
+/// Custom User-Agent for this page: drives `navigator.userAgent` and the page-fetch
+/// `User-Agent` header. Empty = the engine default. Stored in op state.
+struct Ua(String);
+
+/// `fetch` result marshaled back to JS as a `Response`-like object.
+#[derive(serde::Serialize)]
+struct FetchOut {
+    status: u16,
+    ok: bool,
+    body: String,
+    content_type: String,
+}
+
+// `document.cookie` getter: cookies applicable to the page's base URL.
+#[op2]
+#[string]
+fn op_cookie_get(state: &mut OpState) -> String {
+    let base = state.borrow::<Base>().0.clone();
+    state.borrow::<Jar>().borrow().cookie_header(&base, 0.0)
+}
+
+// The custom User-Agent (empty if none) — `navigator.userAgent` reads this.
+#[op2]
+#[string]
+fn op_user_agent(state: &mut OpState) -> String {
+    state.borrow::<Ua>().0.clone()
+}
+
+// `document.cookie` setter: ingest a `name=value; attrs` line against the base.
+#[op2(fast)]
+fn op_cookie_set(state: &mut OpState, #[string] line: &str) {
+    let base = state.borrow::<Base>().0.clone();
+    state
+        .borrow::<Jar>()
+        .borrow_mut()
+        .set_from_response(&base, &[line.to_string()], 0.0);
+}
+
+// `fetch(url)` over the tier-1 net stack. Relative URLs resolve against the
+// page base. Never throws across the boundary: a transport/parse failure comes
+// back as `{ status: 0, ok: false }` so page code sees a real (failed) Response.
+#[op2]
+#[serde]
+async fn op_fetch(
+    state: Rc<RefCell<OpState>>,
+    #[string] url: String,
+    #[string] init_json: String,
+) -> FetchOut {
+    let (base, jar_rc, ua) = {
+        let s = state.borrow();
+        (
+            s.borrow::<Base>().0.clone(),
+            s.borrow::<Jar>().clone(),
+            s.borrow::<Ua>().0.clone(),
+        )
+    };
+    let target = resolve(&base, &url).unwrap_or(url);
+    // Honor the `fetch(url, init)` request: method, headers, body. Without this every
+    // page fetch was a GET with no body — a login POST (PropelAuth) 404'd.
+    let init: deno_core::serde_json::Value =
+        deno_core::serde_json::from_str(&init_json).unwrap_or(deno_core::serde_json::Value::Null);
+    let method = init
+        .get("method")
+        .and_then(|m| m.as_str())
+        .map(|m| m.to_ascii_uppercase());
+    let body = init
+        .get("body")
+        .and_then(|b| b.as_str())
+        .map(|b| b.to_string());
+    let mut headers: std::collections::BTreeMap<String, String> = init
+        .get("headers")
+        .and_then(|h| deno_core::serde_json::from_value(h.clone()).ok())
+        .unwrap_or_default();
+    // Browser-set request headers a fetch carries automatically (an auth backend gates
+    // on Origin; a cross-origin POST without it is rejected). Derive from the page base
+    // (scheme://host[:port], i.e. base up to the third '/').
+    if let Some(origin) = page_origin(&base) {
+        headers.entry("Origin".to_string()).or_insert(origin);
+        headers
+            .entry("Referer".to_string())
+            .or_insert_with(|| base.clone());
+    }
+    // Custom User-Agent (if set) overrides the net default for page fetches.
+    if !ua.is_empty() {
+        headers.insert("user-agent".to_string(), ua);
+    }
+    // Carry the page's cookies on same-origin fetches and ingest Set-Cookie back, so
+    // session-authenticated hydration works (e.g. an auth SDK fetching the current user
+    // with the session cookie). Snapshot the shared jar into a local one for the call —
+    // a RefCell borrow can't be held across the await.
+    let mut local = CookieJar::from_storage_state(&jar_rc.borrow().storage_state());
+    let opts = FetchOptions {
+        method,
+        body,
+        headers,
+        allow_non_html: true, // fetch pulls JSON/text too
+        jar: Some(&mut local),
+        ..Default::default()
+    };
+    let out = match fetch_html(&target, opts).await {
+        Ok(r) => FetchOut {
+            status: r.status,
+            ok: (200..300).contains(&r.status),
+            body: r.html,
+            content_type: r.content_type,
+        },
+        Err(_) => FetchOut {
+            status: 0,
+            ok: false,
+            body: String::new(),
+            content_type: String::new(),
+        },
+    };
+    *jar_rc.borrow_mut() = local; // persist any Set-Cookie updates for later fetches
+    out
+}
+
+// `scheme://host[:port]` of an absolute http(s) URL — the part before the path. Used to
+// synthesize the `Origin` header a browser fetch would send.
+fn page_origin(base: &str) -> Option<String> {
+    let scheme_end = base.find("://")?;
+    let after = scheme_end + 3;
+    let host_len = base[after..].find('/').unwrap_or(base.len() - after);
+    let origin = &base[..after + host_len];
+    (base.starts_with("http://") || base.starts_with("https://")).then(|| origin.to_string())
+}
+
+deno_core::extension!(
+    turbo_dom,
+    ops = [op_cookie_get, op_cookie_set, op_fetch, op_user_agent],
+);
+
+// Non-DOM browser globals, layered over the ops AFTER the native DOM binding is
+// installed (`browser_env` owns document/Element/window/navigator/Event/etc.; this
+// adds what a network-free test env lacks and overrides a few brand/host values).
+// Virtual timers are queued and drained synchronously by `__runTimers`, ordered by
+// delay — no wall-clock waits. `fetch`/XHR go over the tier-1 net stack.
+//
+// Wrapped in an IIFE so it is RE-RUNNABLE on a reused isolate: a persistent
+// runtime (see `run_with_dom`) re-installs the page per call, which re-runs this;
+// top-level `const`/`let` would throw "already declared" the second time, but
+// inside the IIFE they're per-invocation. Globals are assigned to `globalThis`
+// (idempotent) and the cookie bridge re-applies to the current `document`.
+const ENV_BOOTSTRAP: &str = r##"(() => {
+const ops = Deno.core.ops;
+globalThis.self = globalThis;
+// turbo-surf brand UA (browser_env.js seeds a generic one; override it here).
+// `onLine: true` matters: auth SDKs (PropelAuth) only auto-refresh the session from the
+// cookie when the browser reports online — an undefined/falsy onLine made a cold load of
+// an authed page skip the refresh and render nothing.
+globalThis.navigator = {
+  userAgent: (Deno.core.ops.op_user_agent && Deno.core.ops.op_user_agent()) || "turbo-surf",
+  language: "en-US", languages: ["en-US"], onLine: true,
+};
+globalThis.location = globalThis.location || { href: "about:blank", protocol: "about:", host: "", pathname: "blank" };
+globalThis.localStorage = (() => {
+  const m = new Map();
+  return {
+    getItem: (k) => (m.has(k) ? m.get(k) : null),
+    setItem: (k, v) => m.set(k, String(v)),
+    removeItem: (k) => m.delete(k),
+    clear: () => m.clear(),
+  };
+})();
+const __log = (...a) => Deno.core.print(a.map(String).join(" ") + "\n");
+globalThis.console = { log: __log, info: __log, warn: __log, error: __log, debug: () => {} };
+const __timers = [];
+let __tid = 1;
+globalThis.setTimeout = (fn, delay = 0, ...args) => {
+  __timers.push({ id: __tid, fn, delay: +delay || 0, args });
+  return __tid++;
+};
+globalThis.setInterval = globalThis.setTimeout; // one-shot here (no event loop)
+globalThis.clearTimeout = (id) => {
+  const i = __timers.findIndex((t) => t.id === id);
+  if (i >= 0) __timers.splice(i, 1);
+};
+globalThis.clearInterval = globalThis.clearTimeout;
+globalThis.requestAnimationFrame = (fn) => globalThis.setTimeout(fn, 16);
+globalThis.cancelAnimationFrame = globalThis.clearTimeout;
+// Route queueMicrotask through the virtual timer queue (NOT a real V8 microtask).
+// The "correct" Promise.resolve().then is unbounded — a reactivity lib that
+// re-schedules a flush each microtask spins V8's microtask queue forever, which the
+// render budget's terminate-execution can't cleanly interrupt (orphan CPU). The
+// timer queue is bounded by the hydration pump's timer budget, so a runaway loop
+// fails fast instead of leaking. (Such an app doesn't converge headlessly anyway.)
+globalThis.queueMicrotask = (fn) => globalThis.setTimeout(fn, 0);
+globalThis.__runTimers = (max = 100000) => {
+  let n = 0;
+  while (__timers.length && n < max) {
+    n++;
+    __timers.sort((a, b) => a.delay - b.delay);
+    const t = __timers.shift();
+    try { t.fn(...t.args); } catch (e) { Deno.core.print("timer error: " + (e && e.stack ? e.stack : e) + "\n"); }
+  }
+  return n; // count fired — lets the hydration pump detect quiescence
+};
+// NOTE: getElementsByTagName/ClassName/Name, lastChild/previous*/nextElementSibling,
+// and document.write/writeln are provided by the vendored binding (browser_env.js,
+// turbo-test ≥ 71477ba) — real-world bundles (jQuery's load-time support probe,
+// document.write-driven pages) depend on them. They live upstream, not here.
+//
+// document.cookie bridge → the shared CookieJar (scoped to the page base URL). An
+// OWN accessor on the document instance, shadowing browser_env.js's pure-JS jar.
+Object.defineProperty(globalThis.document, "cookie", {
+  configurable: true,
+  get() { return ops.op_cookie_get(); },
+  set(v) { ops.op_cookie_set(String(v)); },
+});
+// Headers — fetch + analytics (PostHog) construct/read these; deno_core ships none.
+// Case-insensitive name lookup, per the spec.
+if (typeof globalThis.Headers === "undefined") {
+  globalThis.Headers = class Headers {
+    constructor(init) {
+      this._m = new Map();
+      if (init) {
+        const ents = typeof init.forEach === "function" ? null : (Array.isArray(init) ? init : Object.entries(init));
+        if (ents) for (const [k, v] of ents) this.append(k, v);
+        else init.forEach((v, k) => this.append(k, v));
+      }
+    }
+    append(k, v) { const key = String(k).toLowerCase(); this._m.set(key, this._m.has(key) ? this._m.get(key) + ", " + v : String(v)); }
+    set(k, v) { this._m.set(String(k).toLowerCase(), String(v)); }
+    get(k) { const v = this._m.get(String(k).toLowerCase()); return v == null ? null : v; }
+    has(k) { return this._m.has(String(k).toLowerCase()); }
+    delete(k) { this._m.delete(String(k).toLowerCase()); }
+    forEach(cb, thisArg) { for (const [k, v] of this._m) cb.call(thisArg, v, k, this); }
+    keys() { return this._m.keys(); }
+    values() { return this._m.values(); }
+    entries() { return this._m.entries(); }
+    [Symbol.iterator]() { return this._m.entries(); }
+  };
+}
+// fetch over the tier-1 net stack → a minimal Response (with real headers, so RSC
+// client navigation that reads `res.headers.get('content-type')` works).
+globalThis.fetch = async (url, init) => {
+  // Marshal the request (method/headers/body) to the op — a Request object carries them
+  // on itself; an init object carries them as fields. Headers may be a Headers instance,
+  // an array of pairs, or a plain object.
+  const req = (url && typeof url === "object") ? url : null;
+  const o = init || req || {};
+  let hdrs = o.headers;
+  if (hdrs && typeof hdrs.forEach === "function" && !Array.isArray(hdrs)) {
+    const obj = {}; hdrs.forEach((v, k) => { obj[k] = v; }); hdrs = obj;
+  } else if (Array.isArray(hdrs)) {
+    const obj = {}; for (const [k, v] of hdrs) obj[k] = v; hdrs = obj;
+  }
+  let body = o.body;
+  if (body != null && typeof body !== "string") {
+    try { body = String(body); } catch (_e) { body = ""; }
+  }
+  const initJson = JSON.stringify({ method: o.method, headers: hdrs || undefined, body });
+  const r = await ops.op_fetch(String((url && url.url) || url), initJson);
+  const headers = new globalThis.Headers();
+  if (r.content_type) headers.set("content-type", r.content_type);
+  return {
+    status: r.status,
+    statusText: "",
+    ok: r.ok,
+    redirected: false,
+    type: "basic",
+    url: String((url && url.url) || url),
+    headers,
+    clone() { return this; },
+    text: async () => r.body,
+    json: async () => JSON.parse(r.body),
+    arrayBuffer: async () => new TextEncoder().encode(r.body).buffer,
+    blob: async () => new globalThis.Blob([r.body], { type: r.content_type || "" }),
+    body: new globalThis.ReadableStream({ start(c) { if (r.body) c.enqueue(new TextEncoder().encode(r.body)); c.close(); } }),
+  };
+};
+// XMLHttpRequest over fetch (async; resolves in the event loop).
+globalThis.XMLHttpRequest = class {
+  constructor() { this.readyState = 0; this.status = 0; this.responseText = ""; }
+  open(method, url) { this._m = method || "GET"; this._u = url; this.readyState = 1; }
+  setRequestHeader() {}
+  send(body) {
+    const self = this;
+    globalThis
+      .fetch(this._u, { method: this._m, body })
+      .then(async (r) => {
+        self.status = r.status;
+        self.responseText = await r.text();
+        self.response = self.responseText;
+        self.readyState = 4;
+        if (self.onreadystatechange) self.onreadystatechange();
+        if (self.onload) self.onload();
+      });
+  }
+};
+// Observers: no live mutation notifications over the static tree → no-op stubs.
+class __NoopObserver {
+  constructor(cb) { this._cb = cb; }
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+  takeRecords() { return []; }
+}
+globalThis.MutationObserver = __NoopObserver;
+globalThis.IntersectionObserver = __NoopObserver;
+globalThis.ResizeObserver = __NoopObserver;
+// NOTE: getComputedStyle + matchMedia are provided by the vendored browser_env.js
+// (a jsdom-style getComputedStyle the Playwright shim's cssValue/visibility reads,
+// and a matchMedia stub). Do NOT redefine them here — ENV_BOOTSTRAP runs AFTER the
+// binding, so an override would clobber the real ones and break the shim.
+// FormData — auth/login SDKs (PropelAuth) build credential payloads with it; deno_core
+// ships none. A spec-shaped impl over an entry list (append keeps duplicates; set
+// replaces; field values stringified, File/Blob passed through).
+if (typeof globalThis.FormData === "undefined") {
+  globalThis.FormData = class FormData {
+    constructor() { this._e = []; }
+    append(name, value) { this._e.push([String(name), typeof value === "object" && value !== null ? value : String(value)]); }
+    set(name, value) {
+      const n = String(name); const v = typeof value === "object" && value !== null ? value : String(value);
+      this._e = this._e.filter(([k]) => k !== n); this._e.push([n, v]);
+    }
+    get(name) { const n = String(name); const f = this._e.find(([k]) => k === n); return f ? f[1] : null; }
+    getAll(name) { const n = String(name); return this._e.filter(([k]) => k === n).map(([, v]) => v); }
+    has(name) { const n = String(name); return this._e.some(([k]) => k === n); }
+    delete(name) { const n = String(name); this._e = this._e.filter(([k]) => k !== n); }
+    forEach(cb, thisArg) { for (const [k, v] of this._e) cb.call(thisArg, v, k, this); }
+    keys() { return this._e.map(([k]) => k)[Symbol.iterator](); }
+    values() { return this._e.map(([, v]) => v)[Symbol.iterator](); }
+    entries() { return this._e.map(([k, v]) => [k, v])[Symbol.iterator](); }
+    [Symbol.iterator]() { return this.entries(); }
+  };
+}
+// Blob / File / FileReader — analytics + upload code (PostHog, file inputs) reference
+// these during hydration; deno_core ships none ("File is not defined" aborts PostHog
+// init). Minimal spec-shaped impls over the concatenated parts as a string — enough to
+// construct/inspect; no real binary I/O in this engine.
+if (typeof globalThis.Blob === "undefined") {
+  globalThis.Blob = class Blob {
+    constructor(parts = [], opts = {}) {
+      this._s = (parts || []).map((p) => (typeof p === "string" ? p : String(p))).join("");
+      this.type = (opts && opts.type) || "";
+    }
+    get size() { return this._s.length; }
+    async text() { return this._s; }
+    async arrayBuffer() { return new TextEncoder().encode(this._s).buffer; }
+    slice(a, b, type) { const n = new Blob([this._s.slice(a, b)]); n.type = type || ""; return n; }
+    stream() { const s = this._s; return new globalThis.ReadableStream({ start(c) { c.enqueue(s); c.close(); } }); }
+  };
+}
+if (typeof globalThis.File === "undefined") {
+  globalThis.File = class File extends globalThis.Blob {
+    constructor(parts, name, opts = {}) {
+      super(parts, opts);
+      this.name = String(name == null ? "" : name);
+      this.lastModified = (opts && opts.lastModified) || 0;
+    }
+  };
+}
+if (typeof globalThis.FileReader === "undefined") {
+  globalThis.FileReader = class FileReader {
+    constructor() { this.result = null; this.onload = null; this.onerror = null; this.onloadend = null; }
+    readAsText(blob) { this._read(blob, (s) => s); }
+    readAsDataURL(blob) { this._read(blob, (s) => "data:" + (blob.type || "") + ";base64," + btoa(s)); }
+    readAsArrayBuffer(blob) { this._read(blob, (s) => new TextEncoder().encode(s).buffer); }
+    _read(blob, map) {
+      const self = this;
+      Promise.resolve(blob && typeof blob.text === "function" ? blob.text() : "").then((s) => {
+        self.result = map(s);
+        const ev = { target: self };
+        if (typeof self.onload === "function") self.onload(ev);
+        if (typeof self.onloadend === "function") self.onloadend(ev);
+      });
+    }
+  };
+}
+// customElements — the Web Components registry. deno_core ships none, so a bundle that
+// registers a custom element (MUI and friends do) threw "customElements is not defined"
+// mid-script, aborting the rest of that chunk (→ missing UI). Register + resolve
+// whenDefined; no live upgrade pass (the static tree isn't re-instantiated), which is
+// enough to keep the page's JS running.
+if (typeof globalThis.customElements === "undefined") {
+  const __ce = new Map();
+  const __waiters = new Map();
+  globalThis.customElements = {
+    define(name, ctor) {
+      __ce.set(name, ctor);
+      const w = __waiters.get(name);
+      if (w) { w.forEach((r) => r(ctor)); __waiters.delete(name); }
+    },
+    get(name) { return __ce.get(name); },
+    getName(ctor) { for (const [n, c] of __ce) if (c === ctor) return n; return null; },
+    whenDefined(name) {
+      if (__ce.has(name)) return Promise.resolve(__ce.get(name));
+      return new Promise((r) => {
+        const arr = __waiters.get(name) || [];
+        arr.push(r);
+        __waiters.set(name, arr);
+      });
+    },
+    upgrade() {},
+  };
+}
+// (CSSStyleSheet, document.adoptedStyleSheets, and the HTML*Element constructor
+// family are all provided by the vendored browser_env binding.)
+// MessageChannel — React 18's scheduler drains its work queue by posting to a
+// MessagePort and running the handler on the other port's onmessage. Route the
+// message through the timer queue (setTimeout 0) so the hydration pump drains it;
+// without this, React's scheduled mount/hydration never runs.
+globalThis.MessageChannel = class MessageChannel {
+  constructor() {
+    const p1 = { onmessage: null, close() {}, start() {}, addEventListener() {}, removeEventListener() {} };
+    const p2 = { onmessage: null, close() {}, start() {}, addEventListener() {}, removeEventListener() {} };
+    p1.postMessage = (data) => globalThis.setTimeout(() => { if (typeof p2.onmessage === "function") p2.onmessage({ data, target: p2 }); }, 0);
+    p2.postMessage = (data) => globalThis.setTimeout(() => { if (typeof p1.onmessage === "function") p1.onmessage({ data, target: p1 }); }, 0);
+    this.port1 = p1;
+    this.port2 = p2;
+  }
+};
+globalThis.MessagePort = function MessagePort() {};
+// performance — React/Next read performance.now() for timing/scheduling.
+globalThis.performance = globalThis.performance || {
+  now: () => Date.now(),
+  timeOrigin: 0,
+  mark() {}, measure() {}, clearMarks() {}, clearMeasures() {},
+  getEntries: () => [], getEntriesByName: () => [], getEntriesByType: () => [],
+};
+// Encoding/crypto/base64 web globals deno_core doesn't ship but app bundles use.
+if (typeof globalThis.TextEncoder === "undefined") {
+  globalThis.TextEncoder = class TextEncoder {
+    get encoding() { return "utf-8"; }
+    encode(str = "") {
+      str = String(str);
+      const b = [];
+      for (let i = 0; i < str.length; i++) {
+        let c = str.charCodeAt(i);
+        if (c < 0x80) b.push(c);
+        else if (c < 0x800) b.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
+        else if (c >= 0xd800 && c <= 0xdbff) {
+          const c2 = str.charCodeAt(++i);
+          const cp = 0x10000 + ((c & 0x3ff) << 10) + (c2 & 0x3ff);
+          b.push(0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3f), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+        } else b.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
+      }
+      return new Uint8Array(b);
+    }
+    encodeInto(str, u8) {
+      const e = this.encode(str);
+      u8.set(e.subarray(0, u8.length));
+      return { read: str.length, written: Math.min(e.length, u8.length) };
+    }
+  };
+}
+if (typeof globalThis.TextDecoder === "undefined") {
+  globalThis.TextDecoder = class TextDecoder {
+    constructor(enc) { this.encoding = enc || "utf-8"; }
+    decode(buf) {
+      if (!buf) return "";
+      const b = buf instanceof Uint8Array ? buf : new Uint8Array(buf.buffer || buf);
+      let s = "", i = 0;
+      while (i < b.length) {
+        const c = b[i++];
+        if (c < 0x80) s += String.fromCharCode(c);
+        else if (c < 0xe0) s += String.fromCharCode(((c & 0x1f) << 6) | (b[i++] & 0x3f));
+        else if (c < 0xf0) s += String.fromCharCode(((c & 0xf) << 12) | ((b[i++] & 0x3f) << 6) | (b[i++] & 0x3f));
+        else {
+          const cp = ((c & 0x7) << 18) | ((b[i++] & 0x3f) << 12) | ((b[i++] & 0x3f) << 6) | (b[i++] & 0x3f);
+          const cc = cp - 0x10000;
+          s += String.fromCharCode(0xd800 + (cc >> 10), 0xdc00 + (cc & 0x3ff));
+        }
+      }
+      return s;
+    }
+  };
+}
+if (typeof globalThis.crypto === "undefined" || !globalThis.crypto.getRandomValues) {
+  const __rb = (n) => { let x = 0; for (let i = 0; i < n.length; i++) { x = (x * 1103515245 + 12345) & 0x7fffffff; n[i] = (Date.now() ^ x ^ (i * 2654435761)) & 0xff; } return n; };
+  globalThis.crypto = globalThis.crypto || {};
+  globalThis.crypto.getRandomValues = (arr) => __rb(arr);
+  globalThis.crypto.randomUUID = () => {
+    const h = [];
+    for (let i = 0; i < 16; i++) h.push((((Date.now() + i) * 9301 + 49297) % 256).toString(16).padStart(2, "0"));
+    return `${h.slice(0,4).join("")}-${h.slice(4,6).join("")}-4${h[6].slice(1)}-${h[8]}${h[9]}-${h.slice(10,16).join("")}`;
+  };
+}
+// crypto.subtle.digest (real SHA-256) — auth SDKs hash PKCE verifiers / state with it.
+// Other operations reject clearly (vs an undefined-property crash) rather than no-op.
+if (!globalThis.crypto.subtle) {
+  const K = new Uint32Array([
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2,
+  ]);
+  const rotr = (n, x) => (x >>> n) | (x << (32 - n));
+  const sha256 = (msg) => {
+    const H = new Uint32Array([0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]);
+    const bitLen = msg.length * 8;
+    const pad = (56 - ((msg.length + 1) % 64) + 64) % 64;
+    const total = msg.length + 1 + pad + 8;
+    const m = new Uint8Array(total);
+    m.set(msg);
+    m[msg.length] = 0x80;
+    const dv = new DataView(m.buffer);
+    dv.setUint32(total - 8, Math.floor(bitLen / 0x100000000));
+    dv.setUint32(total - 4, bitLen >>> 0);
+    const w = new Uint32Array(64);
+    for (let i = 0; i < total; i += 64) {
+      for (let t = 0; t < 16; t++) w[t] = dv.getUint32(i + t * 4);
+      for (let t = 16; t < 64; t++) {
+        const s0 = rotr(7, w[t-15]) ^ rotr(18, w[t-15]) ^ (w[t-15] >>> 3);
+        const s1 = rotr(17, w[t-2]) ^ rotr(19, w[t-2]) ^ (w[t-2] >>> 10);
+        w[t] = (w[t-16] + s0 + w[t-7] + s1) >>> 0;
+      }
+      let a=H[0],b=H[1],c=H[2],d=H[3],e=H[4],f=H[5],g=H[6],h=H[7];
+      for (let t = 0; t < 64; t++) {
+        const S1 = rotr(6,e) ^ rotr(11,e) ^ rotr(25,e);
+        const ch = (e & f) ^ (~e & g);
+        const t1 = (h + S1 + ch + K[t] + w[t]) >>> 0;
+        const S0 = rotr(2,a) ^ rotr(13,a) ^ rotr(22,a);
+        const maj = (a & b) ^ (a & c) ^ (b & c);
+        const t2 = (S0 + maj) >>> 0;
+        h=g; g=f; f=e; e=(d + t1) >>> 0; d=c; c=b; b=a; a=(t1 + t2) >>> 0;
+      }
+      H[0]=(H[0]+a)>>>0; H[1]=(H[1]+b)>>>0; H[2]=(H[2]+c)>>>0; H[3]=(H[3]+d)>>>0;
+      H[4]=(H[4]+e)>>>0; H[5]=(H[5]+f)>>>0; H[6]=(H[6]+g)>>>0; H[7]=(H[7]+h)>>>0;
+    }
+    const out = new Uint8Array(32);
+    const odv = new DataView(out.buffer);
+    for (let i = 0; i < 8; i++) odv.setUint32(i * 4, H[i]);
+    return out;
+  };
+  const reject = (op) => () => Promise.reject(new Error("crypto.subtle." + op + " unavailable in the no-browser render tier"));
+  globalThis.crypto.subtle = {
+    digest: (algo, data) => {
+      const name = (typeof algo === "string" ? algo : (algo && algo.name) || "").toUpperCase();
+      const bytes = data instanceof Uint8Array ? data : new Uint8Array(data.buffer || data);
+      if (name === "SHA-256") return Promise.resolve(sha256(bytes).buffer);
+      return Promise.reject(new Error("crypto.subtle.digest: " + name + " not supported (SHA-256 only)"));
+    },
+    importKey: reject("importKey"), exportKey: reject("exportKey"), generateKey: reject("generateKey"),
+    sign: reject("sign"), verify: reject("verify"), encrypt: reject("encrypt"), decrypt: reject("decrypt"),
+    deriveBits: reject("deriveBits"), deriveKey: reject("deriveKey"),
+  };
+}
+// BroadcastChannel — auth SDKs sync session state across tabs over it. One isolate =
+// "one tab", but deliver to other channels of the same name (some flows new up two).
+if (typeof globalThis.BroadcastChannel === "undefined") {
+  const __chans = {};
+  globalThis.BroadcastChannel = class BroadcastChannel {
+    constructor(name) {
+      this.name = String(name);
+      this.onmessage = null;
+      this._closed = false;
+      (__chans[this.name] = __chans[this.name] || []).push(this);
+    }
+    postMessage(data) {
+      for (const c of __chans[this.name] || []) {
+        if (c !== this && !c._closed) globalThis.setTimeout(() => { if (typeof c.onmessage === "function") c.onmessage({ data, target: c }); }, 0);
+      }
+    }
+    close() { this._closed = true; const a = __chans[this.name]; if (a) { const i = a.indexOf(this); if (i >= 0) a.splice(i, 1); } }
+    addEventListener(t, fn) { if (t === "message") this.onmessage = fn; }
+    removeEventListener() {}
+    dispatchEvent() { return true; }
+  };
+}
+// WebSocket — no live socket headless. Stay CONNECTING forever (never open, never
+// close): apps connect in the background and render regardless, so this can't hang a
+// render NOR trigger a reconnect loop (which firing onclose would).
+if (typeof globalThis.WebSocket === "undefined") {
+  globalThis.WebSocket = class WebSocket {
+    constructor(url) {
+      this.url = String(url);
+      this.readyState = 0; // CONNECTING, and it stays there
+      this.onopen = this.onmessage = this.onerror = this.onclose = null;
+      this.bufferedAmount = 0;
+    }
+    send() {}
+    close() { this.readyState = 3; if (typeof this.onclose === "function") try { this.onclose({ type: "close", code: 1000, wasClean: true }); } catch (_e) {} }
+    addEventListener(t, fn) { this["on" + t] = fn; }
+    removeEventListener() {}
+    dispatchEvent() { return true; }
+  };
+  Object.assign(globalThis.WebSocket, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 });
+}
+if (typeof globalThis.btoa === "undefined") {
+  const __B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  globalThis.btoa = (s) => {
+    s = String(s); let out = "";
+    for (let i = 0; i < s.length; i += 3) {
+      const a = s.charCodeAt(i), b = s.charCodeAt(i + 1), c = s.charCodeAt(i + 2);
+      const n = (a << 16) | ((isNaN(b) ? 0 : b) << 8) | (isNaN(c) ? 0 : c);
+      out += __B64[(n >> 18) & 63] + __B64[(n >> 12) & 63] + (isNaN(b) ? "=" : __B64[(n >> 6) & 63]) + (isNaN(c) ? "=" : __B64[n & 63]);
+    }
+    return out;
+  };
+  globalThis.atob = (s) => {
+    s = String(s).replace(/=+$/, ""); let out = "";
+    for (let i = 0, bits = 0, val = 0; i < s.length; i++) {
+      val = (val << 6) | __B64.indexOf(s[i]); bits += 6;
+      if (bits >= 8) { bits -= 8; out += String.fromCharCode((val >> bits) & 0xff); }
+    }
+    return out;
+  };
+}
+// AbortController/AbortSignal — fetch + many async libs take a signal. deno_core
+// ships a STUB AbortController whose `.signal` is undefined, so override it outright.
+{
+  globalThis.AbortSignal = class AbortSignal {
+    constructor() { this.aborted = false; this.reason = undefined; this.onabort = null; this._l = []; }
+    addEventListener(t, fn) { if (t === "abort") this._l.push(fn); }
+    removeEventListener(t, fn) { this._l = this._l.filter((f) => f !== fn); }
+    dispatchEvent() { return true; }
+    throwIfAborted() { if (this.aborted) throw this.reason || new Error("Aborted"); }
+  };
+  globalThis.AbortSignal.timeout = () => new globalThis.AbortSignal();
+  globalThis.AbortSignal.abort = (r) => { const s = new globalThis.AbortSignal(); s.aborted = true; s.reason = r; return s; };
+  globalThis.AbortController = class AbortController {
+    constructor() { this.signal = new globalThis.AbortSignal(); }
+    abort(reason) {
+      if (this.signal.aborted) return;
+      this.signal.aborted = true;
+      this.signal.reason = reason;
+      const ev = { type: "abort", target: this.signal };
+      try { if (typeof this.signal.onabort === "function") this.signal.onabort(ev); } catch (_e) {}
+      for (const fn of this.signal._l) { try { fn(ev); } catch (_e) {} }
+    }
+  };
+}
+// ReadableStream — the RSC client reads the flight payload as a stream. A queue-backed
+// impl supporting start/pull/cancel + getReader().read() {value,done}.
+//
+// CRITICAL for streaming producers (Next's RSC flight): the controller is filled
+// ASYNCHRONOUSLY — `enqueue` is called as `__next_f` rows arrive and `close` fires on
+// DOMContentLoaded, both LATER than the first `read()`. So a `read()` that finds the
+// queue empty-but-open must NOT report EOF — it must PARK until the next enqueue/close.
+// (Returning {done:true} there truncates the flight payload mid-stream → React keeps
+// retrying the desynced reader → the render never converges.) Parked reads are held in
+// `_waiters` and settled by enqueue/close/error.
+if (typeof globalThis.ReadableStream === "undefined") {
+  globalThis.ReadableStream = class ReadableStream {
+    constructor(source = {}, _strategy) {
+      this._q = [];
+      this._closed = false;
+      this._err = null;
+      this._source = source || {};
+      this._locked = false;
+      this._waiters = []; // pending {resolve,reject} for reads that outran the producer
+      const settleNext = () => {
+        if (!this._waiters.length) return false;
+        if (this._q.length) { this._waiters.shift().resolve({ value: this._q.shift(), done: false }); return true; }
+        if (this._err) { this._waiters.shift().reject(this._err); return true; }
+        if (this._closed) { this._waiters.shift().resolve({ value: undefined, done: true }); return true; }
+        return false;
+      };
+      const drain = () => { while (settleNext()) {} };
+      const c = {
+        enqueue: (chunk) => { this._q.push(chunk); drain(); },
+        close: () => { this._closed = true; drain(); },
+        error: (e) => { this._err = e; this._closed = true; drain(); },
+        get desiredSize() { return 1; },
+      };
+      this._ctrl = c;
+      try { if (typeof this._source.start === "function") this._source.start(c); } catch (e) { this._err = e; }
+    }
+    get locked() { return this._locked; }
+    getReader() {
+      const self = this;
+      self._locked = true;
+      const pump = async () => {
+        if (!self._q.length && !self._closed && typeof self._source.pull === "function") {
+          await self._source.pull(self._ctrl);
+        }
+      };
+      return {
+        async read() {
+          await pump();
+          if (self._q.length) return { value: self._q.shift(), done: false };
+          if (self._err) throw self._err;
+          if (self._closed) return { value: undefined, done: true };
+          // Empty but still open: park until enqueue/close/error settles us.
+          return new Promise((resolve, reject) => self._waiters.push({ resolve, reject }));
+        },
+        releaseLock() { self._locked = false; },
+        async cancel(r) { self._closed = true; if (typeof self._source.cancel === "function") await self._source.cancel(r); },
+      };
+    }
+    async cancel(r) { this._closed = true; if (typeof this._source.cancel === "function") await this._source.cancel(r); }
+    pipeThrough(t) { return t && t.readable ? t.readable : this; }
+    pipeTo() { return Promise.resolve(); }
+    tee() { return [this, this]; }
+  };
+}
+// History API (single virtual entry; updates location.href).
+globalThis.history = {
+  state: null,
+  length: 1,
+  pushState(s, _t, u) { this.state = s; if (u != null) globalThis.location.href = String(u); },
+  replaceState(s, _t, u) { this.state = s; if (u != null) globalThis.location.href = String(u); },
+  back() {}, forward() {}, go() {},
+};
+globalThis.requestIdleCallback = (fn) => globalThis.setTimeout(fn, 0);
+globalThis.cancelIdleCallback = (id) => globalThis.clearTimeout(id);
+
+// WHATWG URL + URLSearchParams — deno_core ships neither, but app bundles (Next.js,
+// the PropelAuth SDK, …) use `new URL(...)` while hydrating, so without these the
+// page crashes with "URL is not defined" before rendering. Regex-parsed: covers the
+// http(s) shapes hydration reads (protocol/host/port/path/query/hash + searchParams).
+if (typeof globalThis.URLSearchParams === "undefined") {
+  globalThis.URLSearchParams = class URLSearchParams {
+    constructor(init = "") {
+      this._d = [];
+      if (init instanceof URLSearchParams) { this._d = init._d.map((p) => [p[0], p[1]]); return; }
+      if (init && typeof init === "object") {
+        for (const k of Object.keys(init)) this._d.push([String(k), String(init[k])]);
+        return;
+      }
+      let s = String(init);
+      if (s[0] === "?") s = s.slice(1);
+      if (!s) return;
+      for (const pair of s.split("&")) {
+        if (!pair) continue;
+        const i = pair.indexOf("=");
+        const k = i === -1 ? pair : pair.slice(0, i);
+        const v = i === -1 ? "" : pair.slice(i + 1);
+        const dec = (x) => { try { return decodeURIComponent(x.replace(/\+/g, " ")); } catch { return x; } };
+        this._d.push([dec(k), dec(v)]);
+      }
+    }
+    append(k, v) { this._d.push([String(k), String(v)]); }
+    delete(k) { this._d = this._d.filter((p) => p[0] !== k); }
+    get(k) { const p = this._d.find((p) => p[0] === k); return p ? p[1] : null; }
+    getAll(k) { return this._d.filter((p) => p[0] === k).map((p) => p[1]); }
+    has(k) { return this._d.some((p) => p[0] === k); }
+    set(k, v) { this.delete(k); this._d.push([String(k), String(v)]); }
+    sort() { this._d.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)); }
+    forEach(cb, t) { for (const p of this._d) cb.call(t, p[1], p[0], this); }
+    keys() { return this._d.map((p) => p[0])[Symbol.iterator](); }
+    values() { return this._d.map((p) => p[1])[Symbol.iterator](); }
+    entries() { return this._d.map((p) => [p[0], p[1]])[Symbol.iterator](); }
+    [Symbol.iterator]() { return this.entries(); }
+    get size() { return this._d.length; }
+    toString() {
+      return this._d.map((p) => encodeURIComponent(p[0]) + "=" + encodeURIComponent(p[1])).join("&");
+    }
+  };
+}
+if (typeof globalThis.URL === "undefined") {
+  const ABS = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
+  globalThis.URL = class URL {
+    constructor(url, base) {
+      let input = String(url);
+      if (!ABS.test(input)) {
+        if (base == null) throw new TypeError("Invalid URL: " + url);
+        const b = base instanceof URL ? base : new URL(String(base));
+        if (input.startsWith("//")) input = b.protocol + input;
+        else if (input.startsWith("/")) input = b.protocol + "//" + b.host + input;
+        else if (input.startsWith("#")) input = b.protocol + "//" + b.host + b.pathname + b.search + input;
+        else if (input.startsWith("?")) input = b.protocol + "//" + b.host + b.pathname + input;
+        else {
+          const dir = b.pathname.slice(0, b.pathname.lastIndexOf("/") + 1) || "/";
+          input = b.protocol + "//" + b.host + dir + input;
+        }
+      }
+      const m = /^([a-zA-Z][a-zA-Z0-9+.-]*:)(\/\/(([^/?#@]*)@)?([^/?#:]*)(:(\d+))?)?([^?#]*)(\?[^#]*)?(#.*)?$/.exec(input);
+      if (!m) throw new TypeError("Invalid URL: " + url);
+      this.protocol = m[1];
+      const ui = (m[4] || "").split(":");
+      this.username = ui[0] || "";
+      this.password = ui[1] || "";
+      this.hostname = m[5] || "";
+      this.port = m[7] || "";
+      this.pathname = m[8] || (m[2] ? "/" : "");
+      this.hash = m[10] || "";
+      this.searchParams = new URLSearchParams(m[9] || "");
+    }
+    get host() { return this.port ? this.hostname + ":" + this.port : this.hostname; }
+    get origin() { return this.protocol + "//" + this.host; }
+    get search() { const q = this.searchParams.toString(); return q ? "?" + q : ""; }
+    set search(v) { this.searchParams = new URLSearchParams(String(v)); }
+    get href() {
+      const auth = this.username ? this.username + (this.password ? ":" + this.password : "") + "@" : "";
+      return this.protocol + "//" + auth + this.host + this.pathname + this.search + this.hash;
+    }
+    set href(v) { Object.assign(this, new URL(v)); }
+    toString() { return this.href; }
+    toJSON() { return this.href; }
+  };
+  globalThis.URL.createObjectURL = () => "blob:turbo-surf";
+  globalThis.URL.revokeObjectURL = () => {};
+}
+
+// location — back it with a real URL so setting `location.href` (done at install time,
+// and by history.pushState/replaceState) UPDATES pathname/search/hash/host/origin too.
+// browser_env.js ships a plain static object whose href is just a string field, so
+// pathname stayed "/" regardless of the page URL — and a client router that reads
+// `usePathname()`/`useSearchParams()` (Next's app router, route guards) then misroutes:
+// the payroll login page rendered "Redirecting…" instead of the form because the auth
+// guard saw pathname "/" (a protected route) rather than "/login". Defined AFTER the URL
+// polyfill so `new URL` is available. Components are live getters over the backing URL.
+(() => {
+  let _u = null;
+  const reparse = (v, base) => { try { _u = new globalThis.URL(String(v), base); } catch (_e) { /* keep prior */ } };
+  reparse((globalThis.location && globalThis.location.href) || "http://localhost/");
+  const loc = {
+    assign(v) { reparse(v, _u ? _u.href : undefined); },
+    replace(v) { reparse(v, _u ? _u.href : undefined); },
+    reload() {},
+    toString() { return _u ? _u.href : ""; },
+  };
+  for (const f of ["href", "protocol", "host", "hostname", "port", "pathname", "search", "hash", "origin"]) {
+    Object.defineProperty(loc, f, {
+      enumerable: true,
+      configurable: true,
+      get() { return _u ? _u[f] : ""; },
+      // setting href reparses (relative allowed against the current URL); other
+      // components write through to the backing URL where it supports it.
+      set(v) { if (f === "href") reparse(v, _u ? _u.href : undefined); else if (_u) { try { _u[f] = v; } catch (_e) {} } },
+    });
+  }
+  globalThis.location = loc;
+})();
+
+// document.referrer / URL / documentURI / baseURI — standard read-only document props
+// deno_core's binding lacks. Analytics (PostHog reads referrer + the URL and `.split`s
+// them) throws "Cannot read properties of undefined" without these, looping forever.
+(() => {
+  const d = globalThis.document;
+  if (!d) return;
+  const def = (name, get) => {
+    try {
+      if (typeof d[name] === "undefined") Object.defineProperty(d, name, { configurable: true, get });
+    } catch (_e) {}
+  };
+  def("referrer", () => "");
+  def("URL", () => globalThis.location.href);
+  def("documentURI", () => globalThis.location.href);
+  def("baseURI", () => globalThis.location.href);
+  // hasFocus(): auth/idle code refreshes only a focused document; default to focused.
+  try { if (typeof d.hasFocus !== "function") d.hasFocus = () => true; } catch (_e) {}
+})();
+
+// document.createTreeWalker + NodeFilter — focus-management code (MUI's DataGrid / focus
+// trap, ARIA widgets) walks the tree with these; deno_core's binding has neither, so a
+// page with a data grid threw "createTreeWalker is not a function" and rendered blank.
+// A document-order DFS honoring whatToShow + the accept filter (REJECT skips the subtree,
+// SKIP skips the node but descends) — enough for focusable-element scans.
+(() => {
+  const d = globalThis.document;
+  if (!d || typeof d.createTreeWalker === "function") return;
+  globalThis.NodeFilter = globalThis.NodeFilter || {
+    SHOW_ALL: 0xffffffff, SHOW_ELEMENT: 1, SHOW_TEXT: 4, SHOW_COMMENT: 128,
+    FILTER_ACCEPT: 1, FILTER_REJECT: 2, FILTER_SKIP: 3,
+  };
+  const ACCEPT = 1, REJECT = 2;
+  d.createTreeWalker = function (root, whatToShow, filter) {
+    const show = whatToShow == null ? 0xffffffff : whatToShow >>> 0;
+    const accept = (n) => {
+      const t = n.nodeType || 1;
+      const bit = t === 1 ? 1 : t === 3 ? 4 : t === 8 ? 128 : 1 << (t - 1);
+      if ((show & bit) === 0) return 3; // SKIP (wrong type)
+      const fn = filter && (typeof filter === "function" ? filter : filter.acceptNode);
+      if (typeof fn === "function") {
+        try { return fn.call(filter, n); } catch (_e) { return 1; }
+      }
+      return 1;
+    };
+    const w = { root, whatToShow: show, filter, currentNode: root };
+    w.nextNode = function () {
+      let node = this.currentNode;
+      for (;;) {
+        let child = node.firstChild;
+        let descend = true;
+        while (descend && child) {
+          node = child;
+          const r = accept(node);
+          if (r === ACCEPT) { this.currentNode = node; return node; }
+          if (r === REJECT) { descend = false; } // don't descend; fall to sibling search
+          else child = node.firstChild; // SKIP → keep descending
+        }
+        let t = node;
+        while (t && t !== this.root) {
+          if (t.nextSibling) { node = t.nextSibling; break; }
+          t = t.parentNode;
+        }
+        if (!t || t === this.root) return null;
+        const r = accept(node);
+        if (r === ACCEPT) { this.currentNode = node; return node; }
+      }
+    };
+    w.firstChild = function () {
+      let c = this.currentNode.firstChild;
+      while (c) { const r = accept(c); if (r === ACCEPT) { this.currentNode = c; return c; } c = c.nextSibling; }
+      return null;
+    };
+    w.nextSibling = function () {
+      let s = this.currentNode.nextSibling;
+      while (s) { const r = accept(s); if (r === ACCEPT) { this.currentNode = s; return s; } s = s.nextSibling; }
+      return null;
+    };
+    w.parentNode = function () {
+      let p = this.currentNode.parentNode;
+      while (p && p !== this.root) { if (accept(p) === ACCEPT) { this.currentNode = p; return p; } p = p.parentNode; }
+      return null;
+    };
+    w.previousNode = function () { return null; }; // rarely used by focus scans
+    return w;
+  };
+  // NodeIterator (same filter model, linear) — some libs use it instead of TreeWalker.
+  if (typeof d.createNodeIterator !== "function") {
+    d.createNodeIterator = function (root, whatToShow, filter) {
+      const tw = d.createTreeWalker(root, whatToShow, filter);
+      return { nextNode: () => tw.nextNode(), previousNode: () => null, detach() {} };
+    };
+  }
+})();
+
+// Viewport / screen globals — no real rendering surface here, but analytics and
+// responsive code read them (PostHog `.split`/`.height` on undefined throws → loops
+// forever). Sensible desktop defaults.
+(() => {
+  const set = (k, v) => {
+    if (typeof globalThis[k] === "undefined") {
+      try { globalThis[k] = v; } catch (_e) {}
+    }
+  };
+  set("innerWidth", 1280);
+  set("innerHeight", 800);
+  set("outerWidth", 1280);
+  set("outerHeight", 800);
+  set("devicePixelRatio", 1);
+  set("screenX", 0);
+  set("screenY", 0);
+  set("scrollX", 0);
+  set("scrollY", 0);
+  set("pageXOffset", 0);
+  set("pageYOffset", 0);
+  set("scroll", () => {});
+  set("scrollTo", () => {});
+  set("scrollBy", () => {});
+  set("screen", {
+    width: 1280, height: 800, availWidth: 1280, availHeight: 800,
+    colorDepth: 24, pixelDepth: 24,
+    orientation: { type: "landscape-primary", angle: 0, addEventListener() {}, removeEventListener() {} },
+  });
+  set("visualViewport", {
+    width: 1280, height: 800, scale: 1, offsetLeft: 0, offsetTop: 0, pageLeft: 0, pageTop: 0,
+    addEventListener() {}, removeEventListener() {}, dispatchEvent() { return false; },
+  });
+})();
+
+// Next.js's webpack runtime reads `document.currentScript` to resolve chunk paths
+// (getPathFromScript → `currentScript.getAttribute('src').replace(...)`). The tier
+// runs the page's scripts as one concatenated bundle, so there's no "current" script
+// element — expose a detached one whose `src` is the page URL (a string, so the
+// `.replace` is safe) to keep that read working.
+try {
+  if (globalThis.document && !globalThis.document.currentScript) {
+    const __cs = globalThis.document.createElement("script");
+    const __href = (globalThis.location && globalThis.location.href) || "";
+    __cs.setAttribute("src", __href);
+    try { __cs.src = __href; } catch (_e) {}
+    globalThis.document.currentScript = __cs;
+  }
+} catch (_e) {}
+
+// --- hydration pump: the browser's script-loading model -----------------------
+// Real SPAs (Next.js/webpack) don't ship their code inline — they BOOT a tiny
+// runtime that injects more <script src> chunks at runtime and waits for each
+// chunk's `onload` before continuing (webpack's `__webpack_require__.e`). A node
+// DOM that merely *appends* the <script> node never runs it, so the loader
+// promise hangs and the app never mounts. So: execute each <script> element once
+// (inline → eval in global scope; external → fetch its src then eval), and fire
+// load/error so the loader resolves. `__hydrate()` drives this to quiescence.
+const __EXECUTABLE_TYPES = new Set(["", "text/javascript", "application/javascript", "module"]);
+function __fireScriptEvent(el, kind, err) {
+  const ev = { type: kind, target: el, currentTarget: el, error: err };
+  try { const h = kind === "load" ? el.onload : el.onerror; if (typeof h === "function") h.call(el, ev); } catch (_e) {}
+  try { if (typeof el.dispatchEvent === "function") el.dispatchEvent(ev); } catch (_e) {}
+}
+globalThis.__execScriptEl = async function (el) {
+  if (!el || el.__tcDone) return;
+  el.__tcDone = true; // mark before await so a re-entrant pump round can't double-run
+  const get = (n) => (typeof el.getAttribute === "function" ? el.getAttribute(n) : null);
+  // Module-capable browsers SKIP `<script nomodule>` (they run the module build
+  // instead). We support module scripts, so honor it: otherwise we force-run a
+  // page's legacy polyfill bundle (e.g. Next's core-js `polyfill-nomodule`), which
+  // overwrites native Promise/queueMicrotask with impls whose microtask scheduler
+  // is inert in this env — promises never settle and the render never commits.
+  if (get("nomodule") !== null || get("noModule") !== null) return;
+  if (!__EXECUTABLE_TYPES.has((get("type") || "").toLowerCase())) return; // JSON/data blocks etc.
+  const src = get("src");
+  try {
+    let code;
+    if (src) {
+      const abs = new URL(src, globalThis.location.href).href;
+      const res = await fetch(abs);
+      if (!res.ok) { __fireScriptEvent(el, "error"); return; }
+      code = await res.text();
+    } else {
+      code = el.textContent || el.text || "";
+    }
+    // Set document.currentScript to THIS element during execution, like a browser.
+    // Turbopack/webpack chunk runtimes do `TURBOPACK.push([document.currentScript, …])`
+    // to correlate each chunk with the element that loaded it — a single static
+    // currentScript makes every chunk look identical and the module graph never
+    // resolves. Restore the prior value after (nested injects during eval).
+    let __prevCs;
+    try { __prevCs = globalThis.document.currentScript; globalThis.document.currentScript = el; } catch (_e) {}
+    try {
+      (0, eval)(code); // classic-script semantics: run in global scope
+    } finally {
+      try { globalThis.document.currentScript = __prevCs; } catch (_e) {}
+    }
+    __fireScriptEvent(el, "load");
+  } catch (e) {
+    __fireScriptEvent(el, "error", e);
+    Deno.core.print("script error (" + (src || "inline") + "): " + e + "\n");
+  }
+};
+// Run every not-yet-run <script> in DOM order, drain timers, repeat while new
+// scripts appear or timers keep firing. Bounded by maxRounds (+ the render budget).
+globalThis.__hydrate = async function (maxRounds = 300, timerBudget = 200000) {
+  let timersLeft = timerBudget; // total timer-callback budget across rounds — an app
+  // whose scheduler never reaches idle (e.g. React polling a backend that never
+  // answers) would otherwise spin until the render budget; cap it and return the
+  // best-effort DOM rendered so far.
+  for (let round = 0; round < maxRounds && timersLeft > 0; round++) {
+    let ranScript = false;
+    for (const el of Array.prototype.slice.call(document.querySelectorAll("script"))) {
+      if (!el.__tcDone) { ranScript = true; await globalThis.__execScriptEl(el); }
+    }
+    const fired = globalThis.__runTimers(Math.min(timersLeft, 5000));
+    timersLeft -= fired;
+    if (!ranScript && fired === 0) break;
+  }
+};
+// Pending-work signal for the Rust pump loop: "1" while timers are queued or a
+// <script> hasn't run (more to do after the next async drain), else "0".
+globalThis.__pendingWork = () =>
+  __timers.length > 0 || Array.prototype.some.call(document.querySelectorAll("script"), (s) => !s.__tcDone) ? "1" : "0";
+
+// A cheap "has the DOM changed?" signal for the interaction drain: element count + the
+// total length of input values (so a controlled-input edit registers). Lets the drain
+// stop once the render has SETTLED even though background timers (analytics polling,
+// React's idle scheduler) never stop — otherwise an interaction would always run to the
+// full budget. Not for correctness, just to detect quiescence of the visible tree.
+globalThis.__domSig = () => {
+  try {
+    const els = document.getElementsByTagName("*");
+    let n = els.length, vlen = 0;
+    const inputs = document.querySelectorAll("input,textarea,select");
+    for (let i = 0; i < inputs.length; i++) vlen += (inputs[i].value || "").length;
+    return n + ":" + vlen + ":" + (globalThis.location ? globalThis.location.href.length : 0);
+  } catch (_e) {
+    return "0";
+  }
+};
+
+// Shadow DOM light-DOM fallback: embeddable widgets (PropelAuth's login) call
+// host.attachShadow() and render into the returned root. rtdom has no shadow tree,
+// so the root IS the host — rendered content lands in the serialized light DOM and
+// stays queryable. Stamped as an OWN property (the binding's interceptor returns real
+// own props) on every created element + the existing roots. Not true encapsulation,
+// but enough to let a shadow-rendering widget mount into the document.
+(function () {
+  const addShadow = (el) => {
+    if (el && typeof el.attachShadow !== "function") {
+      el.attachShadow = function () {
+        // Light-DOM fallback: the root IS the host. Set `.host` back to the host
+        // (itself) too — code reads `shadowRoot.host` to get the host element back
+        // (Next devtools: `var e = er.host; e.classList…`); without it that's undefined.
+        try { this.shadowRoot = this; this.host = this; } catch (_e) {}
+        return this;
+      };
+    }
+    return el;
+  };
+  const origCreate = document.createElement.bind(document);
+  document.createElement = (tag) => addShadow(origCreate(tag));
+  if (document.body) addShadow(document.body);
+  if (document.documentElement) addShadow(document.documentElement);
+})();
+})();"##;
+
+fn make_runtime(base: &str, cookies: &str, ua: &str) -> JsRuntime {
+    let rt = JsRuntime::new(RuntimeOptions {
+        extensions: vec![turbo_dom::init()],
+        ..Default::default()
+    });
+    let jar = if cookies.is_empty() {
+        CookieJar::new()
+    } else {
+        CookieJar::from_storage_state(cookies)
+    };
+    let state = rt.op_state();
+    let mut state = state.borrow_mut();
+    state.put::<Base>(Base(base.to_string()));
+    state.put::<Jar>(Rc::new(RefCell::new(jar)));
+    state.put::<Ua>(Ua(ua.to_string()));
+    drop(state);
+    rt
+}
+
+/// Graft the native DOM binding onto the runtime's context (parsing `html` into the
+/// tree), then layer the non-DOM env globals over the ops. After this the page
+/// script runs against a real `document`.
+fn install_dom(rt: &mut JsRuntime, html: &str, base: &str) -> Result<(), String> {
+    let context = rt.main_context();
+    {
+        let scope = v8::HandleScope::new(rt.v8_isolate());
+        let scope = std::pin::pin!(scope);
+        let mut scope = scope.init();
+        let context = v8::Local::new(&scope, context);
+        let mut scope = v8::ContextScope::new(&mut scope, context);
+        crate::browser_env::install_html(&mut scope, html);
+    }
+    rt.execute_script("<env>", ENV_BOOTSTRAP)
+        .map_err(|e| e.to_string())?;
+    rt.execute_script("<location>", format!("location.href = {base:?}"))
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn read_string(rt: &mut JsRuntime, global: v8::Global<v8::Value>) -> Result<String, String> {
+    let context = rt.main_context();
+    let scope = v8::HandleScope::new(rt.v8_isolate());
+    let scope = std::pin::pin!(scope);
+    let mut scope = scope.init();
+    let context = v8::Local::new(&scope, context);
+    let scope = v8::ContextScope::new(&mut scope, context);
+    let local = v8::Local::new(&scope, global);
+    Ok(local.to_rust_string_lossy(&scope))
+}
+
+thread_local! {
+    /// Persistent evaluate runtime, reused across `run_with_dom` calls (i.e. across
+    /// pages) so the ~20ms V8-isolate boot is paid ONCE per thread, not per call —
+    /// the dominant per-page cost for a no-JS crawler whose link/field extraction
+    /// goes through `page.evaluate`. Safe to reuse across pages: each call reinstalls
+    /// a fresh DOM from the page's HTML, and the binding's V8 globals are cleared
+    /// (`browser_env::reset`) after every call, so the thread-local DOM is empty at
+    /// thread exit (no dangling handles when the isolate finally drops). Page-JS
+    /// isolation across pages is intentionally relaxed here — a crawl doesn't need it.
+    static EVAL_RT: RefCell<Option<(JsRuntime, String)>> = const { RefCell::new(None) };
+}
+
+/// Evaluate `script` against `html`'s DOM, returning its result as a string
+/// (Playwright `page.evaluate`-ish; synchronous, no event loop). Reuses a
+/// thread-persistent isolate AND the installed DOM across calls on the SAME page
+/// (see [`EVAL_RT`]): the page is parsed + installed once, then repeated
+/// `page.evaluate`s on it just run script (~0.5 ms) instead of re-parsing the
+/// document (~5 ms). The DOM is re-installed only when the HTML changes (a new
+/// page). Same-page evaluates share the page's globals/DOM, which matches
+/// Playwright's page-scoped `evaluate` semantics.
+pub fn run_with_dom(html: &str, script: &str) -> Result<String, String> {
+    EVAL_RT.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            *slot = Some((make_runtime("about:blank", "", ""), String::new()));
+        }
+        let (rt, installed) = slot.as_mut().expect("eval runtime present");
+        if installed != html {
+            crate::browser_env::reset(); // drop the previous page's binding (isolate still alive)
+            install_dom(rt, html, "about:blank")?;
+            installed.clear();
+            installed.push_str(html);
+        }
+        let global = rt
+            .execute_script("<page>", script.to_string())
+            .map_err(|e| e.to_string())?;
+        read_string(rt, global)
+    })
+}
+
+/// Run page `script` against `html`, drain virtual timers, and return the hydrated
+/// document HTML. The Lane B render contract: JS-gated page in, HTML after the
+/// page's own scripts ran out. (Sync; no event loop — see [`render_page`].)
+pub fn render_html(html: &str, script: &str) -> Result<String, String> {
+    let mut rt = make_runtime("about:blank", "", "");
+    let out = run_sync(&mut rt, html, script);
+    crate::browser_env::reset();
+    out
+}
+
+fn run_sync(rt: &mut JsRuntime, html: &str, script: &str) -> Result<String, String> {
+    install_dom(rt, html, "about:blank")?;
+    rt.execute_script("<page>", script.to_string())
+        .map_err(|e| e.to_string())?;
+    rt.execute_script("<timers>", "__runTimers()")
+        .map_err(|e| e.to_string())?;
+    Ok(crate::browser_env::document_html())
+}
+
+async fn drain_event_loop(rt: &mut JsRuntime) -> Result<(), String> {
+    match rt
+        .run_event_loop(deno_core::PollEventLoopOptions::default())
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Browser-tolerant: a page's UNHANDLED promise rejection logs in a real
+            // browser, it doesn't abort the page. deno_core surfaces it as a fatal event-
+            // loop error ("Uncaught (in promise) …"); swallow it so hydration keeps going
+            // (the pump re-polls). Real execution errors (terminated budget, op failures)
+            // still propagate.
+            let s = e.to_string();
+            if s.contains("Uncaught (in promise)") || s.contains("Unhandled") {
+                Ok(())
+            } else {
+                Err(s)
+            }
+        }
+    }
+}
+
+/// Like [`render_html`] but drives deno_core's event loop, so a page script that
+/// hydrates asynchronously (`Promise`/`async`-`await`/microtasks, and timer
+/// callbacks that themselves await) resolves before serialization. This is the
+/// fidelity step real SPA frameworks need.
+pub async fn render_html_async(html: &str, script: &str) -> Result<String, String> {
+    render_page(html, "about:blank", script).await
+}
+
+/// Default render execution budget (eval-guard). A page script that loops forever
+/// (sync) or never settles (async) is terminated past this.
+pub const DEFAULT_RENDER_BUDGET_MS: u64 = 10_000;
+
+/// Async render with a page base URL — relative `fetch` resolves against it and
+/// the `document.cookie` bridge is scoped to it. Drives the event loop so
+/// `fetch`-driven and promise-based hydration completes before serialization.
+/// Bounded by [`DEFAULT_RENDER_BUDGET_MS`].
+pub async fn render_page(html: &str, base: &str, script: &str) -> Result<String, String> {
+    render_page_with_budget(html, base, script, DEFAULT_RENDER_BUDGET_MS).await
+}
+
+/// `render_page` with an explicit execution budget (ms). The V8 isolate is a true
+/// isolate (host heap unreachable from guest); this adds a runaway-execution guard:
+/// a watchdog thread terminates the isolate if the script exceeds `budget_ms`.
+pub async fn render_page_with_budget(
+    html: &str,
+    base: &str,
+    script: &str,
+    budget_ms: u64,
+) -> Result<String, String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let mut rt = make_runtime(base, "", "");
+    let handle = rt.v8_isolate().thread_safe_handle();
+    let done = Arc::new(AtomicBool::new(false));
+    let watch = done.clone();
+    let watchdog = std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        while !watch.load(Ordering::Relaxed) {
+            if start.elapsed() >= std::time::Duration::from_millis(budget_ms) {
+                handle.terminate_execution();
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    });
+
+    let result = run_async(&mut rt, html, base, script).await;
+    done.store(true, Ordering::Relaxed);
+    let _ = watchdog.join();
+    let out = result.map_err(|e| budget_msg(&e, budget_ms));
+    crate::browser_env::reset();
+    out
+}
+
+async fn run_async(
+    rt: &mut JsRuntime,
+    html: &str,
+    base: &str,
+    script: &str,
+) -> Result<String, String> {
+    install_dom(rt, html, base)?;
+    rt.execute_script("<page>", script.to_string())
+        .map_err(|e| e.to_string())?;
+    drain_event_loop(rt).await?; // promises/microtasks + fetch from the page
+    rt.execute_script("<timers>", "__runTimers()")
+        .map_err(|e| e.to_string())?;
+    drain_event_loop(rt).await?; // promises queued by timer callbacks
+    Ok(crate::browser_env::document_html())
+}
+
+/// Hydrate a page by running ITS OWN scripts the way a browser does — execute each
+/// `<script>` (inline + dynamically-injected chunks), fetching + running external
+/// `src` and firing `onload` so a webpack-style chunk loader resolves and the app
+/// mounts. No bundle concatenation by the caller, no framework runtime from us: the
+/// page's own bundle drives itself. Bounded by [`DEFAULT_RENDER_BUDGET_MS`].
+pub async fn render_hydrate(html: &str, base: &str) -> Result<String, String> {
+    render_hydrate_with_budget(html, base, "", "", DEFAULT_RENDER_BUDGET_MS).await
+}
+
+/// [`render_hydrate`] with the page's cookies (a `storageState` JSON string, "" for
+/// none) seeded into the jar so session-authenticated hydration works, a custom
+/// User-Agent ("" for the default), plus an explicit execution budget (ms) + watchdog.
+pub async fn render_hydrate_with_budget(
+    html: &str,
+    base: &str,
+    cookies: &str,
+    ua: &str,
+    budget_ms: u64,
+) -> Result<String, String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let mut rt = make_runtime(base, cookies, ua);
+    let handle = rt.v8_isolate().thread_safe_handle();
+    let done = Arc::new(AtomicBool::new(false));
+    let watch = done.clone();
+    let watchdog = std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        while !watch.load(Ordering::Relaxed) {
+            if start.elapsed() >= std::time::Duration::from_millis(budget_ms) {
+                handle.terminate_execution();
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    });
+
+    let result = run_hydrate(&mut rt, html, base).await;
+    done.store(true, Ordering::Relaxed);
+    let _ = watchdog.join();
+    let out = result.map_err(|e| budget_msg(&e, budget_ms));
+    crate::browser_env::reset();
+    out
+}
+
+/// Run `script` over `html`'s DOM, drive the event loop + hydration drain, then
+/// return the string value of `globalThis.__RESULT`. Backs the MCP `run_playwright`
+/// tool: the caller frames a program that runs a Playwright-style script and stashes
+/// a JSON result in `__RESULT`. Bounded by [`DEFAULT_RENDER_BUDGET_MS`].
+pub async fn eval_async(html: &str, base: &str, script: &str) -> Result<String, String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let mut rt = make_runtime(base, "", "");
+    let handle = rt.v8_isolate().thread_safe_handle();
+    let done = Arc::new(AtomicBool::new(false));
+    let watch = done.clone();
+    let watchdog = std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        while !watch.load(Ordering::Relaxed) {
+            if start.elapsed() >= std::time::Duration::from_millis(DEFAULT_RENDER_BUDGET_MS) {
+                handle.terminate_execution();
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    });
+    let result = async {
+        install_dom(&mut rt, html, base)?;
+        rt.execute_script("<script>", script.to_string())
+            .map_err(|e| e.to_string())?;
+        drain_event_loop(&mut rt).await?;
+        rt.execute_script("<timers>", "__runTimers()")
+            .map_err(|e| e.to_string())?;
+        drain_event_loop(&mut rt).await?;
+        let g = rt
+            .execute_script("<result>", "String(globalThis.__RESULT || '')")
+            .map_err(|e| e.to_string())?;
+        read_string(&mut rt, g)
+    }
+    .await;
+    done.store(true, Ordering::Relaxed);
+    let _ = watchdog.join();
+    let out = result.map_err(|e| budget_msg(&e, DEFAULT_RENDER_BUDGET_MS));
+    crate::browser_env::reset();
+    out
+}
+
+async fn run_hydrate(rt: &mut JsRuntime, html: &str, base: &str) -> Result<String, String> {
+    install_dom(rt, html, base)?;
+    // Unified event-loop pump. A single "run scripts+timers, then drain" pass isn't
+    // enough for a real SPA: React kicks a fetch, yields, the fetch resolves, React
+    // schedules MORE work (a timer via its MessageChannel), which schedules another
+    // fetch… So loop — run the hydration pump, drain async ops (microtasks + fetches +
+    // injected-script loads), check whether JS still has queued work — until it
+    // quiesces. The watchdog bounds wall time; MAX_PUMPS bounds a pathological spin.
+    const MAX_PUMPS: usize = 500;
+    for _ in 0..MAX_PUMPS {
+        rt.execute_script("<hydrate>", "globalThis.__tcHydrate = __hydrate();")
+            .map_err(|e| e.to_string())?;
+        drain_event_loop(rt).await?;
+        let pending = rt
+            .execute_script("<pending>", "__pendingWork()")
+            .map_err(|e| e.to_string())?;
+        if read_string(rt, pending)? != "1" {
+            break;
+        }
+    }
+    Ok(crate::browser_env::document_html())
+}
+
+// RAII runaway-execution watchdog: terminates the isolate if an op runs past the
+// budget, and is cancelled (thread joined) on drop. Replaces the hand-rolled
+// done-flag + spawn + join that each one-shot entry point repeats.
+struct Watchdog {
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl Watchdog {
+    fn start(handle: v8::IsolateHandle, budget_ms: u64) -> Self {
+        use std::sync::atomic::Ordering;
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let watch = done.clone();
+        let thread = std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            while !watch.load(Ordering::Relaxed) {
+                if start.elapsed() >= std::time::Duration::from_millis(budget_ms) {
+                    handle.terminate_execution();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        });
+        Watchdog {
+            done,
+            thread: Some(thread),
+        }
+    }
+}
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        self.done.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+// Drive the event loop to quiescence: drain async ops (microtasks + fetches), fire any
+// queued virtual timers (React's scheduler posts work through them), and repeat until
+// nothing is pending. Used after an interaction event re-enters the running app (the
+// handler may setState → schedule a re-render → fetch → schedule more).
+async fn drain_to_quiescence(rt: &mut JsRuntime) -> Result<(), String> {
+    const MAX_ROUNDS: usize = 500;
+    // Stop early once the visible tree has been STABLE for this many rounds even though
+    // timers keep firing: a real app's analytics/idle-scheduler never stops posting
+    // timers, so "no timers queued" alone never holds — wait for the DOM to settle.
+    const STABLE_ROUNDS: usize = 6;
+    let mut stable = 0usize;
+    let mut last_sig = String::new();
+    for _ in 0..MAX_ROUNDS {
+        drain_event_loop(rt).await?;
+        let fired = rt
+            .execute_script("<timers>", "__runTimers(2000)")
+            .map_err(|e| e.to_string())?;
+        drain_event_loop(rt).await?;
+        let pending = rt
+            .execute_script("<pending>", "__pendingWork()")
+            .map_err(|e| e.to_string())?;
+        let sig_v = rt
+            .execute_script("<domsig>", "__domSig()")
+            .map_err(|e| e.to_string())?;
+        let still = read_string(rt, pending)? == "1";
+        let fired_any = read_string(rt, fired)? != "0";
+        if !still && !fired_any {
+            break; // genuinely idle
+        }
+        let sig = read_string(rt, sig_v)?;
+        if sig == last_sig {
+            stable += 1;
+            if stable >= STABLE_ROUNDS {
+                break; // render settled; remaining timers are background churn
+            }
+        } else {
+            stable = 0;
+            last_sig = sig;
+        }
+    }
+    Ok(())
+}
+
+/// A LIVE page: a persistent [`JsRuntime`] whose hydrated DOM + running JS (React, the
+/// app's closures, its delegated event listeners) stay ALIVE across operations. Unlike
+/// the one-shot `render_*`/`render_hydrate` paths — which serialize the DOM to a string
+/// and `reset()` the binding after each call, destroying the running app — a session
+/// keeps the app mounted so interactions dispatch REAL DOM events into it and the
+/// re-render is observable. This is the browserless analog of a Playwright page.
+///
+/// The V8 isolate + the binding's thread-local DOM are NOT `Send`: a session must be
+/// created and driven from a single owning thread (the napi layer pins one thread per
+/// session). `close()` (or drop) resets the binding while the isolate is still alive.
+pub struct PageSession {
+    rt: JsRuntime,
+    budget_ms: u64,
+    closed: bool,
+}
+
+impl PageSession {
+    /// Build the runtime, install + hydrate the page to quiescence, and KEEP IT ALIVE.
+    pub async fn open(
+        html: &str,
+        base: &str,
+        cookies: &str,
+        ua: &str,
+        budget_ms: u64,
+    ) -> Result<Self, String> {
+        let mut rt = make_runtime(base, cookies, ua);
+        let result = {
+            let _wd = Watchdog::start(rt.v8_isolate().thread_safe_handle(), budget_ms);
+            run_hydrate(&mut rt, html, base).await
+        };
+        match result {
+            Ok(_) => Ok(PageSession {
+                rt,
+                budget_ms,
+                closed: false,
+            }),
+            Err(e) => {
+                crate::browser_env::reset();
+                Err(budget_msg(&e, budget_ms))
+            }
+        }
+    }
+
+    /// Run `script` in the LIVE isolate, then drain the event loop to quiescence so any
+    /// work the script triggered (event handlers, re-render, fetch) completes. Returns
+    /// `String(globalThis.__RESULT || '')` — scripts that need to return a value stash
+    /// it there.
+    pub async fn eval(&mut self, script: &str) -> Result<String, String> {
+        const READ: &str = "String(globalThis.__RESULT == null ? '' : globalThis.__RESULT)";
+        let budget = self.budget_ms;
+        let drained = {
+            let _wd = Watchdog::start(self.rt.v8_isolate().thread_safe_handle(), budget);
+            let r = async {
+                self.rt
+                    .execute_script("<session-eval>", script.to_string())
+                    .map_err(|e| e.to_string())?;
+                drain_to_quiescence(&mut self.rt).await
+            }
+            .await;
+            r
+        };
+        // The watchdog may have terminated mid-drain. Clear that terminate state so the
+        // isolate is usable again, then read the result BEST-EFFORT: an interaction's
+        // important effects (the login POST, a client navigation) land early in the
+        // drain — the budget is normally hit later on background churn (analytics
+        // polling, React's idle scheduler). Returning the reached state beats throwing.
+        self.rt.v8_isolate().cancel_terminate_execution();
+        match drained {
+            Err(e) if !(e.contains("terminat") || e.contains("execution")) => Err(e),
+            _ => self
+                .rt
+                .execute_script("<result>", READ)
+                .map_err(|e| budget_msg(&e.to_string(), budget))
+                .and_then(|g| read_string(&mut self.rt, g)),
+        }
+    }
+
+    /// Serialize the CURRENT live DOM to HTML (no reset — the page stays alive).
+    pub fn serialize(&self) -> String {
+        crate::browser_env::document_html()
+    }
+
+    /// The page's cookies as a `storageState` JSON string (includes HttpOnly session
+    /// cookies the in-isolate `document.cookie` can't see) — so a later navigation can
+    /// carry the session established during this page's lifetime (e.g. after login).
+    pub fn cookies(&self) -> String {
+        let op_state = self.rt.op_state();
+        let jar = op_state.borrow().borrow::<Jar>().clone();
+        let s = jar.borrow().storage_state();
+        s
+    }
+
+    /// Tear down: reset the binding while the isolate is still alive, then drop it.
+    pub fn close(mut self) {
+        self.closed = true;
+        crate::browser_env::reset();
+    }
+}
+
+impl Drop for PageSession {
+    fn drop(&mut self) {
+        if !self.closed {
+            crate::browser_env::reset();
+        }
+    }
+}
+
+// A terminated isolate surfaces as a generic execution error; relabel it.
+fn budget_msg(e: &str, budget_ms: u64) -> String {
+    if e.contains("terminated") || e.contains("execution") {
+        format!("render budget exceeded ({budget_ms}ms)")
+    } else {
+        e.to_string()
+    }
+}

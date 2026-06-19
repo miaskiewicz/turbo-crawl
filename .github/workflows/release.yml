@@ -1,48 +1,65 @@
-# Release workflow — tag-gated npm publish for turbo-crawl.
-#
-# turbo-crawl is pure ESM JavaScript: nothing to compile, no native binaries,
-# no per-platform matrix (unlike turbo-test / turbo-dom / turbo-html2pdf, which
-# ship napi/wasm artifacts). So this is a single job: gate, then publish.
-#
-# Fires on a `v*` tag (e.g. `v0.1.0`) or a manual run. Requires the repo secret
-# NPM_TOKEN (a token allowed to publish @miaskiewicz/turbo-crawl). The existing
-# ci.yml (lint/test on PR/push) is separate and untouched.
+# Release — on a `v*` tag, build the standalone `turbo-surf-mcp` binary for every
+# platform and publish `turbo-surf` (the thin launcher npm package,
+# which spawns the binary). No napi, no Node hosting Rust — same model as
+# turbo-test. The Rust crates publish separately (rust-crates-publish.yml).
 name: Release
 
 on:
+  workflow_dispatch:
   push:
-    tags: ['v*']
-  workflow_dispatch: # manual fallback / dry-run trigger
+    tags: ["v*"]
 
 permissions:
   contents: read
-  id-token: write # required for npm provenance
+  id-token: write # npm provenance
 
 jobs:
-  publish:
-    name: publish to npm
-    runs-on: ubuntu-latest
+  build:
+    name: build ${{ matrix.node }}
+    runs-on: ${{ matrix.host }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { host: macos-14, target: aarch64-apple-darwin, node: darwin-arm64 }
+          - { host: macos-13, target: x86_64-apple-darwin, node: darwin-x64 }
+          - { host: ubuntu-24.04, target: x86_64-unknown-linux-gnu, node: linux-x64 }
+          - { host: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, node: linux-arm64 }
+          - { host: windows-latest, target: x86_64-pc-windows-msvc, node: win32-x64, ext: .exe }
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "${{ matrix.target }}" }
+      - name: Build the MCP binary
+        run: cargo build --release -p turbo-surf-mcp --target ${{ matrix.target }} --manifest-path rust/Cargo.toml
+      - name: Stage platform binary
+        shell: bash
+        run: |
+          mkdir -p out
+          cp "rust/target/${{ matrix.target }}/release/turbo-surf-mcp${{ matrix.ext }}" \
+             "out/turbo-surf-mcp-${{ matrix.node }}${{ matrix.ext }}"
+      - uses: actions/upload-artifact@v4
         with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
-          cache: npm
+          name: bin-${{ matrix.node }}
+          path: out/*
+          if-no-files-found: error
 
-      - name: Install
-        run: npm ci
-
-      # Quality gate (lint + format + cc + tsgo + test). Mirrors ci.yml's checks
-      # so a bad tree never gets published.
-      - name: Gate
-        run: npm run check
-
-      # `npm publish` re-runs prepublishOnly (npm run check) by default; the gate
-      # above already ran it, but we keep that hook for local publishes too.
-      # --provenance attaches a signed build attestation (needs id-token: write).
-      - name: Publish
-        run: npm publish --access public --provenance
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, registry-url: "https://registry.npmjs.org" }
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts }
+      - name: Collect prebuilt binaries into bin/
+        run: |
+          mkdir -p bin
+          find artifacts -type f -name 'turbo-surf-mcp-*' -exec cp {} bin/ \;
+          chmod +x bin/* || true
+          ls -la bin/
+      - run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

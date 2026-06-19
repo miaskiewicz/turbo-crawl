@@ -1,6 +1,6 @@
 // Routine: a JavaScript-rendered page (quotes.toscrape.com/js builds its content
-// client-side). Demonstrates the JS-render tier: turbo-crawl no-JS sees an empty
-// list (so this routine is skipped for it), while turbo-crawl js-fast / js-secure
+// client-side). Demonstrates the JS-render tier: turbo-surf no-JS sees an empty
+// list (so this routine is skipped for it), while turbo-surf js-fast / js-secure
 // and real browsers render the quotes — and should agree.
 
 const URL = "https://quotes.toscrape.com/js/";

@@ -16,5 +16,11 @@
     "no-var": "error",
     "prefer-const": "error"
   },
-  "ignorePatterns": ["**/dist/**", "**/node_modules/**", "**/coverage/**", "test/fixtures/**"]
+  "ignorePatterns": [
+    "**/dist/**",
+    "**/node_modules/**",
+    "**/coverage/**",
+    "test/fixtures/**",
+    "**/browser_env.js"
+  ]
 }

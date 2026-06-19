@@ -35,7 +35,7 @@ export default {
     }
     await page.goBack();
     obs.push({ step: "goBack", path: pathOf(page.url()) });
-    // scroll: a no-op on turbo-crawl (no layout), real on Chromium — recorded, not compared.
+    // scroll: a no-op on turbo-surf (no layout), real on Chromium — recorded, not compared.
     await page.evaluate(() => (typeof scrollTo === "function" ? scrollTo(0, 2000) : 0));
     obs.push({ step: "scrolled", ok: true });
     return obs;
