@@ -196,8 +196,22 @@ const __log = (...a) => Deno.core.print(a.map(String).join(" ") + "\n");
 globalThis.console = { log: __log, info: __log, warn: __log, error: __log, debug: () => {} };
 const __timers = [];
 let __tid = 1;
+// Virtual clock (ms). A timer's `due` is `__now + delay` at schedule time; the drain
+// advances `__now` to each fired timer's `due`. This makes the env behave like
+// wall-clock for SELF-RESCHEDULING timers: a `setTimeout(poll, 1000)` that reschedules
+// itself fires at virtual 1000, 2000, 3000… so over the virtual budget it fires a
+// browser-like number of times (~tens), not thousands. Previously `delay` was only a
+// sort key, so a polling loop (analytics SDKs like PostHog do this) fired until the raw
+// count cap — spinning the entire render budget and starving the real commit. Delay-0
+// work (microtasks / the React scheduler) still drains promptly (it never advances the
+// clock); only delayed polls are time-gated.
+let __now = 0;
+// Virtual-time ceiling: once the clock passes this, delayed timers stop firing so a
+// never-idle poll can't hold the render budget. Generous enough for real load-time
+// timeouts (debounces, retries, refresh backoffs) to run.
+const __VIRTUAL_BUDGET_MS = 15000;
 globalThis.setTimeout = (fn, delay = 0, ...args) => {
-  __timers.push({ id: __tid, fn, delay: +delay || 0, args });
+  __timers.push({ id: __tid, fn, due: __now + (+delay || 0), args });
   return __tid++;
 };
 globalThis.setInterval = globalThis.setTimeout; // one-shot here (no event loop)
@@ -218,9 +232,16 @@ globalThis.queueMicrotask = (fn) => globalThis.setTimeout(fn, 0);
 globalThis.__runTimers = (max = 100000) => {
   let n = 0;
   while (__timers.length && n < max) {
+    // Earliest-due first.
+    let bi = 0;
+    for (let i = 1; i < __timers.length; i++) if (__timers[i].due < __timers[bi].due) bi = i;
+    const t = __timers[bi];
+    // A delayed timer past the virtual budget is a never-idle poll — stop firing it so
+    // the drain can quiesce. (Delay-0 work has due <= __now and always runs.)
+    if (t.due > __now && t.due > __VIRTUAL_BUDGET_MS) break;
+    __timers.splice(bi, 1);
+    if (t.due > __now) __now = t.due; // advance the virtual clock
     n++;
-    __timers.sort((a, b) => a.delay - b.delay);
-    const t = __timers.shift();
     try { t.fn(...t.args); } catch (e) { Deno.core.print("timer error: " + (e && e.stack ? e.stack : e) + "\n"); }
   }
   return n; // count fired — lets the hydration pump detect quiescence
@@ -1105,8 +1126,62 @@ globalThis.__domSig = () => {
     }
     return el;
   };
+  // <iframe> never "loads" here (no real navigation). Auth SDKs (PropelAuth) mount a
+  // hidden refresh iframe and RETRY indefinitely when its `load` never fires — an
+  // unbounded create/remove churn (700+ iframes on an authed page) that starves the
+  // render budget so the real page never finishes committing. Fire a one-shot `load`
+  // when the iframe's `src` is set (or on append) so the SDK's load-wait resolves and
+  // the retry loop stops. We don't navigate the iframe; this only unblocks the waiter.
+  const fireIframeLoad = (el) => {
+    if (el.__tcLoadFired) return;
+    el.__tcLoadFired = true;
+    globalThis.setTimeout(() => {
+      const ev = { type: "load", target: el, currentTarget: el };
+      try { if (typeof el.onload === "function") el.onload(ev); } catch (_e) {}
+      try { if (typeof el.dispatchEvent === "function") el.dispatchEvent(ev); } catch (_e) {}
+    }, 0);
+  };
+  // Analytics SDKs (PostHog) churn HUNDREDS of hidden <iframe>s during hydration. With
+  // no real navigation each one never loads, so the SDK keeps recreating them — and the
+  // tree append/remove + serialize cost of that churn starves the render budget so the
+  // real page never finishes. Hand these a LIGHTWEIGHT detached stub (never enters the
+  // rtdom tree; append/remove/measure are no-ops; load fires once; contentWindow/Document
+  // are present) so the churn is nearly free and the budget goes to the real DOM.
+  const makeIframeStub = () => {
+    const noop = () => {};
+    // contentWindow IS globalThis: analytics SDKs (PostHog) create a throwaway iframe
+    // purely to read the *native* prototype of a builtin off `iframe.contentWindow[name]`
+    // (to defeat page monkey-patching). If contentWindow is missing they bail WITHOUT
+    // caching and recreate an iframe on EVERY call → 700+ iframe churn that starves the
+    // render budget. Pointing contentWindow at our realm makes `contentWindow[name].prototype`
+    // resolve, so the SDK caches and the loop stops after one lookup per builtin.
+    const win = globalThis;
+    const stub = {
+      nodeType: 1, nodeName: "IFRAME", tagName: "IFRAME", __iframeStub: true,
+      style: {}, dataset: {}, contentWindow: win, contentDocument: globalThis.document,
+      onload: null, onerror: null,
+      setAttribute(n, v) { if (n === "src" && v) fireIframeLoad(this); this[n] = v; },
+      getAttribute(n) { return this[n] != null ? String(this[n]) : null; },
+      removeAttribute(n) { delete this[n]; },
+      appendChild(c) { return c; }, removeChild(c) { return c; },
+      insertBefore(c) { return c; }, remove: noop,
+      addEventListener(t, f) { if (t === "load") { this.onload = f; fireIframeLoad(this); } },
+      removeEventListener: noop, dispatchEvent: noop,
+      getBoundingClientRect: () => ({ x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }),
+      focus: noop, blur: noop, contains: () => false,
+    };
+    Object.defineProperty(stub, "src", {
+      configurable: true,
+      get() { return stub.__src || ""; },
+      set(v) { stub.__src = String(v); if (stub.__src) fireIframeLoad(stub); },
+    });
+    return stub;
+  };
   const origCreate = document.createElement.bind(document);
-  document.createElement = (tag) => addShadow(origCreate(tag));
+  document.createElement = (tag) => {
+    if (String(tag).toLowerCase() === "iframe") return makeIframeStub();
+    return addShadow(origCreate(tag));
+  };
   if (document.body) addShadow(document.body);
   if (document.documentElement) addShadow(document.documentElement);
 })();

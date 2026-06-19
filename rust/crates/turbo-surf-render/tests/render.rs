@@ -860,6 +860,64 @@ async fn runaway_script_hits_render_budget() {
     assert!(err.contains("budget exceeded"), "got: {err}");
 }
 
+// A self-rescheduling `setTimeout` (analytics SDKs poll this way) must fire a BROWSER-LIKE,
+// BOUNDED number of times — gated by the virtual clock — not spin to the raw count cap and
+// starve the render. Without the virtual clock this loop fired ~100k times and the page
+// never committed.
+#[test]
+fn virtual_clock_bounds_self_rescheduling_timers() {
+    let out = render_html(
+        "<body><div id='root'></div></body>",
+        r#"
+        let n = 0;
+        (function poll() {
+          n++;
+          document.getElementById('root').setAttribute('data-n', String(n));
+          setTimeout(poll, 100); // reschedules forever
+        })();
+        "#,
+    )
+    .unwrap();
+    let n: usize = out
+        .split("data-n=\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    // 15000ms virtual budget / 100ms ≈ 150 fires — bounded, NOT the old 100000 cap.
+    assert!(
+        n > 10 && n < 1000,
+        "self-rescheduling poll bounded by virtual clock, got {n}: {out}"
+    );
+}
+
+// `<iframe>.contentWindow` must expose the realm's builtins. Analytics SDKs (PostHog) read
+// the native prototype of a builtin off a throwaway iframe's contentWindow; if it's missing
+// they recreate an iframe on EVERY lookup (700+ churn that starves the render). With a real
+// contentWindow the lookup succeeds + caches, so no churn.
+#[test]
+fn iframe_content_window_exposes_builtins() {
+    let out = render_html(
+        "<body><div id='root'></div></body>",
+        r#"
+        let ok = 0;
+        for (let i = 0; i < 5; i++) {
+          const f = document.createElement('iframe');
+          document.body.appendChild(f);
+          const w = f.contentWindow;
+          if (w && w.Array && w.Array.prototype && w.Object && w.Object.prototype) ok++;
+          document.body.removeChild(f);
+        }
+        document.getElementById('root').setAttribute('data-ok', String(ok));
+        "#,
+    )
+    .unwrap();
+    assert!(
+        out.contains(r#"data-ok="5""#),
+        "iframe.contentWindow exposes builtins: {out}"
+    );
+}
+
 // --- helpers ----------------------------------------------------------------
 async fn spawn_json_server(body: &'static str) -> u16 {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
