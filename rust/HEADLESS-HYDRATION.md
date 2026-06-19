@@ -98,30 +98,40 @@ Diagnosis so far (via a React-DevTools-hook probe over the live isolate):
   commits a real tree; the people segment subtree just resolves to nothing.
 - **Not a redirect**: the only `history.replaceState` is Next's canonical-URL
   sync to the *same* path (`admin/people/active`), not a navigation away.
-- Net: a component in the people render path **returns null/empty** in our env
-  (the shell — `PayrollAdminLayout` nav — is blank too, yet it has no `return
-  null`; so the null is at/above the shell for this route only). `PeopleProvider`,
-  `useCanManageEmployees`, `PageWithTabsLayout`, `GoogleMapsLoader` were all read
-  — none have an env-gated `return null`. Cause not yet localized.
+**Localized via prod `console.log` markers down the render path (overturns the
+"returns null" guess):** the ENTIRE people component tree executes — markers fire
+for `AdminRouteLayout → EntityAdminGuard → PayrollAdminLayout → PeopleLayout →
+PeopleProvider → PeopleLayoutInner → ActiveEmployeesPage → EmployeesListPage →
+EmployeeTable`. So nothing returns null. Render-pass counts are **finite** (most
+=1; `PeopleProvider`=3, `EmployeesListPage`=4, `EmployeeTable`=4 — normal
+state-settle, NOT an infinite loop). Yet `BODYLEN=0`: React runs every render
+function but **commits no non-empty DOM** (not even the shell that DID render its
+functions). `/admin/home` cleanly stops at `PayrollAdminLayout` and commits.
 
-**Blocked on tooling:** pinpointing the null component needs readable names. The
-prod build is minified and our V8 isolate captures **no stack frames** (even with
-`Error.stackTraceLimit` raised). A `next dev` build would name it — but our engine
-**cannot hydrate the dev build**: a turbopack dev-HMR inline script fails to parse
-(`SyntaxError: Unexpected token '.'` — ESM-only syntax run through classic eval)
-and dev-mode React then loops past the render budget. Both are dev-only (absent on
-the prod webpack build), but they block the readable-name probe.
+The deepest app component that renders is `EmployeeTable` → which renders
+`<DataTableProvider><DataTable/></DataTableProvider>` from
+`@flux-payroll/flux-payroll-ui` (a custom grid; readable source under
+`dist/components/data/DataTable/`). `DataTableCore` does
+`useMediaQuery(theme.breakpoints.down('md'))` to pick table-vs-card layout. The
+empty commit originates **at/below this design-system grid** — every higher
+component (incl the shell) runs its render but the atomic commit is empty, which
+means the failure is during React's render/commit of the grid subtree (a thrown
+value or a render-phase update that prevents commit), not a null return upstream.
+The grid's own code has no `extends`/`.prototype`; the `prototype` TypeError is
+unrelated (fires identically on `/home`).
 
-**Realistic next steps (pick one):**
-1. Add temporary `console.log` markers down the people render path in payroll-app
-   (we own it), rebuild prod, probe how far render gets → names the null component
-   directly. Fastest.
-2. Teach the render tier to handle dev builds — route injected scripts through swc
-   (down-level ESM/`import.meta`) instead of classic `eval`, and make hydrate
-   return best-effort partial DOM on budget-exceed — then `next dev` gives
-   readable React errors for this and future diagnoses.
-3. Accept as a known limitation (the full login→dashboard path + many surfaces
-   work; certain deep segments render empty).
+**Blocked on tooling for the last mile:** the prod build is minified and our V8
+isolate captures **no stack frames** (even with `Error.stackTraceLimit` raised).
+A `next dev` build would name the failing internal — and the render tier can now
+hydrate dev builds (the `import.meta`/ESM + best-effort-on-budget work merged on
+`main`) — but `next dev` login was flaky to drive headlessly. Last mile: drive a
+dev session to a readable React error at the `DataTable` grid, or bisect the grid
+internals (likely a `useMediaQuery`/layout path or a host API the grid needs).
+
+**Status:** banked as a known limitation — the full login→dashboard path + many
+surfaces work; segments that mount this `DataTable` grid (people, and similar)
+commit empty. Not a null-return / suspense / missing-module / data-fetch /
+redirect (all ruled out); the empty commit originates in the design-system grid.
 
 ### Probing gotchas (reusable)
 
