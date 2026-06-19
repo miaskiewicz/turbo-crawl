@@ -337,9 +337,31 @@ class Locator {
     return null;
   }
 
+  // Hover has no rendering effect here, but JS hover handlers (menu-open) are real.
+  // Drive the live app with mouseenter/over events; otherwise best-effort no-op.
+  async hover() {
+    if (this._canDriveLive)
+      return void (await this._page._sessionDispatch(this._selector, this._index, "hover"));
+    await this._page._ensureLive();
+  }
+
+  // setInputFiles: read the file bytes in Node, build File objects in the isolate, and
+  // assign them to the <input type=file> so the app's change handler / upload runs. No
+  // OS file picker, but the upload PIPELINE is real.
+  async setInputFiles(files) {
+    const payload = normalizeInputFiles(files);
+    await this._page._ensureLive();
+    if (this._canDriveLive)
+      return void (await this._page._sessionDispatch(
+        this._selector,
+        this._index,
+        "setfiles",
+        payload,
+      ));
+  }
+
   // --- unsupported (no rendering surface / no input hardware) → honest throws ---
   screenshot = UNSUPPORTED("locator.screenshot", PIXEL);
-  hover = UNSUPPORTED("locator.hover", INPUT);
   dragTo = UNSUPPORTED("locator.dragTo", INPUT);
   selectText = UNSUPPORTED("locator.selectText", INPUT);
 }
@@ -361,6 +383,24 @@ function buildFilter(_page, opts) {
 // events on the selector-matched element, so the running app's (React's) delegated
 // handlers fire. `kind`: "click" fires a realistic mousedown→focus→mouseup→click
 // sequence; "fill" sets the value + fires input/change (React controlled inputs).
+// Normalize Playwright setInputFiles args (path string | {name,mimeType,buffer} |
+// arrays thereof) into [{ name, type, data }] with data as a latin1 binary string
+// (so the isolate's File/Blob → FileReader.readAsDataURL → btoa round-trips bytes).
+function normalizeInputFiles(files) {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const list = Array.isArray(files) ? files : [files];
+  return list.map((f) => {
+    if (typeof f === "string") {
+      return { name: path.basename(f), type: "", data: fs.readFileSync(f).toString("latin1") };
+    }
+    let data = "";
+    if (f.buffer != null) data = Buffer.from(f.buffer).toString("latin1");
+    else if (f.body != null) data = String(f.body);
+    return { name: f.name ?? "file", type: f.mimeType ?? f.type ?? "", data };
+  });
+}
+
 function interactionScript(selector, index, kind, value) {
   const sel = JSON.stringify(selector);
   const idx = JSON.stringify(index);
@@ -405,14 +445,51 @@ function interactionScript(selector, index, kind, value) {
       globalThis.__RESULT = "OK";
     } })();`;
   }
+  if (kind === "setfiles") {
+    // value is an array of { name, type, data(latin1) }. Build File objects, install
+    // a FileList-like on the input (its `files` is read-only → defineProperty), and
+    // fire input/change so the app's upload handler runs.
+    return `(() => { ${pick} else {
+      const arr = (${val}).map((f) => new globalThis.File([f.data], f.name, { type: f.type }));
+      arr.item = (i) => arr[i] || null;
+      try { Object.defineProperty(el, "files", { configurable: true, value: arr }); }
+      catch (e) { try { el.files = arr; } catch (_e) {} }
+      if (typeof el.focus === "function") el.focus();
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      globalThis.__RESULT = "OK";
+    } })();`;
+  }
+  if (kind === "hover") {
+    // No cursor, but the app's hover handlers (MUI menus open on mouseenter/over)
+    // are real JS — fire the events they listen for so the menu actually opens.
+    // Dispatch on the deepest descendant (a real cursor hits the leaf) so handlers
+    // bound to inner nodes (and React's delegation) see a target inside them.
+    return `(() => { ${pick} else {
+      let t = el; while (t.firstElementChild) t = t.firstElementChild;
+      const o = { bubbles: true, cancelable: true, view: globalThis };
+      const oe = { bubbles: false, cancelable: true, view: globalThis };
+      t.dispatchEvent(new MouseEvent("pointerover", o));
+      t.dispatchEvent(new MouseEvent("mouseover", o));
+      t.dispatchEvent(new MouseEvent("pointerenter", oe));
+      t.dispatchEvent(new MouseEvent("mouseenter", oe));
+      t.dispatchEvent(new MouseEvent("mousemove", o));
+      globalThis.__RESULT = "OK";
+    } })();`;
+  }
   // click
   return `(() => { ${pick} else {
+    // A real click lands on the deepest element under the cursor and bubbles up;
+    // dispatch there so handlers bound to inner nodes (e.g. a MUI Select's inner
+    // role="combobox", which opens on its own mousedown) actually fire. Focus and
+    // the default-action (form submit) logic stay on the matched control \`el\`.
+    let tgt = el; while (tgt.firstElementChild) tgt = tgt.firstElementChild;
     const o = { bubbles: true, cancelable: true, view: globalThis, button: 0 };
-    el.dispatchEvent(new MouseEvent("mousedown", o));
+    tgt.dispatchEvent(new MouseEvent("mousedown", o));
     if (typeof el.focus === "function") el.focus();
-    el.dispatchEvent(new MouseEvent("mouseup", o));
+    tgt.dispatchEvent(new MouseEvent("mouseup", o));
     const clickEv = new MouseEvent("click", o);
-    el.dispatchEvent(clickEv);
+    tgt.dispatchEvent(clickEv);
     // Browser default action of clicking a submit control: fire the form's submit
     // event (React's onSubmit is delegated). Our dispatch has no default action, so do
     // it explicitly — unless the click was preventDefault'd.
@@ -468,10 +545,29 @@ class Page {
   // Open a LIVE session: hydrate the current document and KEEP the app's JS isolate
   // alive, so interactions dispatch real events into the running app. Used on a
   // `waitUntil: 'networkidle'` navigation / waitForLoadState('networkidle').
+  // addInitScript bodies (context + page), wrapped so one failure can't abort the
+  // rest, as a single <script> to prepend — runs before the page's own scripts.
+  _initScriptTag() {
+    const scripts = [...(this._context._initScripts ?? []), ...(this._initScripts ?? [])];
+    if (!scripts.length) return "";
+    const body = scripts.map((s) => `try{ ${s} }catch(e){}`).join("\n");
+    return `<script>${body}</script>`;
+  }
+
+  // Inject init scripts as the FIRST <head> script so Playwright's addInitScript
+  // semantics hold (they run before any page script) in the live isolate.
+  _withInitScripts(html) {
+    const tag = this._initScriptTag();
+    if (!tag) return html;
+    if (/<head[^>]*>/i.test(html)) return html.replace(/<head[^>]*>/i, (m) => m + tag);
+    if (/<html[^>]*>/i.test(html)) return html.replace(/<html[^>]*>/i, (m) => m + tag);
+    return tag + html;
+  }
+
   async _openLiveSession() {
     this._closeSession();
     this._session = await native.liveOpen(
-      this._html,
+      this._withInitScripts(this._html),
       this._url,
       this._cookies,
       this._context._userAgent ?? undefined,
@@ -742,6 +838,12 @@ class Page {
     const v = Array.isArray(value) ? value[0] : value;
     this._html = native.selectOption(this._html, selector, String(v?.value ?? v));
   }
+  async setInputFiles(selector, files) {
+    return this.locator(selector).setInputFiles(files);
+  }
+  async hover(selector) {
+    return this.locator(selector).hover();
+  }
   async click(selector) {
     const intent = JSON.parse(native.click(this._html, selector, this._url));
     return this._followIntent(intent);
@@ -967,7 +1069,6 @@ class Page {
   // --- unsupported → honest throws ---
   screenshot = UNSUPPORTED("page.screenshot", PIXEL);
   pdf = UNSUPPORTED("page.pdf", PIXEL);
-  hover = UNSUPPORTED("page.hover", INPUT);
   dragAndDrop = UNSUPPORTED("page.dragAndDrop", INPUT);
   route = UNSUPPORTED("page.route", NETIO);
   routeFromHAR = UNSUPPORTED("page.routeFromHAR", NETIO);
@@ -1512,7 +1613,14 @@ function makeBaseFixtures() {
     page: async (f, use) => {
       const ctx = f.context ?? new BrowserContext();
       const page = await ctx.newPage();
-      await use(page);
+      try {
+        await use(page);
+      } finally {
+        // Close the live V8 session — without this every test leaks an isolate,
+        // and across a 100+-test serial run the bloat slows hydration enough to
+        // miss the render budget (flaky "matched no elements" late in the suite).
+        await page.close();
+      }
     },
     request: async (_f, use) => use(request),
     baseURL: async (_f, use) => use(process.env.TURBO_SHIM_BASE_URL ?? undefined),
@@ -1546,26 +1654,75 @@ function wireFixtureHooks(open) {
   after(teardownCurrent);
 }
 
+// Playwright's `test.skip` is overloaded: `skip(title, body)` declares a skipped
+// test, but `skip(condition, description)` / `skip()` / `skip(fixturesCb, desc)`
+// conditionally skip the enclosing scope. The shim used to treat every call as
+// `(title, body)`, so a `skip(false, "reason")` (the common conditional form)
+// registered a bogus skipped test. These helpers disambiguate.
+const SKIP_SIGNAL = Symbol("turbo-shim-skip");
+let _skipStack = []; // one frame per active describe; `.skip` set by a conditional skip
+let _activeT = null; // node:test context of the running test (for a runtime skip())
+const describeSkipped = () => _skipStack.some((f) => f.skip);
+const isDeclareForm = (args) => typeof args[0] === "string" && typeof args[1] === "function";
+function skipConditionMet(args) {
+  if (args.length === 0) return true; // bare test.skip() → always skip
+  const c = args[0];
+  if (typeof c === "function") {
+    try {
+      return !!c({});
+    } catch {
+      return false;
+    }
+  }
+  return !!c;
+}
+
 function makeTestFn(baseDefs, extDefs = {}) {
   const open = (testInfo) => openFixtures(baseDefs, extDefs, testInfo);
   const run = (name, fn) => {
     wireFixtureHooks(open);
-    nodeTest(name, async () => {
+    if (describeSkipped()) {
+      nodeTest.skip(name, () => {});
+      return;
+    }
+    nodeTest(name, async (t) => {
+      _activeT = t;
       const testInfo = makeTestInfo(name);
-      if (_current) {
-        await fn(_current.arg, testInfo);
-        return;
-      }
-      const { arg, teardown } = await open(testInfo);
       try {
-        await fn(arg, testInfo);
+        if (_current) {
+          await fn(_current.arg, testInfo);
+          return;
+        }
+        const { arg, teardown } = await open(testInfo);
+        try {
+          await fn(arg, testInfo);
+        } finally {
+          await teardown();
+        }
+      } catch (e) {
+        if (e === SKIP_SIGNAL) return; // runtime test.skip() — already marked on `t`
+        throw e;
       } finally {
-        await teardown();
+        _activeT = null;
       }
     });
   };
   run.describe = makeDescribe();
-  run.skip = (name, fn) => nodeTest.skip(name, async () => fn?.({}, makeTestInfo(name)));
+  run.skip = (...args) => {
+    // Form `skip(title, body)` → declare a skipped test.
+    if (isDeclareForm(args)) {
+      nodeTest.skip(args[0], () => {});
+      return;
+    }
+    // Conditional / runtime form `skip(condition?, description?)`.
+    if (!skipConditionMet(args)) return; // condition false → no-op
+    const reason = typeof args[args.length - 1] === "string" ? args[args.length - 1] : undefined;
+    if (_activeT) {
+      _activeT.skip(reason); // inside a running test body → skip at runtime
+      throw SKIP_SIGNAL;
+    }
+    if (_skipStack.length) _skipStack[_skipStack.length - 1].skip = true; // describe scope
+  };
   run.only = (name, fn) => nodeTest.only(name, async () => runWith(open, name, fn));
   run.fixme = run.skip;
   run.fail = run;
@@ -1600,9 +1757,19 @@ async function runWith(open, name, fn) {
 }
 
 function makeDescribe() {
-  const d = (name, fn) => nodeTest(name, fn);
+  // Push a skip frame around the describe body so a top-of-describe conditional
+  // `test.skip(cond, …)` marks exactly the tests registered within it.
+  const d = (name, fn) =>
+    nodeTest(name, async (t) => {
+      _skipStack.push({ skip: false });
+      try {
+        return await fn(t);
+      } finally {
+        _skipStack.pop();
+      }
+    });
   d.skip = (name, fn) => nodeTest.skip(name, fn ?? (() => {}));
-  d.only = (name, fn) => nodeTest(name, fn);
+  d.only = (name, fn) => d(name, fn);
   d.serial = d;
   d.parallel = d;
   d.configure = () => {};
