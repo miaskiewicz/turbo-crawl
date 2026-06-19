@@ -403,6 +403,15 @@ function interactionScript(selector, index, kind, value) {
   } })();`;
 }
 
+// Pathname of an absolute URL (for detecting an in-app route change).
+function pathOf(url) {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return url;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
@@ -416,6 +425,8 @@ class Page {
     this._listeners = new Map();
     this._closed = false;
     this._session = null; // live JS session id (networkidle navigations), else null
+    this._loadedPath = null; // path the live DOM was loaded at (to detect in-app nav)
+    this._navHops = 0; // auto-followed redirects since the last user navigation
   }
 
   get _live() {
@@ -429,6 +440,7 @@ class Page {
     this._closeSession();
     this._session = await native.liveOpen(this._html, this._url, this._cookies);
     this._hydrated = true;
+    this._loadedPath = pathOf(this._url);
     await this._refreshFromSession();
   }
 
@@ -448,6 +460,28 @@ class Page {
     } catch {
       /* keep prior cookies */
     }
+    // The app navigated to a different route within the live session (a post-login
+    // redirect, router.push/replace). Our engine doesn't do Next's in-place RSC
+    // soft-nav, so re-LOAD that route as a fresh page (carrying cookies) — its own
+    // component tree mounts and its effects run. This follows a redirect CHAIN
+    // (login → /post-login → /entity/…) hop by hop, like a browser, bounded to avoid a
+    // misconfigured redirect loop.
+    if (
+      this._live &&
+      /^https?:/.test(this._url) &&
+      pathOf(this._url) !== this._loadedPath &&
+      this._navHops < 10
+    ) {
+      this._navHops++;
+      await this._reopen(this._url);
+    }
+  }
+
+  // Follow an in-app navigation: load `url` fresh (fetch + hydrate) WITHOUT resetting the
+  // redirect-hop budget or pushing history (it's the app navigating, not the user).
+  async _reopen(url) {
+    await this._navigate(this._resolveUrl(url));
+    await this._openLiveSession();
   }
 
   _closeSession() {
@@ -506,6 +540,7 @@ class Page {
   async goto(url, opts) {
     if (this._url !== "about:blank") this._history.push(this._url);
     this._fwd = []; // a fresh navigation invalidates the forward stack
+    this._navHops = 0; // user navigation — reset the redirect-follow budget
     const resp = await this._navigate(this._resolveUrl(url));
     // `waitUntil: 'networkidle'` means "let the page settle" — for an SPA that's
     // hydration. A real browser runs the page's JS on navigation; the shim's fetch
