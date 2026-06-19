@@ -22,6 +22,18 @@ export function render(html: string, baseUrl: string, script: string): string;
  * chunk fetches may hit a same-process server. */
 export function hydrate(html: string, baseUrl: string, cookies?: string): Promise<string>;
 
+/** Live session: hydrate + keep the app's JS isolate ALIVE so interactions dispatch
+ * real DOM events into the running app. Returns a session id. */
+export function liveOpen(html: string, baseUrl: string, cookies?: string): Promise<number>;
+/** Run JS in a live session, drain to quiescence, return String(globalThis.__RESULT). */
+export function liveEval(id: number, script: string): Promise<string>;
+/** Serialize the live session's current DOM to HTML. */
+export function liveSerialize(id: number): string;
+/** The live session's cookies (storageState JSON), incl. HttpOnly session cookies. */
+export function liveCookies(id: number): string;
+/** Close a live session (reset binding, drop isolate, unregister). */
+export function liveClose(id: number): void;
+
 /** Transform TS/JSX source → classic JS (swc). */
 export function transform(src: string, ts: boolean, jsx: boolean): string;
 /** Transform a TS/JSX bundle then render it → hydrated HTML. */

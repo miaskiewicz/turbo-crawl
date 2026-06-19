@@ -60,18 +60,50 @@ fn op_cookie_set(state: &mut OpState, #[string] line: &str) {
 // back as `{ status: 0, ok: false }` so page code sees a real (failed) Response.
 #[op2]
 #[serde]
-async fn op_fetch(state: Rc<RefCell<OpState>>, #[string] url: String) -> FetchOut {
+async fn op_fetch(
+    state: Rc<RefCell<OpState>>,
+    #[string] url: String,
+    #[string] init_json: String,
+) -> FetchOut {
     let (base, jar_rc) = {
         let s = state.borrow();
         (s.borrow::<Base>().0.clone(), s.borrow::<Jar>().clone())
     };
     let target = resolve(&base, &url).unwrap_or(url);
+    // Honor the `fetch(url, init)` request: method, headers, body. Without this every
+    // page fetch was a GET with no body — a login POST (PropelAuth) 404'd.
+    let init: deno_core::serde_json::Value =
+        deno_core::serde_json::from_str(&init_json).unwrap_or(deno_core::serde_json::Value::Null);
+    let method = init
+        .get("method")
+        .and_then(|m| m.as_str())
+        .map(|m| m.to_ascii_uppercase());
+    let body = init
+        .get("body")
+        .and_then(|b| b.as_str())
+        .map(|b| b.to_string());
+    let mut headers: std::collections::BTreeMap<String, String> = init
+        .get("headers")
+        .and_then(|h| deno_core::serde_json::from_value(h.clone()).ok())
+        .unwrap_or_default();
+    // Browser-set request headers a fetch carries automatically (an auth backend gates
+    // on Origin; a cross-origin POST without it is rejected). Derive from the page base
+    // (scheme://host[:port], i.e. base up to the third '/').
+    if let Some(origin) = page_origin(&base) {
+        headers.entry("Origin".to_string()).or_insert(origin);
+        headers
+            .entry("Referer".to_string())
+            .or_insert_with(|| base.clone());
+    }
     // Carry the page's cookies on same-origin fetches and ingest Set-Cookie back, so
     // session-authenticated hydration works (e.g. an auth SDK fetching the current user
     // with the session cookie). Snapshot the shared jar into a local one for the call —
     // a RefCell borrow can't be held across the await.
     let mut local = CookieJar::from_storage_state(&jar_rc.borrow().storage_state());
     let opts = FetchOptions {
+        method,
+        body,
+        headers,
         allow_non_html: true, // fetch pulls JSON/text too
         jar: Some(&mut local),
         ..Default::default()
@@ -92,6 +124,16 @@ async fn op_fetch(state: Rc<RefCell<OpState>>, #[string] url: String) -> FetchOu
     };
     *jar_rc.borrow_mut() = local; // persist any Set-Cookie updates for later fetches
     out
+}
+
+// `scheme://host[:port]` of an absolute http(s) URL — the part before the path. Used to
+// synthesize the `Origin` header a browser fetch would send.
+fn page_origin(base: &str) -> Option<String> {
+    let scheme_end = base.find("://")?;
+    let after = scheme_end + 3;
+    let host_len = base[after..].find('/').unwrap_or(base.len() - after);
+    let origin = &base[..after + host_len];
+    (base.starts_with("http://") || base.starts_with("https://")).then(|| origin.to_string())
 }
 
 deno_core::extension!(turbo_dom, ops = [op_cookie_get, op_cookie_set, op_fetch],);
@@ -194,7 +236,23 @@ if (typeof globalThis.Headers === "undefined") {
 // fetch over the tier-1 net stack → a minimal Response (with real headers, so RSC
 // client navigation that reads `res.headers.get('content-type')` works).
 globalThis.fetch = async (url, init) => {
-  const r = await ops.op_fetch(String((url && url.url) || url));
+  // Marshal the request (method/headers/body) to the op — a Request object carries them
+  // on itself; an init object carries them as fields. Headers may be a Headers instance,
+  // an array of pairs, or a plain object.
+  const req = (url && typeof url === "object") ? url : null;
+  const o = init || req || {};
+  let hdrs = o.headers;
+  if (hdrs && typeof hdrs.forEach === "function" && !Array.isArray(hdrs)) {
+    const obj = {}; hdrs.forEach((v, k) => { obj[k] = v; }); hdrs = obj;
+  } else if (Array.isArray(hdrs)) {
+    const obj = {}; for (const [k, v] of hdrs) obj[k] = v; hdrs = obj;
+  }
+  let body = o.body;
+  if (body != null && typeof body !== "string") {
+    try { body = String(body); } catch (_e) { body = ""; }
+  }
+  const initJson = JSON.stringify({ method: o.method, headers: hdrs || undefined, body });
+  const r = await ops.op_fetch(String((url && url.url) || url), initJson);
   const headers = new globalThis.Headers();
   if (r.content_type) headers.set("content-type", r.content_type);
   return {
@@ -735,6 +793,57 @@ if (typeof globalThis.URL === "undefined") {
   globalThis.location = loc;
 })();
 
+// document.referrer / URL / documentURI / baseURI — standard read-only document props
+// deno_core's binding lacks. Analytics (PostHog reads referrer + the URL and `.split`s
+// them) throws "Cannot read properties of undefined" without these, looping forever.
+(() => {
+  const d = globalThis.document;
+  if (!d) return;
+  const def = (name, get) => {
+    try {
+      if (typeof d[name] === "undefined") Object.defineProperty(d, name, { configurable: true, get });
+    } catch (_e) {}
+  };
+  def("referrer", () => "");
+  def("URL", () => globalThis.location.href);
+  def("documentURI", () => globalThis.location.href);
+  def("baseURI", () => globalThis.location.href);
+})();
+
+// Viewport / screen globals — no real rendering surface here, but analytics and
+// responsive code read them (PostHog `.split`/`.height` on undefined throws → loops
+// forever). Sensible desktop defaults.
+(() => {
+  const set = (k, v) => {
+    if (typeof globalThis[k] === "undefined") {
+      try { globalThis[k] = v; } catch (_e) {}
+    }
+  };
+  set("innerWidth", 1280);
+  set("innerHeight", 800);
+  set("outerWidth", 1280);
+  set("outerHeight", 800);
+  set("devicePixelRatio", 1);
+  set("screenX", 0);
+  set("screenY", 0);
+  set("scrollX", 0);
+  set("scrollY", 0);
+  set("pageXOffset", 0);
+  set("pageYOffset", 0);
+  set("scroll", () => {});
+  set("scrollTo", () => {});
+  set("scrollBy", () => {});
+  set("screen", {
+    width: 1280, height: 800, availWidth: 1280, availHeight: 800,
+    colorDepth: 24, pixelDepth: 24,
+    orientation: { type: "landscape-primary", angle: 0, addEventListener() {}, removeEventListener() {} },
+  });
+  set("visualViewport", {
+    width: 1280, height: 800, scale: 1, offsetLeft: 0, offsetTop: 0, pageLeft: 0, pageTop: 0,
+    addEventListener() {}, removeEventListener() {}, dispatchEvent() { return false; },
+  });
+})();
+
 // Next.js's webpack runtime reads `document.currentScript` to resolve chunk paths
 // (getPathFromScript → `currentScript.getAttribute('src').replace(...)`). The tier
 // runs the page's scripts as one concatenated bundle, so there's no "current" script
@@ -825,6 +934,23 @@ globalThis.__hydrate = async function (maxRounds = 300, timerBudget = 200000) {
 // <script> hasn't run (more to do after the next async drain), else "0".
 globalThis.__pendingWork = () =>
   __timers.length > 0 || Array.prototype.some.call(document.querySelectorAll("script"), (s) => !s.__tcDone) ? "1" : "0";
+
+// A cheap "has the DOM changed?" signal for the interaction drain: element count + the
+// total length of input values (so a controlled-input edit registers). Lets the drain
+// stop once the render has SETTLED even though background timers (analytics polling,
+// React's idle scheduler) never stop — otherwise an interaction would always run to the
+// full budget. Not for correctness, just to detect quiescence of the visible tree.
+globalThis.__domSig = () => {
+  try {
+    const els = document.getElementsByTagName("*");
+    let n = els.length, vlen = 0;
+    const inputs = document.querySelectorAll("input,textarea,select");
+    for (let i = 0; i < inputs.length; i++) vlen += (inputs[i].value || "").length;
+    return n + ":" + vlen + ":" + (globalThis.location ? globalThis.location.href.length : 0);
+  } catch (_e) {
+    return "0";
+  }
+};
 
 // Shadow DOM light-DOM fallback: embeddable widgets (PropelAuth's login) call
 // host.attachShadow() and render into the returned root. rtdom has no shadow tree,
@@ -1144,6 +1270,192 @@ async fn run_hydrate(rt: &mut JsRuntime, html: &str, base: &str) -> Result<Strin
         }
     }
     Ok(crate::browser_env::document_html())
+}
+
+// RAII runaway-execution watchdog: terminates the isolate if an op runs past the
+// budget, and is cancelled (thread joined) on drop. Replaces the hand-rolled
+// done-flag + spawn + join that each one-shot entry point repeats.
+struct Watchdog {
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl Watchdog {
+    fn start(handle: v8::IsolateHandle, budget_ms: u64) -> Self {
+        use std::sync::atomic::Ordering;
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let watch = done.clone();
+        let thread = std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            while !watch.load(Ordering::Relaxed) {
+                if start.elapsed() >= std::time::Duration::from_millis(budget_ms) {
+                    handle.terminate_execution();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        });
+        Watchdog {
+            done,
+            thread: Some(thread),
+        }
+    }
+}
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        self.done.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+// Drive the event loop to quiescence: drain async ops (microtasks + fetches), fire any
+// queued virtual timers (React's scheduler posts work through them), and repeat until
+// nothing is pending. Used after an interaction event re-enters the running app (the
+// handler may setState → schedule a re-render → fetch → schedule more).
+async fn drain_to_quiescence(rt: &mut JsRuntime) -> Result<(), String> {
+    const MAX_ROUNDS: usize = 500;
+    // Stop early once the visible tree has been STABLE for this many rounds even though
+    // timers keep firing: a real app's analytics/idle-scheduler never stops posting
+    // timers, so "no timers queued" alone never holds — wait for the DOM to settle.
+    const STABLE_ROUNDS: usize = 6;
+    let mut stable = 0usize;
+    let mut last_sig = String::new();
+    for _ in 0..MAX_ROUNDS {
+        drain_event_loop(rt).await?;
+        let fired = rt
+            .execute_script("<timers>", "__runTimers(2000)")
+            .map_err(|e| e.to_string())?;
+        drain_event_loop(rt).await?;
+        let pending = rt
+            .execute_script("<pending>", "__pendingWork()")
+            .map_err(|e| e.to_string())?;
+        let sig_v = rt
+            .execute_script("<domsig>", "__domSig()")
+            .map_err(|e| e.to_string())?;
+        let still = read_string(rt, pending)? == "1";
+        let fired_any = read_string(rt, fired)? != "0";
+        if !still && !fired_any {
+            break; // genuinely idle
+        }
+        let sig = read_string(rt, sig_v)?;
+        if sig == last_sig {
+            stable += 1;
+            if stable >= STABLE_ROUNDS {
+                break; // render settled; remaining timers are background churn
+            }
+        } else {
+            stable = 0;
+            last_sig = sig;
+        }
+    }
+    Ok(())
+}
+
+/// A LIVE page: a persistent [`JsRuntime`] whose hydrated DOM + running JS (React, the
+/// app's closures, its delegated event listeners) stay ALIVE across operations. Unlike
+/// the one-shot `render_*`/`render_hydrate` paths — which serialize the DOM to a string
+/// and `reset()` the binding after each call, destroying the running app — a session
+/// keeps the app mounted so interactions dispatch REAL DOM events into it and the
+/// re-render is observable. This is the browserless analog of a Playwright page.
+///
+/// The V8 isolate + the binding's thread-local DOM are NOT `Send`: a session must be
+/// created and driven from a single owning thread (the napi layer pins one thread per
+/// session). `close()` (or drop) resets the binding while the isolate is still alive.
+pub struct PageSession {
+    rt: JsRuntime,
+    budget_ms: u64,
+    closed: bool,
+}
+
+impl PageSession {
+    /// Build the runtime, install + hydrate the page to quiescence, and KEEP IT ALIVE.
+    pub async fn open(
+        html: &str,
+        base: &str,
+        cookies: &str,
+        budget_ms: u64,
+    ) -> Result<Self, String> {
+        let mut rt = make_runtime(base, cookies);
+        let result = {
+            let _wd = Watchdog::start(rt.v8_isolate().thread_safe_handle(), budget_ms);
+            run_hydrate(&mut rt, html, base).await
+        };
+        match result {
+            Ok(_) => Ok(PageSession {
+                rt,
+                budget_ms,
+                closed: false,
+            }),
+            Err(e) => {
+                crate::browser_env::reset();
+                Err(budget_msg(&e, budget_ms))
+            }
+        }
+    }
+
+    /// Run `script` in the LIVE isolate, then drain the event loop to quiescence so any
+    /// work the script triggered (event handlers, re-render, fetch) completes. Returns
+    /// `String(globalThis.__RESULT || '')` — scripts that need to return a value stash
+    /// it there.
+    pub async fn eval(&mut self, script: &str) -> Result<String, String> {
+        const READ: &str = "String(globalThis.__RESULT == null ? '' : globalThis.__RESULT)";
+        let budget = self.budget_ms;
+        let drained = {
+            let _wd = Watchdog::start(self.rt.v8_isolate().thread_safe_handle(), budget);
+            let r = async {
+                self.rt
+                    .execute_script("<session-eval>", script.to_string())
+                    .map_err(|e| e.to_string())?;
+                drain_to_quiescence(&mut self.rt).await
+            }
+            .await;
+            r
+        };
+        // The watchdog may have terminated mid-drain. Clear that terminate state so the
+        // isolate is usable again, then read the result BEST-EFFORT: an interaction's
+        // important effects (the login POST, a client navigation) land early in the
+        // drain — the budget is normally hit later on background churn (analytics
+        // polling, React's idle scheduler). Returning the reached state beats throwing.
+        self.rt.v8_isolate().cancel_terminate_execution();
+        match drained {
+            Err(e) if !(e.contains("terminat") || e.contains("execution")) => Err(e),
+            _ => self
+                .rt
+                .execute_script("<result>", READ)
+                .map_err(|e| budget_msg(&e.to_string(), budget))
+                .and_then(|g| read_string(&mut self.rt, g)),
+        }
+    }
+
+    /// Serialize the CURRENT live DOM to HTML (no reset — the page stays alive).
+    pub fn serialize(&self) -> String {
+        crate::browser_env::document_html()
+    }
+
+    /// The page's cookies as a `storageState` JSON string (includes HttpOnly session
+    /// cookies the in-isolate `document.cookie` can't see) — so a later navigation can
+    /// carry the session established during this page's lifetime (e.g. after login).
+    pub fn cookies(&self) -> String {
+        let op_state = self.rt.op_state();
+        let jar = op_state.borrow().borrow::<Jar>().clone();
+        let s = jar.borrow().storage_state();
+        s
+    }
+
+    /// Tear down: reset the binding while the isolate is still alive, then drop it.
+    pub fn close(mut self) {
+        self.closed = true;
+        crate::browser_env::reset();
+    }
+}
+
+impl Drop for PageSession {
+    fn drop(&mut self) {
+        if !self.closed {
+            crate::browser_env::reset();
+        }
+    }
 }
 
 // A terminated isolate surfaces as a generic execution error; relabel it.

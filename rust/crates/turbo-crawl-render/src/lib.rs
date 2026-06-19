@@ -10,5 +10,5 @@ mod runtime;
 
 pub use runtime::{
     eval_async, render_html, render_html_async, render_hydrate, render_hydrate_with_budget,
-    render_page, render_page_with_budget, run_with_dom, DEFAULT_RENDER_BUDGET_MS,
+    render_page, render_page_with_budget, run_with_dom, PageSession, DEFAULT_RENDER_BUDGET_MS,
 };

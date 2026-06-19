@@ -5,6 +5,10 @@
 //! composes these; `goto` = `fetchHtml` then view calls on the cached HTML.
 
 mod session;
+// Re-export the live-session napi free functions so they're reachable from the crate
+// root (a `pub fn` in a private module is otherwise dead-code-flagged in the lib build;
+// napi still registers them either way).
+pub use session::{live_close, live_cookies, live_eval, live_open, live_serialize};
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;

@@ -5,7 +5,7 @@
 
 use turbo_crawl_render::{
     render_html, render_html_async, render_hydrate, render_page, render_page_with_budget,
-    run_with_dom,
+    run_with_dom, PageSession, DEFAULT_RENDER_BUDGET_MS,
 };
 
 // --- reads over a real parsed DOM -------------------------------------------
@@ -145,6 +145,78 @@ fn form_data_present_and_spec_shaped() {
     );
     assert_eq!(v["b"], "3", "{out}");
     assert_eq!(v["hasB"], true, "{out}");
+}
+
+// The interactive-SPA capability: a LIVE PageSession keeps the hydrated app's JS alive,
+// so a dispatched event re-enters a delegated listener (the way React 17+ delegates all
+// events at the root) and the re-render is observable — none of which works on the
+// stateless render_* paths (they serialize + reset, killing the running app). This is
+// the foundation for driving an authenticated SPA login through the shim.
+#[tokio::test]
+async fn live_session_dispatches_events_into_running_app() {
+    // A root-delegated click listener (React-style): one listener on `document`, the
+    // handler reads event.target and re-renders. Clicking the (deep) button must bubble
+    // up to it. Also a controlled-input-style `input` listener mirroring value → text.
+    let html = r#"<body>
+      <div id="app">
+        <button id="btn">+</button>
+        <span data-test-id="count">0</span>
+        <input id="field" />
+        <span data-test-id="echo"></span>
+      </div>
+      <script>
+        let n = 0;
+        document.addEventListener('click', (e) => {
+          if (e.target && e.target.id === 'btn') {
+            n++;
+            document.querySelector('[data-test-id="count"]').textContent = String(n);
+          }
+        });
+        document.addEventListener('input', (e) => {
+          if (e.target && e.target.id === 'field') {
+            document.querySelector('[data-test-id="echo"]').textContent = e.target.value;
+          }
+        });
+      </script>
+    </body>"#;
+
+    let mut session =
+        PageSession::open(html, "https://example.test/", "", DEFAULT_RENDER_BUDGET_MS)
+            .await
+            .expect("session opens");
+
+    // Dispatch a bubbling click on the deep button — must reach the document listener.
+    let click = r#"document.getElementById('btn').dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true }));"#;
+    session.eval(click).await.unwrap();
+    assert!(
+        session.serialize().contains(r#"data-test-id="count">1<"#),
+        "delegated click handler must run + re-render: {}",
+        session.serialize()
+    );
+
+    // State persists across ops — a second click increments again (proves the app is
+    // alive between calls, not re-hydrated from a string each time).
+    session.eval(click).await.unwrap();
+    assert!(
+        session.serialize().contains(r#"data-test-id="count">2<"#),
+        "running app state must persist across ops: {}",
+        session.serialize()
+    );
+
+    // Controlled-input: set value + dispatch `input` → the delegated handler mirrors it.
+    let fill = r#"const f = document.getElementById('field'); f.value = 'hello';
+        f.dispatchEvent(new InputEvent('input', { bubbles: true }));"#;
+    session.eval(fill).await.unwrap();
+    assert!(
+        session
+            .serialize()
+            .contains(r#"data-test-id="echo">hello<"#),
+        "input event must reach the controlled-input handler: {}",
+        session.serialize()
+    );
+
+    session.close();
 }
 
 // Mirrors the payroll /login hydration crash: the page's client JS (Next.js +

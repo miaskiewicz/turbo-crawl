@@ -72,18 +72,26 @@ class Locator {
   }
 
   // --- composition (pure JS, no napi) ---
+  // Carry `_selector` through composition so `getByTestId(x).locator('input').first()`
+  // stays selector-backed (→ drivable in a live session). `filter` makes it
+  // unindexable for live dispatch (a JS predicate over matches), so it's dropped there.
+  _derive(opts) {
+    const loc = new Locator(this._page, this._resolve, opts);
+    if (this._selector && opts.filter == null) loc._selector = this._selector;
+    return loc;
+  }
   first() {
-    return new Locator(this._page, this._resolve, { index: 0, filter: this._filter });
+    return this._derive({ index: 0, filter: this._filter });
   }
   last() {
-    return new Locator(this._page, this._resolve, { index: -1, filter: this._filter });
+    return this._derive({ index: -1, filter: this._filter });
   }
   nth(i) {
-    return new Locator(this._page, this._resolve, { index: i, filter: this._filter });
+    return this._derive({ index: i, filter: this._filter });
   }
   filter(opts = {}) {
     const pred = buildFilter(this._page, opts);
-    return new Locator(this._page, this._resolve, { index: this._index, filter: pred });
+    return this._derive({ index: this._index, filter: pred });
   }
   and(other) {
     const keep = new Set();
@@ -227,7 +235,20 @@ class Locator {
   }
 
   // --- actions (mutate the page's cached DOM by handle) ---
+  // True when we can drive this locator through the live app (session up + the locator
+  // is CSS-selector-backed, so the live isolate can re-resolve it). getBy{Role,Text,…}
+  // locators aren't selector-backed → fall back to the static/intent path.
+  get _canDriveLive() {
+    return this._page._live && !!this._selector;
+  }
   async fill(value) {
+    if (this._canDriveLive)
+      return void (await this._page._sessionDispatch(
+        this._selector,
+        this._index,
+        "fill",
+        String(value),
+      ));
     this._page._html = native.fillNode(this._html, this._requireNode(), String(value));
   }
   async clear() {
@@ -240,24 +261,31 @@ class Locator {
     return this.fill(value);
   }
   async check() {
+    if (this._canDriveLive)
+      return void (await this._page._sessionDispatch(this._selector, this._index, "check"));
     this._page._html = native.setCheckedNode(this._html, this._requireNode(), true);
   }
   async uncheck() {
+    if (this._canDriveLive)
+      return void (await this._page._sessionDispatch(this._selector, this._index, "uncheck"));
     this._page._html = native.setCheckedNode(this._html, this._requireNode(), false);
   }
   async setChecked(on) {
-    this._page._html = native.setCheckedNode(this._html, this._requireNode(), !!on);
+    return on ? this.check() : this.uncheck();
   }
   async selectOption(value) {
     const v = Array.isArray(value) ? value[0] : value;
-    this._page._html = native.selectOptionNode(
-      this._html,
-      this._requireNode(),
-      String(v?.value ?? v),
-    );
-    return [String(v?.value ?? v)];
+    const sval = String(v?.value ?? v);
+    if (this._canDriveLive) {
+      await this._page._sessionDispatch(this._selector, this._index, "select", sval);
+      return [sval];
+    }
+    this._page._html = native.selectOptionNode(this._html, this._requireNode(), sval);
+    return [sval];
   }
   async click() {
+    if (this._canDriveLive)
+      return void (await this._page._sessionDispatch(this._selector, this._index, "click"));
     const intent = JSON.parse(native.clickNode(this._html, this._requireNode(), this._page._url));
     return this._page._followIntent(intent);
   }
@@ -304,6 +332,77 @@ function buildFilter(_page, opts) {
   return (m) => checks.every((c) => c(m));
 }
 
+// Build the JS run in a live session to drive an interaction by dispatching REAL DOM
+// events on the selector-matched element, so the running app's (React's) delegated
+// handlers fire. `kind`: "click" fires a realistic mousedown→focus→mouseup→click
+// sequence; "fill" sets the value + fires input/change (React controlled inputs).
+function interactionScript(selector, index, kind, value) {
+  const sel = JSON.stringify(selector);
+  const idx = JSON.stringify(index);
+  const val = JSON.stringify(value ?? "");
+  const pick = `const els = document.querySelectorAll(${sel});
+    let __i = ${idx}; if (__i < 0) __i = els.length + __i;
+    const el = els[__i];
+    if (!el) { globalThis.__RESULT = "NO_MATCH"; }`;
+  if (kind === "fill") {
+    return `(() => { ${pick} else {
+      if (typeof el.focus === "function") el.focus();
+      // Set the value through the PROTOTYPE setter, bypassing React's instance-level
+      // _valueTracker. If we used el.value=, React's tracker would record the new value
+      // and then see "no change" on the input event → onChange never fires → a
+      // controlled input stays empty in React state (and resets on the next render).
+      const proto = el.tagName === "TEXTAREA" ? globalThis.HTMLTextAreaElement
+        : el.tagName === "SELECT" ? globalThis.HTMLSelectElement : globalThis.HTMLInputElement;
+      const desc = proto && Object.getOwnPropertyDescriptor(proto.prototype, "value");
+      if (desc && desc.set) desc.set.call(el, ${val}); else el.value = ${val};
+      el.dispatchEvent(new InputEvent("input", { bubbles: true, cancelable: true, data: ${val} }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      globalThis.__RESULT = "OK";
+    } })();`;
+  }
+  if (kind === "check" || kind === "uncheck") {
+    const on = kind === "check";
+    return `(() => { ${pick} else {
+      if (el.checked !== ${on}) {
+        el.checked = ${on};
+        el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      globalThis.__RESULT = "OK";
+    } })();`;
+  }
+  if (kind === "select") {
+    return `(() => { ${pick} else {
+      el.value = ${val};
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      globalThis.__RESULT = "OK";
+    } })();`;
+  }
+  // click
+  return `(() => { ${pick} else {
+    const o = { bubbles: true, cancelable: true, view: globalThis, button: 0 };
+    el.dispatchEvent(new MouseEvent("mousedown", o));
+    if (typeof el.focus === "function") el.focus();
+    el.dispatchEvent(new MouseEvent("mouseup", o));
+    const clickEv = new MouseEvent("click", o);
+    el.dispatchEvent(clickEv);
+    // Browser default action of clicking a submit control: fire the form's submit
+    // event (React's onSubmit is delegated). Our dispatch has no default action, so do
+    // it explicitly — unless the click was preventDefault'd.
+    if (!clickEv.defaultPrevented) {
+      let f = null;
+      for (let p = el; p; p = p.parentElement) { if (p.tagName === "FORM") { f = p; break; } }
+      const ty = (el.getAttribute && (el.getAttribute("type") || "")).toLowerCase();
+      const submits = el.tagName === "BUTTON" ? ty !== "button" && ty !== "reset"
+        : el.tagName === "INPUT" && (ty === "submit" || ty === "image");
+      if (f && submits) f.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    }
+    globalThis.__RESULT = "OK";
+  } })();`;
+}
+
 // ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
@@ -316,6 +415,62 @@ class Page {
     this._fwd = [];
     this._listeners = new Map();
     this._closed = false;
+    this._session = null; // live JS session id (networkidle navigations), else null
+  }
+
+  get _live() {
+    return this._session != null;
+  }
+
+  // Open a LIVE session: hydrate the current document and KEEP the app's JS isolate
+  // alive, so interactions dispatch real events into the running app. Used on a
+  // `waitUntil: 'networkidle'` navigation / waitForLoadState('networkidle').
+  async _openLiveSession() {
+    this._closeSession();
+    this._session = await native.liveOpen(this._html, this._url, this._cookies);
+    this._hydrated = true;
+    await this._refreshFromSession();
+  }
+
+  // Pull the current live DOM + URL + cookies back into the Page so reads (which run
+  // over `this._html`) and a subsequent navigation see the post-interaction state.
+  async _refreshFromSession() {
+    if (this._session == null) return;
+    this._html = native.liveSerialize(this._session);
+    try {
+      const href = await native.liveEval(this._session, "globalThis.__RESULT = location.href;");
+      if (href) this._url = href;
+    } catch {
+      /* keep prior url */
+    }
+    try {
+      this._cookies = native.liveCookies(this._session);
+    } catch {
+      /* keep prior cookies */
+    }
+  }
+
+  _closeSession() {
+    if (this._session != null) {
+      try {
+        native.liveClose(this._session);
+      } catch {
+        /* already gone */
+      }
+      this._session = null;
+    }
+  }
+
+  // Drive an interaction in the live isolate (real DOM events → running app handlers →
+  // re-render), then refresh the Page snapshot. `kind` is "click" | "fill".
+  async _sessionDispatch(selector, index, kind, value) {
+    const r = await native.liveEval(
+      this._session,
+      interactionScript(selector, index ?? 0, kind, value),
+    );
+    await this._refreshFromSession();
+    if (r === "NO_MATCH") throw new Error("turbo-crawl: locator matched no elements");
+    return r;
   }
   get _cookies() {
     return this._context._cookies;
@@ -330,6 +485,7 @@ class Page {
   }
 
   async _navigate(url, method, body) {
+    this._closeSession(); // a fresh document — discard the prior live app
     const r = JSON.parse(
       await native.fetchWithCookies(
         url,
@@ -356,8 +512,9 @@ class Page {
     // only pulls server HTML, so without this an SPA's client-rendered content
     // (forms, dashboards) never appears and every locator misses. Mirror the browser:
     // run the page's own bundle to quiescence. (Default/'load' stays raw so callers
-    // can still inspect the pre-hydration server shell.)
-    if (opts?.waitUntil === "networkidle") await this.hydrate();
+    // can still inspect the pre-hydration server shell.) A LIVE session keeps the app
+    // mounted so later clicks/fills dispatch real events into it (interactive SPA).
+    if (opts?.waitUntil === "networkidle") await this._openLiveSession();
     return resp;
   }
   async reload() {
@@ -429,8 +586,19 @@ class Page {
     return native.ariaSnapshot(this._html, 0);
   }
 
-  // Evaluate JS against the page DOM. Supports (fn, arg) and string forms.
+  // Evaluate JS against the page DOM. Supports (fn, arg) and string forms. When a live
+  // session is up, run in the LIVE isolate (sees the running app's state + can mutate
+  // it) and refresh the snapshot; otherwise run statelessly over the cached HTML.
   async evaluate(script, arg) {
+    if (this._live) {
+      const body = evalSource(script, arg);
+      const out = await native.liveEval(
+        this._session,
+        `globalThis.__RESULT = (() => { return ${body}; })();`,
+      );
+      await this._refreshFromSession();
+      return out;
+    }
     return native.evaluate(this._html, evalSource(script, arg));
   }
   async evaluateHandle(script, arg) {
@@ -575,21 +743,30 @@ class Page {
   // `waitForLoadState('networkidle')` is the other "page has settled" signal — treat
   // it like the networkidle goto and hydrate the SPA if it hasn't been already.
   async waitForLoadState(state) {
-    if (state === "networkidle") await this.hydrate();
+    if (state === "networkidle" && !this._live) await this._openLiveSession();
   }
   async waitForTimeout(ms) {
     await new Promise((r) => setTimeout(r, Math.min(ms ?? 0, 50)));
   }
-  async waitForURL(url) {
+  async waitForURL(url, opts = {}) {
     const match = (u) =>
-      url instanceof RegExp ? url.test(u) : u.includes(String(url).replace(/\*/g, ""));
-    if (!match(this._url)) {
-      // The nav that changes the URL has already run synchronously in this shim.
-      // Nothing more will happen async, so assert rather than hang.
-      if (typeof url === "string" && !match(this._url))
-        throw new Error(`turbo-crawl: waitForURL(${url}) — current url is ${this._url}`);
+      url instanceof RegExp
+        ? url.test(u)
+        : u.includes(String(url).replace(/\*\*/g, "").replace(/\*/g, ""));
+    if (match(this._url)) return undefined;
+    // In a live session a navigation can be a MULTI-STEP client redirect (login →
+    // /post-login → /entity-select|/entity/{id}), each step a render that runs on the
+    // next drain. Pump the session — each refresh drains it — until the URL matches or
+    // we give up. (No session: the nav already ran synchronously, so just assert.)
+    if (this._live) {
+      const rounds = Math.max(1, Math.ceil((opts.timeout ?? 15000) / 1000));
+      for (let i = 0; i < rounds && !match(this._url); i++) {
+        await native.liveEval(this._session, "globalThis.__RESULT = location.href;");
+        await this._refreshFromSession();
+      }
+      if (match(this._url)) return undefined;
     }
-    return undefined;
+    throw new Error(`turbo-crawl: waitForURL(${url}) — current url is ${this._url}`);
   }
   async waitForSelector(selector, opts = {}) {
     const present = (await this.locator(selector).count()) > 0;
@@ -678,6 +855,7 @@ class Page {
     return this._closed;
   }
   async close() {
+    this._closeSession();
     this._closed = true;
     this._emit("close");
   }

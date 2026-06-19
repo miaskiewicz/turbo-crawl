@@ -191,3 +191,207 @@ fn read_query(t: &Tree, root: u32, args: &Value) -> std::result::Result<String, 
     };
     Ok(json!(view::query(t, root, selector, ty)).to_string())
 }
+
+// ── Live JS sessions ─────────────────────────────────────────────────────────
+// A LIVE page keeps the hydrated app's JS isolate (`PageSession`) ALIVE across calls so
+// interactions dispatch real DOM events into the running app and the re-render is
+// observable (the no-JS `Session` above reparses a static Tree and can't run handlers).
+// The V8 isolate is `!Send`, so each session owns a dedicated thread; the registry
+// holds only `Send` command channels keyed by id.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::mpsc::Sender as MpscSender;
+use std::sync::{Mutex, OnceLock};
+use turbo_crawl_render::{PageSession, DEFAULT_RENDER_BUDGET_MS};
+
+enum LiveJob {
+    Eval(String, SyncSender<std::result::Result<String, String>>),
+    Serialize(SyncSender<String>),
+    Cookies(SyncSender<String>),
+    Close(SyncSender<()>),
+}
+
+static LIVE: OnceLock<Mutex<HashMap<u32, MpscSender<LiveJob>>>> = OnceLock::new();
+static LIVE_NEXT: AtomicU32 = AtomicU32::new(1);
+
+fn live_registry() -> &'static Mutex<HashMap<u32, MpscSender<LiveJob>>> {
+    LIVE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn live_send(id: u32, job: LiveJob) -> std::result::Result<(), String> {
+    let reg = live_registry()
+        .lock()
+        .map_err(|_| "session registry poisoned")?;
+    let tx = reg.get(&id).ok_or("no such live session")?;
+    tx.send(job)
+        .map_err(|_| "live session worker gone".to_string())
+}
+
+/// Spawn a session thread, hydrate the page on it, and register it. Returns the id.
+/// Async (hydration fetches chunks from a possibly same-process server, so Node's loop
+/// must stay free).
+pub struct LiveOpenTask {
+    html: String,
+    base_url: String,
+    cookies: String,
+}
+
+#[napi]
+impl Task for LiveOpenTask {
+    type Output = u32;
+    type JsValue = u32;
+
+    fn compute(&mut self) -> Result<u32> {
+        let (tx, rx) = std::sync::mpsc::channel::<LiveJob>();
+        let (open_tx, open_rx) = sync_channel::<std::result::Result<(), String>>(1);
+        let html = std::mem::take(&mut self.html);
+        let base = std::mem::take(&mut self.base_url);
+        let cookies = std::mem::take(&mut self.cookies);
+        thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = open_tx.send(Err(e.to_string()));
+                    return;
+                }
+            };
+            let mut session = match rt.block_on(PageSession::open(
+                &html,
+                &base,
+                &cookies,
+                DEFAULT_RENDER_BUDGET_MS,
+            )) {
+                Ok(s) => {
+                    let _ = open_tx.send(Ok(()));
+                    s
+                }
+                Err(e) => {
+                    let _ = open_tx.send(Err(e));
+                    return;
+                }
+            };
+            for job in rx {
+                match job {
+                    LiveJob::Eval(script, reply) => {
+                        let _ = reply.send(rt.block_on(session.eval(&script)));
+                    }
+                    LiveJob::Serialize(reply) => {
+                        let _ = reply.send(session.serialize());
+                    }
+                    LiveJob::Cookies(reply) => {
+                        let _ = reply.send(session.cookies());
+                    }
+                    LiveJob::Close(reply) => {
+                        session.close();
+                        let _ = reply.send(());
+                        break;
+                    }
+                }
+            }
+        });
+        open_rx
+            .recv()
+            .map_err(|_| Error::from_reason("live session thread died during open"))?
+            .map_err(Error::from_reason)?;
+        let id = LIVE_NEXT.fetch_add(1, Ordering::Relaxed);
+        live_registry()
+            .lock()
+            .map_err(|_| Error::from_reason("session registry poisoned"))?
+            .insert(id, tx);
+        Ok(id)
+    }
+
+    fn resolve(&mut self, _env: Env, id: u32) -> Result<u32> {
+        Ok(id)
+    }
+}
+
+/// Open a live page session (hydrate + keep alive). Returns a session id.
+#[napi]
+pub fn live_open(
+    html: String,
+    base_url: String,
+    cookies: Option<String>,
+) -> AsyncTask<LiveOpenTask> {
+    AsyncTask::new(LiveOpenTask {
+        html,
+        base_url,
+        cookies: cookies.unwrap_or_default(),
+    })
+}
+
+/// Run `script` in the live isolate, drain to quiescence, return `String(__RESULT||'')`.
+/// Async — the script may trigger fetches to a same-process server.
+pub struct LiveEvalTask {
+    id: u32,
+    script: String,
+}
+
+#[napi]
+impl Task for LiveEvalTask {
+    type Output = String;
+    type JsValue = String;
+
+    fn compute(&mut self) -> Result<String> {
+        let (reply, rx) = sync_channel(1);
+        live_send(
+            self.id,
+            LiveJob::Eval(std::mem::take(&mut self.script), reply),
+        )
+        .map_err(Error::from_reason)?;
+        rx.recv()
+            .map_err(|_| Error::from_reason("live session dropped eval reply"))?
+            .map_err(Error::from_reason)
+    }
+
+    fn resolve(&mut self, _env: Env, out: String) -> Result<String> {
+        Ok(out)
+    }
+}
+
+/// Eval JS in a live session (async).
+#[napi]
+pub fn live_eval(id: u32, script: String) -> AsyncTask<LiveEvalTask> {
+    AsyncTask::new(LiveEvalTask { id, script })
+}
+
+/// Serialize the live DOM to HTML (sync — no network).
+#[napi]
+pub fn live_serialize(id: u32) -> Result<String> {
+    let (reply, rx) = sync_channel(1);
+    live_send(id, LiveJob::Serialize(reply)).map_err(Error::from_reason)?;
+    rx.recv()
+        .map_err(|_| Error::from_reason("live session dropped serialize reply"))
+}
+
+/// The live session's cookies (storageState JSON) — carries the session a later
+/// navigation needs after an in-page login (sync — no network).
+#[napi]
+pub fn live_cookies(id: u32) -> Result<String> {
+    let (reply, rx) = sync_channel(1);
+    live_send(id, LiveJob::Cookies(reply)).map_err(Error::from_reason)?;
+    rx.recv()
+        .map_err(|_| Error::from_reason("live session dropped cookies reply"))
+}
+
+/// Close a live session: reset the binding, drop the isolate, unregister (sync).
+#[napi]
+pub fn live_close(id: u32) -> Result<()> {
+    let tx = {
+        let mut reg = live_registry()
+            .lock()
+            .map_err(|_| Error::from_reason("session registry poisoned"))?;
+        reg.remove(&id)
+    };
+    if let Some(tx) = tx {
+        let (reply, rx) = sync_channel(1);
+        if tx.send(LiveJob::Close(reply)).is_ok() {
+            let _ = rx.recv();
+        }
+    }
+    Ok(())
+}
