@@ -290,13 +290,13 @@ class Locator {
   async click() {
     if (this._canDriveLive) {
       const urlBefore = this._page._url;
-      await this._driveLive("click");
+      const r = await this._driveLive("click");
       // A JS handler that navigated changed the URL (SPA router / form POST + redirect).
-      // If the URL is unchanged, the click hit a plain <a>/<form> whose browser default
-      // action our event dispatch doesn't perform — follow the static intent (anchor
-      // navigate / form POST). For a JS button (Inert intent) the dispatch already did
-      // the work, so we leave it.
-      if (this._page._url === urlBefore) {
+      // If the URL is unchanged AND the app didn't preventDefault, the click hit a plain
+      // <a>/<form> whose browser default action our event dispatch doesn't perform —
+      // follow the static intent (anchor navigate / form POST). For a JS button (Inert
+      // intent) or a handled click (PREVENTED) the dispatch already did the work.
+      if (this._page._url === urlBefore && r !== "PREVENTED") {
         const n = this._node();
         if (n != null) {
           const intent = JSON.parse(native.clickNode(this._page._html, n, this._page._url));
@@ -524,7 +524,10 @@ function interactionScript(selector, index, kind, value) {
         : el.tagName === "INPUT" && (ty === "submit" || ty === "image");
       if (f && submits) f.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     }
-    globalThis.__RESULT = "OK";
+    // Report whether the app handled the click (preventDefault). If it did, the shim
+    // must NOT also perform the browser default action (e.g. navigate an <a href="#">
+    // whose React onClick toggles state) — that would reload and wipe the new state.
+    globalThis.__RESULT = clickEv.defaultPrevented ? "PREVENTED" : "OK";
   } })();`;
 }
 
