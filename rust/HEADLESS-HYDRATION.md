@@ -337,6 +337,44 @@ selective hydration can't rescue it either — it needs the same flight data.
   KB `403`). NOT a turbo-surf issue. `migration:revert:all` is also blocked by an
   irreversible app migration — don't rely on it for a clean rebuild.
 
+### Precise diagnosis (validated against real Chromium)
+
+With the env finally correct — **real Chromium on `next dev` PASSES the vacation
+spec** (prod CSP drops `http://localhost:*` from `connect-src`, so a real browser
+on a prod build can't reach flux-apis `:3001` → "Failed to load organizations" →
+empty entity-select; the shim isn't subject to CSP since it fetches via the host
+net layer, so it uses the **prod** build for classic chunks). So the wizard failure
+is **confirmed turbo-surf-specific**: same flow, real Chromium green, shim red.
+
+Walking the dead "Add Manually" button's ancestors in the shim's hydrated DOM:
+
+```
+BUTTON#vacation-time-add-manually-button : none
+DIV … (the whole page/wizard subtree)    : none
+MAIN                                      : FIBER
+DIV / DIV#payroll-admin-shell            : FIBER
+```
+
+React hydrates the **layout** (`payroll-admin-shell` → `MAIN`) but NOT the App
+Router **page-segment** inside `MAIN` — that boundary stays **dehydrated**, so its
+whole client subtree (incl. the button) has no fiber and no handlers.
+
+Ruled out (each tested): deps mismatch, prod-vs-dev CSP (that's the *real-browser*
+blocker, not the shim), failed/missing chunks (251 load, 0 fail), skipped ESM
+scripts (none), React core (Suspense+lazy+hydrate all work via React-18-UMD diags),
+the flight stream not closing (**328 ReadableStreams created, 328 closed**),
+`useSearchParams` (page uses `useParams`, which doesn't suspend), the `prototype`
+TypeError (caught PostHog probe, not in the hydration path), and "needs more pumping"
+(fiber count is stable at 484/997 across redraws + clicks + load/DOMContentLoaded
+events — React is waiting on a *signal*, not scheduler ticks).
+
+So: the page-segment dehydrated Suspense boundary's flight arrives + the stream
+closes, but the **flight-resolved → reconciler "retry the dehydrated boundary"
+link never fires** in the isolate, and selective-hydration-on-click doesn't rescue
+it (a synthetic click doesn't trigger React's continuous-event replay for the
+dehydrated boundary). That link lives inside Next's bundled
+`react-server-dom-webpack` + React reconciler.
+
 ### Where to start next (RSC flight)
 
 The tractable next step is instrumenting how `self.__next_f` (the array Next replaces
