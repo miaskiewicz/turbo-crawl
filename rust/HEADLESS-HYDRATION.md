@@ -401,3 +401,30 @@ project, not a shim gap.
 - **Run serial.** `node --test` defaults to parallel → concurrent PropelAuth logins
   trip rate-limiting; the real Playwright config is `workers: 1`. Use
   `--test-concurrency=1` (set in payroll-app's `test:e2e:turbo:run`).
+
+## Hydration regression harness (standing rule)
+
+**Every headless-hydration issue we fix gets a permanent, committable repro here.**
+Don't rely on the live payroll app (it churns + needs the full env) — capture the
+mechanism in a self-contained fixture driven through the render tier.
+
+- **Render-tier fixtures:** `rust/crates/turbo-surf-render/tests/fixtures/*.html` —
+  self-contained pages (React/ReactDOM UMD **inlined**, no npm dep at test time),
+  loaded by a `#[tokio::test]` in `tests/render.rs` via `include_str!`, asserted by
+  opening a `PageSession` and checking the hydrated behaviour (e.g. a button's
+  `onClick` firing → `window.__clicked`).
+- **Generators:** `rust/crates/turbo-surf-render/tests/fixture-gen/*.mjs` regenerate
+  the fixtures from real React (run with the app's `node_modules` path). Committed so
+  the fixtures are reproducible, not magic blobs.
+- First guard: `react18_streaming_suspense_boundary_hydrates` (fixture
+  `react-streaming-hydration.html`, generator `gen-react-streaming.mjs`). Real React 18
+  streaming SSR: a `<Suspense>` that suspended on the server → streams its content late
+  with a `$RC` completion script that walks the `<!--$?-->…<!--/$-->` comment markers
+  and calls the boundary's `_reactRetry`. **It passes** — proving the generic
+  dehydrated-boundary hydration path (comment markers + `_reactRetry`) works in the
+  isolate, which is exactly why the Next App Router wizard failure is narrowed to the
+  **RSC-flight (`react-server-dom-webpack`)** variant, not generic React.
+- The RSC-flight variant can't be isolated cheaply: `react-server-dom-webpack/server`
+  requires the bundler-only `react-server` export condition, and the client's flight
+  references resolve through the real app's webpack runtime. Until that's stubbed, its
+  repro is the full-app shim e2e (the payroll wizard vacation specs).

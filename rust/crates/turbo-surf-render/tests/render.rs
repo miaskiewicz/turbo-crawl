@@ -1101,6 +1101,52 @@ async fn dynamically_injected_script_runs_and_fires_load() {
     session.close();
 }
 
+// PERMANENT headless-hydration harness (general rule: every hydration issue we fix
+// gets a committable repro here). This fixture is REAL React 18 streaming SSR: a
+// <Suspense> boundary that suspended on the server (streams its content late + a
+// `$RC` completion script that walks the `<!--$?-->…<!--/$-->` comment markers and
+// calls the dehydrated boundary's `_reactRetry`). React/ReactDOM UMD are inlined and
+// `hydrateRoot` runs. The dehydrated boundary MUST hydrate in the render isolate —
+// proven by the button's onClick firing (sets `window.__clicked`). Regenerate with
+// tests/fixture-gen/gen-react-streaming.mjs. (Guards the comment-marker + `_reactRetry`
+// hydration path; the Next App Router RSC-flight variant is tracked in HEADLESS-HYDRATION.md.)
+#[tokio::test]
+async fn react18_streaming_suspense_boundary_hydrates() {
+    let html = include_str!("fixtures/react-streaming-hydration.html");
+    let mut session = PageSession::open(
+        html,
+        "https://example.test/",
+        "",
+        "",
+        DEFAULT_RENDER_BUDGET_MS,
+    )
+    .await
+    .expect("session opens");
+
+    // The $RC completion swapped the streamed content in (button replaces fallback).
+    let serialized = session.serialize();
+    assert!(
+        serialized.contains(r#"data-test-id="lazy-btn"#) && !serialized.contains(r#"id="fb""#),
+        "streamed boundary content must replace the fallback: {serialized}"
+    );
+
+    // The dehydrated boundary must HYDRATE: clicking the button runs its React onClick.
+    session
+        .eval(r#"document.getElementById('btn').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); globalThis.__RESULT = String(!!window.__clicked);"#)
+        .await
+        .unwrap();
+    let clicked = session
+        .eval(r#"globalThis.__RESULT = String(!!window.__clicked);"#)
+        .await
+        .unwrap();
+    assert_eq!(
+        clicked, "true",
+        "the streamed/dehydrated Suspense boundary must hydrate (onClick must fire)"
+    );
+
+    session.close();
+}
+
 // --- helpers ----------------------------------------------------------------
 async fn spawn_json_server(body: &'static str) -> u16 {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
