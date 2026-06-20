@@ -6,11 +6,9 @@
 // (the client component's button appears + onClick fires), the flight client works in our
 // env. Regenerate:
 //   node tests/fixture-gen/gen-flight-client.mjs <path-to-app-node_modules>
-import { createRequire } from "node:module";
 import fs from "node:fs";
 import path from "node:path";
 const APP = process.argv[2] || "/Users/grzegorzmiaskiewicz/github-flux/payroll-app-tc/";
-const require = createRequire(APP.endsWith("/") ? APP : APP + "/");
 const reactUMD = fs.readFileSync(
   path.join(APP, "node_modules/react/umd/react.production.min.js"),
   "utf8",

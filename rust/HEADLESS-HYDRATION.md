@@ -552,3 +552,35 @@ client refs in the headless turbopack runtime. The chunks ARE preloaded + regist
 already-resolved resolver — instrument the bundled flight client's resolve path
 (`createFromReadableStream` lives in the next-client chunk; refs go through the turbopack
 context, not free `__turbopack_require__` globals) to find which call parks forever.
+
+## SOLVED: App Router hydrates headless on turbopack dev (`document.location`)
+
+The RSC-flight wall (above) was ONE missing global: **`document.location`**. The env
+defined `window.location` but not `document.location` (a browser invariant —
+`document.location === window.location`). Next's DEV RSC flight client replays server
+console entries; `resolveConsoleEntry → buildFakeCallStack → findSourceMapURL` reads
+`document.location.origin`, which threw `Cannot read properties of undefined (reading
+'origin')` INSIDE `processFullStringRow`. That abort killed the entire flight stream
+parse — so the React root suspended forever, silently (the throw became a rejected flight
+chunk; no console error).
+
+The hunt that pinned it (all reproducible via the diag specs): flight stream fully
+delivers (48 reads, all rows) → 17 client refs all resolve (`resolveModuleChunk` ×17, 0
+errors) → but only 6 components render → dumping `response._chunks` showed **2 rejected**
+chunks → their `reason.stack` pointed at `findSourceMapURL` reading `.origin`.
+
+Fix: one line — `def("location", () => globalThis.location)` (runtime.rs). Impact on the
+live payroll wizard route through the shim: **0 → 488 React fibers / 1993 elements**; the
+shell, nav, sidebar hydrate; login works; all `:3001` data fetches fire (`/auth/me`,
+`/payroll-runs/:id/roster`, `/leave-balances`, `/employments`, …) and the wizard renders
+("Step 1: Employees & Leave"). Guarded by `document_location_mirrors_window_location`.
+
+### Remaining (NOT hydration — interaction/seed long-tail)
+With hydration fixed, suites that were 0/N on the flight wall now partially pass
+(off-cycle 1/2, company-settings 4/14, …). The remaining wizard failures are:
+- `waitFor(state=hidden/visible) timed out` on modal open/close after a submit click
+  (e.g. add-to-payroll modal not detected closing) — likely a MUI Dialog transition /
+  visibility-detection refinement in the shim. Highest leverage (modals are everywhere).
+- `403 Missing required permissions` (e.g. `deduction:read`, `/expenses`) — the e2e seed
+  admin lacks some grants (seed/permission issue, not the engine).
+These are per-interaction, not the structural hydration blocker — that is solved.
