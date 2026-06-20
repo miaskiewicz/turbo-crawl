@@ -1193,6 +1193,51 @@ async fn react_document_root_hydrates_and_commits() {
     session.close();
 }
 
+// KNOWN-FAILING REPRO (ignored): a click on a React PORTAL'd element (createPortal under
+// hydrateRoot(document)) must fire its onClick. This is the MUI Autocomplete/Dialog/Menu
+// case — options/dialogs render in a Popper portal to <body>; their onClick must run for
+// selection/submit to work. In this env the portal's onClick does NOT fire: React attaches
+// delegated listeners per container in completeWork (HostPortal → listenToAllSupportedEvents
+// (containerInfo)), and the MUI portal container divs end up WITHOUT a `_reactListening`
+// marker, so React's root-container (document) listener — which by design SKIPS portal
+// targets — never dispatches to them. Main-tree clicks work; portal clicks don't. This
+// blocks the interaction half of the payroll e2e suite. Un-ignore once the portal event
+// path is fixed in the engine. Fixture: tests/fixture-gen/gen-react-currenttarget.mjs.
+#[tokio::test]
+#[ignore = "portal onClick dispatch not yet working in the headless env (see comment); tracks the interaction-tier blocker"]
+async fn portal_element_onclick_dispatches() {
+    let html = include_str!("fixtures/react-currenttarget.html");
+    let mut session = PageSession::open(
+        html,
+        "https://example.test/",
+        "",
+        "",
+        DEFAULT_RENDER_BUDGET_MS,
+    )
+    .await
+    .expect("session opens");
+    // Let the post-hydration effect mount the portal.
+    for _ in 0..5 {
+        session
+            .eval(r#"if(globalThis.__runTimers)__runTimers(2000); globalThis.__RESULT = String(!!document.getElementById('leaf'));"#)
+            .await
+            .unwrap();
+    }
+    session
+        .eval(r#"var l=document.getElementById('leaf'); if(l) l.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true})); globalThis.__RESULT="";"#)
+        .await
+        .unwrap();
+    let ct = session
+        .eval(r#"globalThis.__RESULT = String(window.__ct);"#)
+        .await
+        .unwrap();
+    session.close();
+    assert_eq!(
+        ct, "2",
+        "portal'd <li> onClick must fire (currentTarget's data-option-index)"
+    );
+}
+
 // `document.location` must mirror `window.location` (a browser invariant). Next's dev RSC
 // flight client reads `document.location.origin` (findSourceMapURL, replaying server
 // console entries); when `document.location` was undefined it threw "reading 'origin' of
@@ -1335,6 +1380,41 @@ async fn expando_properties_persist_on_document_and_root_nodes() {
         assert!(
             out.contains(&format!(r#"{attr}="{want}""#)),
             "expando on {attr} node must persist (React root/fibers depend on it): {out}"
+        );
+    }
+}
+
+// Expandos on DYNAMICALLY-CREATED elements: React stores each fiber as `node.__reactFiber$
+// <rand>` on the node it creates during render. For PORTAL'd content (MUI Dialog/Popper/
+// Menu — createElement'd into a portal container, not hydrated from SSR), if a created
+// node can't hold a JS expando, React commits the DOM but no fiber is reachable → event
+// delegation can't find handlers → the portal renders but is DEAD (onClick never fires).
+// Guard that a createElement'd + appended node round-trips an expando, before and after
+// it's in the tree.
+#[tokio::test]
+async fn expando_properties_persist_on_created_elements() {
+    let html = r#"<html><head></head><body><div id="root"></div>
+      <script>
+        var made = document.createElement('li');
+        made.__tcFiber = 'before-append';
+        var r = document.getElementById('root');
+        r.setAttribute('data-before', String(made.__tcFiber));
+        document.body.appendChild(made);
+        made.__tcFiber2 = 'after-append';
+        // re-fetch the same node from the live tree and read the expando back
+        var again = document.body.lastElementChild;
+        r.setAttribute('data-after', String(again.__tcFiber));
+        r.setAttribute('data-after2', String(again.__tcFiber2));
+      </script></body></html>"#;
+    let out = render_hydrate(html, "https://example.test/").await.unwrap();
+    for (attr, want) in [
+        ("data-before", "before-append"),
+        ("data-after", "before-append"),
+        ("data-after2", "after-append"),
+    ] {
+        assert!(
+            out.contains(&format!(r#"{attr}="{want}""#)),
+            "expando on a created element must persist (React fibers on portal'd nodes depend on it): {out}"
         );
     }
 }

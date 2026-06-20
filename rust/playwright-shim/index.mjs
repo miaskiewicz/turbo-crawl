@@ -523,8 +523,23 @@ function interactionScript(selector, index, kind, value) {
     // the default-action (form submit) logic stay on the matched control \`el\`.
     let tgt = el; while (tgt.firstElementChild) tgt = tgt.firstElementChild;
     const o = { bubbles: true, cancelable: true, view: globalThis, button: 0 };
-    tgt.dispatchEvent(new MouseEvent("mousedown", o));
-    if (typeof el.focus === "function") el.focus();
+    // Full pointer+mouse sequence like a real browser: pointer events FIRST (MUI v5+ /
+    // Radix / many libs gate selection on pointerdown/up, and MUI Autocomplete/Select
+    // options preventDefault mousedown to keep input focus — without the pointer pair the
+    // option click never commits the value). PointerEvent if available, else MouseEvent.
+    const PE = globalThis.PointerEvent || globalThis.MouseEvent;
+    const pe = (t) => new PE(t, { bubbles: true, cancelable: true, view: globalThis, button: 0, pointerId: 1, isPrimary: true });
+    tgt.dispatchEvent(pe("pointerdown"));
+    const md = new MouseEvent("mousedown", o);
+    tgt.dispatchEvent(md);
+    // Focus follows the browser rules: a click moves focus to a FOCUSABLE target, BUT a
+    // mousedown handler that calls preventDefault() suppresses the focus shift. MUI's
+    // Autocomplete/Select listbox preventDefaults mousedown precisely to keep the input
+    // focused while an option is clicked — focusing the option <li> (tabindex=-1) instead
+    // would blur the input and clearOnBlur would discard the just-made selection.
+    const focusable = el.matches && el.matches("input,button,textarea,select,a[href],[tabindex],[contenteditable]");
+    if (focusable && !md.defaultPrevented && typeof el.focus === "function") el.focus();
+    tgt.dispatchEvent(pe("pointerup"));
     tgt.dispatchEvent(new MouseEvent("mouseup", o));
     const clickEv = new MouseEvent("click", o);
     tgt.dispatchEvent(clickEv);
