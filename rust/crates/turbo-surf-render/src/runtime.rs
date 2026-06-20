@@ -13,12 +13,78 @@
 //! drops — otherwise a later drop on a dead isolate crashes. Every entry point
 //! resets on the way out.
 
-use deno_core::{op2, v8, JsRuntime, OpState, RuntimeOptions};
+use deno_core::{
+    op2, resolve_import, v8, JsRuntime, ModuleLoadOptions, ModuleLoadReferrer, ModuleLoadResponse,
+    ModuleLoader, ModuleResolveResponse, ModuleSource, ModuleSourceCode, ModuleSpecifier,
+    ModuleType, OpState, ResolutionKind, RuntimeOptions,
+};
+use deno_error::JsErrorBox;
 use std::cell::RefCell;
 use std::rc::Rc;
 use turbo_surf_core::cookies::CookieJar;
 use turbo_surf_core::net::{fetch_html, FetchOptions};
 use turbo_surf_core::url::resolve;
+
+/// Loads ES modules (a `<script type="module">`'s `import` graph) over the host net
+/// layer — the same path `op_fetch` uses — so a Next dev / turbopack build (served as
+/// ES modules) hydrates. Carries the page base + shared cookie jar so module fetches
+/// are same-origin + session-authenticated like page fetches.
+struct NetModuleLoader {
+    base: String,
+    jar: Jar,
+    ua: String,
+}
+
+impl ModuleLoader for NetModuleLoader {
+    fn resolve(
+        &self,
+        specifier: &str,
+        referrer: &str,
+        _kind: ResolutionKind,
+    ) -> ModuleResolveResponse {
+        // Resolve against the referrer; fall back to the page base for the entry module.
+        let referrer = if referrer.is_empty() || referrer == "." {
+            &self.base
+        } else {
+            referrer
+        };
+        resolve_import(specifier, referrer).map_err(|e| JsErrorBox::generic(e.to_string()))
+    }
+
+    fn load(
+        &self,
+        module_specifier: &ModuleSpecifier,
+        _maybe_referrer: Option<&ModuleLoadReferrer>,
+        _options: ModuleLoadOptions,
+    ) -> ModuleLoadResponse {
+        let url = module_specifier.clone();
+        let jar = self.jar.clone();
+        let ua = self.ua.clone();
+        ModuleLoadResponse::Async(Box::pin(async move {
+            let mut local = CookieJar::from_storage_state(&jar.borrow().storage_state());
+            let mut headers = std::collections::BTreeMap::new();
+            if !ua.is_empty() {
+                headers.insert("user-agent".to_string(), ua);
+            }
+            let opts = FetchOptions {
+                headers,
+                allow_non_html: true, // JS modules aren't HTML
+                jar: Some(&mut local),
+                ..Default::default()
+            };
+            let r = fetch_html(url.as_str(), opts)
+                .await
+                .map_err(|e| JsErrorBox::generic(format!("module fetch {url}: {e}")))?;
+            *jar.borrow_mut() = local;
+            Ok(ModuleSource::new(
+                ModuleType::JavaScript,
+                ModuleSourceCode::String(r.html.into()),
+                &url,
+                None,
+            ))
+        }))
+    }
+}
 
 /// Page base URL (the `location.href`): the base for relative `fetch` and the
 /// scope for the `document.cookie` bridge. Stored in op state.
@@ -1135,6 +1201,9 @@ globalThis.__execScriptEl = async function (el) {
   // overwrites native Promise/queueMicrotask with impls whose microtask scheduler
   // is inert in this env — promises never settle and the render never commits.
   if (get("nomodule") !== null || get("noModule") !== null) return;
+  // ES modules (`<script type="module">`) run through the Rust module pump (a real
+  // module graph + loader), NOT classic eval — leave them for `__takeModuleScript`.
+  if ((get("type") || "").toLowerCase() === "module") return;
   if (!__EXECUTABLE_TYPES.has((get("type") || "").toLowerCase())) return; // JSON/data blocks etc.
   const src = get("src");
   try {
@@ -1192,11 +1261,33 @@ globalThis.__hydrate = async function (maxRounds = 300, timerBudget = 200000) {
     if (!ranScript && fired === 0) break;
   }
 };
+// Claim the next un-run ES-module script (`<script type=module>` or an inline script
+// with `import`/`export`) in DOM order → `__RESULT = {src, code}` JSON, or "" when
+// none. The Rust module pump evaluates each through deno_core's real module graph
+// (`__execScriptEl` deliberately skips them). `__tcModule` is the claim marker.
+globalThis.__moduleStmt = /(^|[;{}\n\r])\s*(import\s+[^(]|import\s*['"]|export\s+|export\s*\{|export\s*\*)/;
+globalThis.__takeModuleScript = function () {
+  const scripts = Array.prototype.slice.call(document.querySelectorAll("script"));
+  for (let i = 0; i < scripts.length; i++) {
+    const el = scripts[i];
+    if (el.__tcModule) continue;
+    const type = ((el.getAttribute && el.getAttribute("type")) || "").toLowerCase();
+    const src = (el.getAttribute && el.getAttribute("src")) || "";
+    const code = src ? "" : (el.textContent || el.text || "");
+    const isModule = type === "module" || (!src && globalThis.__moduleStmt.test(code));
+    if (!isModule) continue;
+    el.__tcModule = true;
+    el.__tcDone = true;
+    globalThis.__RESULT = JSON.stringify({ src, code });
+    return;
+  }
+  globalThis.__RESULT = "";
+};
 // Pending-work signal for the Rust pump loop: "1" while timers are queued, a
-// <script> hasn't run, or a fetch is in-flight (more to do after the next async
-// drain), else "0".
+// <script> hasn't run, an ES module is unclaimed, or a fetch is in-flight (more to do
+// after the next async drain), else "0".
 globalThis.__pendingWork = () =>
-  (globalThis.__pendingFetches || 0) > 0 || __timers.length > 0 || Array.prototype.some.call(document.querySelectorAll("script"), (s) => !s.__tcDone) ? "1" : "0";
+  (globalThis.__pendingFetches || 0) > 0 || __timers.length > 0 || Array.prototype.some.call(document.querySelectorAll("script"), (s) => !s.__tcDone || (((s.getAttribute && s.getAttribute("type")) || "").toLowerCase() === "module" && !s.__tcModule)) ? "1" : "0";
 // In-flight fetch count — the interaction drain must keep pumping while > 0 even if
 // the visible tree looks stable (the response's re-render hasn't happened yet).
 globalThis.__pendingFetchCount = () => String(globalThis.__pendingFetches || 0);
@@ -1299,19 +1390,26 @@ globalThis.__domSig = () => {
 })();"##;
 
 fn make_runtime(base: &str, cookies: &str, ua: &str) -> JsRuntime {
-    let rt = JsRuntime::new(RuntimeOptions {
-        extensions: vec![turbo_dom::init()],
-        ..Default::default()
-    });
-    let jar = if cookies.is_empty() {
+    // Build the shared cookie jar first so it backs BOTH page `fetch` (op_state) and the
+    // ES-module loader (`<script type=module>` import graphs) — same session, one jar.
+    let jar: Jar = Rc::new(RefCell::new(if cookies.is_empty() {
         CookieJar::new()
     } else {
         CookieJar::from_storage_state(cookies)
-    };
+    }));
+    let rt = JsRuntime::new(RuntimeOptions {
+        extensions: vec![turbo_dom::init()],
+        module_loader: Some(Rc::new(NetModuleLoader {
+            base: base.to_string(),
+            jar: jar.clone(),
+            ua: ua.to_string(),
+        })),
+        ..Default::default()
+    });
     let state = rt.op_state();
     let mut state = state.borrow_mut();
     state.put::<Base>(Base(base.to_string()));
-    state.put::<Jar>(Rc::new(RefCell::new(jar)));
+    state.put::<Jar>(jar);
     state.put::<Ua>(Ua(ua.to_string()));
     drop(state);
     rt
@@ -1623,6 +1721,8 @@ async fn run_hydrate(rt: &mut JsRuntime, html: &str, base: &str) -> Result<Strin
         rt.execute_script("<hydrate>", "globalThis.__tcHydrate = __hydrate();")
             .map_err(|e| e.to_string())?;
         drain_event_loop(rt).await?;
+        drain_module_scripts(rt, base).await?;
+        drain_event_loop(rt).await?;
         let pending = rt
             .execute_script("<pending>", "__pendingWork()")
             .map_err(|e| e.to_string())?;
@@ -1631,6 +1731,57 @@ async fn run_hydrate(rt: &mut JsRuntime, html: &str, base: &str) -> Result<Strin
         }
     }
     Ok(crate::browser_env::document_html())
+}
+
+// Evaluate every un-run ES-module `<script>` (claimed via `__takeModuleScript`) through
+// deno_core's real module graph: inline modules load from their own code, `src` modules
+// load by URL (the `NetModuleLoader` fetches them + their imports over the host net).
+// This is the path a Next dev / turbopack build (served as ES modules) needs to hydrate.
+async fn drain_module_scripts(rt: &mut JsRuntime, base: &str) -> Result<(), String> {
+    for n in 0..1000usize {
+        rt.execute_script("<take-mod>", "globalThis.__takeModuleScript();")
+            .map_err(|e| e.to_string())?;
+        let g = rt
+            .execute_script(
+                "<take-mod-r>",
+                "String(globalThis.__RESULT == null ? '' : globalThis.__RESULT)",
+            )
+            .map_err(|e| e.to_string())?;
+        let desc = read_string(rt, g)?;
+        if desc.is_empty() {
+            break;
+        }
+        let v: deno_core::serde_json::Value =
+            deno_core::serde_json::from_str(&desc).unwrap_or(deno_core::serde_json::Value::Null);
+        let src = v.get("src").and_then(|s| s.as_str()).unwrap_or("");
+        let code = v
+            .get("code")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_string();
+        let spec_str = if src.is_empty() {
+            format!("{}#tcmod-{n}", base.split('#').next().unwrap_or(base))
+        } else {
+            resolve(base, src).unwrap_or_else(|| src.to_string())
+        };
+        let Ok(spec) = ModuleSpecifier::parse(&spec_str) else {
+            continue;
+        };
+        let loaded = if src.is_empty() {
+            rt.load_side_es_module_from_code(&spec, code).await
+        } else {
+            rt.load_side_es_module(&spec).await
+        };
+        match loaded {
+            Ok(id) => {
+                if let Err(e) = rt.mod_evaluate(id).await {
+                    eprintln!("module eval error ({spec_str}): {e}");
+                }
+            }
+            Err(e) => eprintln!("module load error ({spec_str}): {e}"),
+        }
+    }
+    Ok(())
 }
 
 // RAII runaway-execution watchdog: terminates the isolate if an op runs past the

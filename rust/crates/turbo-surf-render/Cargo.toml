@@ -8,6 +8,9 @@ description = "turbo-surf JS-execution tier (tier 3): deno_core isolate + rtdomâ
 
 [dependencies]
 deno_core = "0.404"
+# Error type for the ESM ModuleLoader (deno_core's ModuleLoaderError = deno_error::JsErrorBox);
+# pinned to the version deno_core 0.404 resolves so the types unify.
+deno_error = "=0.7.1"
 # Direct v8 dep so the verbatim vendored `browser_env_upstream.rs` (which references
 # the `v8` crate by its bare name) compiles. Pinned to the exact version deno_core
 # resolves so both share one v8 â€” the binding installs into deno_core's own context.

@@ -1147,7 +1147,60 @@ async fn react18_streaming_suspense_boundary_hydrates() {
     session.close();
 }
 
+// ESM support (foundation): a `<script type="module">` must EVALUATE, not be skipped.
+// Next dev / turbopack serve their app as ES modules; the classic render tier used to
+// skip any `import`/`export` script, so dev builds never hydrated. This guards the
+// minimal module-eval path (no imports → no loader needed).
+#[tokio::test]
+async fn esm_inline_module_script_evaluates() {
+    // A real ESM module (has `export`/`import` syntax) — the classic tier skipped these.
+    let html = r#"<body><div id="app">x</div>
+      <script type="module">export const tag = 'ok'; document.getElementById('app').setAttribute('data-esm', tag);</script>
+    </body>"#;
+    let out = render_hydrate(html, "https://example.test/").await.unwrap();
+    assert!(
+        out.contains(r#"data-esm="ok""#),
+        "inline ESM module script must evaluate: {out}"
+    );
+}
+
+// ESM loader: a `<script type="module">` that `import`s a sibling module must fetch +
+// link it over the host net (the `NetModuleLoader`). This is the real dev-build path —
+// the app entry module pulls its dependency graph by URL.
+#[tokio::test]
+async fn esm_module_import_graph_loads_over_net() {
+    let port = spawn_js_server("export const v = 'imported-ok';").await;
+    let html = r#"<body><div id="app">x</div>
+      <script type="module">import { v } from '/mod.mjs'; document.getElementById('app').setAttribute('data-v', v);</script>
+    </body>"#;
+    let out = render_hydrate(html, &base(port)).await.unwrap();
+    assert!(
+        out.contains(r#"data-v="imported-ok""#),
+        "ESM import graph must load over the net + evaluate: {out}"
+    );
+}
+
 // --- helpers ----------------------------------------------------------------
+// Serves any path with the given JS body (application/javascript) — for ESM imports.
+async fn spawn_js_server(body: &'static str) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            let mut b = [0u8; 1024];
+            let _ = s.read(&mut b).await;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\nConnection: close\r\n\r\n{body}"
+            );
+            let _ = s.write_all(resp.as_bytes()).await;
+            let _ = s.flush().await;
+        }
+    });
+    port
+}
+
 async fn spawn_json_server(body: &'static str) -> u16 {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
