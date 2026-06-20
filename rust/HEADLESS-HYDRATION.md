@@ -459,3 +459,24 @@ its array `.push` handler, the module never registers. (A `next dev`, non-minifi
 build would name it directly, but the classic render tier skips ESM `import`/`export`
 scripts, so dev/turbopack chunks don't run — dev diagnostics need the ESM-script
 support tracked on `main`.)
+
+### Also ruled out: webpack module registration
+
+`self.webpackChunk_N_E.push !== Array.prototype.push` (the webpack runtime DID
+install its jsonp callback) and chunk entries carry registered modules
+(`[[8441],{…}]`, mods≥1). So client-component modules register fine — consistent
+with the layout hydrating. Not a chunk/registration bug.
+
+**Convergence:** with dehydrated-boundary, flight-close, webpack-registration,
+generic-React, and env/CSP all ruled out, this re-confirms the §3 finding — the
+`__PAGE__` segment's client render RUNS (component markers fire) but the atomic
+React commit for the **flux-payroll-ui `DataTable` grid subtree** is empty (no
+thrown error surfaced; `matchMedia` stub is complete so `useMediaQuery` isn't it).
+It's a render/commit-phase failure in that design-system grid.
+
+**The real unblock is tooling:** a `next dev` (non-minified) build would name the
+failing internal + give stack frames, but the classic render tier skips ESM
+`import`/`export` scripts, so turbopack/dev chunks don't execute. Landing ESM-script
+support in the render tier (tracked on `main`) → run the dev build → named frame at
+the empty commit → fix. That's the next lever, not more black-box probing of the
+prod bundle.
