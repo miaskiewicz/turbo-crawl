@@ -1193,6 +1193,117 @@ async fn react_document_root_hydrates_and_commits() {
     session.close();
 }
 
+// `document.location` must mirror `window.location` (a browser invariant). Next's dev RSC
+// flight client reads `document.location.origin` (findSourceMapURL, replaying server
+// console entries); when `document.location` was undefined it threw "reading 'origin' of
+// undefined", which aborted the WHOLE flight stream → the App Router page silently never
+// hydrated. Guards the fix at its root.
+#[tokio::test]
+async fn document_location_mirrors_window_location() {
+    let html = r#"<body><div id="root"></div>
+      <script>
+        var r = document.getElementById('root');
+        r.setAttribute('data-has', String(!!document.location));
+        r.setAttribute('data-origin', String(document.location && document.location.origin));
+        r.setAttribute('data-href', String(document.location && document.location.href));
+      </script></body>"#;
+    let out = render_hydrate(html, "https://app.test/some/path")
+        .await
+        .unwrap();
+    assert!(
+        out.contains(r#"data-has="true""#),
+        "document.location must be defined: {out}"
+    );
+    assert!(
+        out.contains(r#"data-origin="https://app.test""#),
+        "document.location.origin must read the page origin: {out}"
+    );
+    assert!(
+        out.contains(r#"data-href="https://app.test/some/path""#),
+        "document.location.href must read the page URL: {out}"
+    );
+}
+
+// The REAL react-server-dom-turbopack flight client (createFromReadableStream) must
+// instantiate + parse a flight stream containing a client reference in our env, without
+// throwing. Guards that the bundled flight client runs headless (process polyfill, stream
+// reading, manifest resolution). Fixture: tests/fixture-gen/gen-flight-client.mjs.
+#[tokio::test]
+async fn flight_client_instantiates_and_parses() {
+    let html = include_str!("fixtures/flight-client.html");
+    let mut session = PageSession::open(
+        html,
+        "https://example.test/",
+        "",
+        "",
+        DEFAULT_RENDER_BUDGET_MS,
+    )
+    .await
+    .expect("session opens");
+    let started = session
+        .eval(r#"globalThis.__RESULT = String(!!window.__flightStarted);"#)
+        .await
+        .unwrap();
+    let flight_err = session
+        .eval(r#"globalThis.__RESULT = String(window.__flightError || "");"#)
+        .await
+        .unwrap();
+    session.close();
+    assert_eq!(
+        flight_err, "",
+        "flight client must instantiate without throwing"
+    );
+    assert_eq!(
+        started, "true",
+        "createFromReadableStream must run + begin parsing the flight stream"
+    );
+}
+
+// The exact App Router client-hydration SHAPE that wasn't committing in headless
+// turbopack: hydrateRoot(document, …) called INSIDE React.startTransition, with a Suspense
+// boundary whose child suspends on a thenable that resolves later (mimicking the RSC
+// flight client awaiting a client-reference chunk). Must commit + be interactive once the
+// thenable resolves. Fixture: tests/fixture-gen/gen-react-transition-suspense.mjs.
+#[tokio::test]
+async fn react_transition_document_suspense_commits() {
+    let html = include_str!("fixtures/react-transition-suspense.html");
+    let mut session = PageSession::open(
+        html,
+        "https://example.test/",
+        "",
+        "",
+        DEFAULT_RENDER_BUDGET_MS,
+    )
+    .await
+    .expect("session opens");
+
+    let err = session
+        .eval(r#"globalThis.__RESULT = String(window.__hydrateError || "");"#)
+        .await
+        .unwrap();
+    assert_eq!(
+        err, "",
+        "startTransition hydrateRoot(document) must not throw"
+    );
+
+    // The suspended child resolves (its thenable fires via the virtual timer); the tree
+    // must COMMIT — clicking the (now-real) button fires its onClick.
+    session
+        .eval(r#"var b=document.querySelector('[data-test-id="tx-btn"]'); if(b){b.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true}));} globalThis.__RESULT = b ? "present" : "absent";"#)
+        .await
+        .unwrap();
+    let clicked = session
+        .eval(r#"globalThis.__RESULT = String(!!window.__clicked);"#)
+        .await
+        .unwrap();
+    assert_eq!(
+        clicked, "true",
+        "transition+Suspense hydration on document must commit + be interactive after the thenable resolves"
+    );
+
+    session.close();
+}
+
 // Expando persistence: React stores its root + every fiber as an EXPANDO property on
 // the DOM node (`container.__reactContainer$<rand>`, `node.__reactFiber$<rand>`). App
 // Router hydrates the whole `document` (`hydrateRoot(document, …)`), so the container

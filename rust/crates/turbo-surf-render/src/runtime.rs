@@ -1007,6 +1007,11 @@ if (typeof globalThis.URL === "undefined") {
     } catch (_e) {}
   };
   def("referrer", () => "");
+  // document.location === window.location in a browser. Next's dev flight client reads
+  // `document.location.origin` (in findSourceMapURL, replaying server console entries);
+  // without this it throws "reading 'origin' of undefined", which aborts the ENTIRE RSC
+  // flight stream processing → the App Router page never finishes hydrating, silently.
+  def("location", () => globalThis.location);
   def("URL", () => globalThis.location.href);
   def("documentURI", () => globalThis.location.href);
   def("baseURI", () => globalThis.location.href);
