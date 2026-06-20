@@ -1147,6 +1147,87 @@ async fn react18_streaming_suspense_boundary_hydrates() {
     session.close();
 }
 
+// Document-rooted hydration: Next.js App Router hydrates the WHOLE document
+// (`ReactDOMClient.hydrateRoot(document, <App/>)`), not a div. This guards that a
+// document-level root reaches hydrateRoot without throwing, React marks `document` as a
+// root container, and the tree COMMITS + is interactive (the button's onClick fires).
+// Fixture: tests/fixture-gen/gen-react-document.mjs (React/ReactDOM UMD inlined).
+#[tokio::test]
+async fn react_document_root_hydrates_and_commits() {
+    let html = include_str!("fixtures/react-document-hydration.html");
+    let mut session = PageSession::open(
+        html,
+        "https://example.test/",
+        "",
+        "",
+        DEFAULT_RENDER_BUDGET_MS,
+    )
+    .await
+    .expect("session opens");
+
+    let err = session
+        .eval(r#"globalThis.__RESULT = String(window.__hydrateError || "");"#)
+        .await
+        .unwrap();
+    assert_eq!(err, "", "hydrateRoot(document) must not throw");
+    let called = session
+        .eval(r#"globalThis.__RESULT = String(!!window.__hydrateCalled);"#)
+        .await
+        .unwrap();
+    assert_eq!(called, "true", "hydrateRoot(document) must be reached");
+    // Clicking the button must fire its React onClick — proves the document root COMMITTED
+    // its fiber tree onto the SSR DOM and wired delegated listeners.
+    session
+        .eval(r#"document.querySelector('[data-test-id="doc-btn"]').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); globalThis.__RESULT = "";"#)
+        .await
+        .unwrap();
+    let clicked = session
+        .eval(r#"globalThis.__RESULT = String(!!window.__clicked);"#)
+        .await
+        .unwrap();
+    assert_eq!(
+        clicked, "true",
+        "document-rooted React app must hydrate + be interactive (onClick must fire)"
+    );
+
+    session.close();
+}
+
+// Expando persistence: React stores its root + every fiber as an EXPANDO property on
+// the DOM node (`container.__reactContainer$<rand>`, `node.__reactFiber$<rand>`). App
+// Router hydrates the whole `document` (`hydrateRoot(document, …)`), so the container
+// expando lands on the `document` object itself, and fibers land on documentElement/
+// body/etc. If the DOM binding silently drops arbitrary JS properties on these special
+// nodes, React "hydrates" but nothing is reachable → 0 fibers, no error. Guard that a
+// plain JS property set+read round-trips on document, documentElement, head and body.
+#[tokio::test]
+async fn expando_properties_persist_on_document_and_root_nodes() {
+    let html = r#"<html><head></head><body><div id="root"></div>
+      <script>
+        document.__tcProbe = 'doc';
+        document.documentElement.__tcProbe = 'html';
+        document.head.__tcProbe = 'head';
+        document.body.__tcProbe = 'body';
+        var r = document.getElementById('root');
+        r.setAttribute('data-doc', String(document.__tcProbe));
+        r.setAttribute('data-html', String(document.documentElement.__tcProbe));
+        r.setAttribute('data-head', String(document.head.__tcProbe));
+        r.setAttribute('data-body', String(document.body.__tcProbe));
+      </script></body></html>"#;
+    let out = render_hydrate(html, "https://example.test/").await.unwrap();
+    for (attr, want) in [
+        ("data-doc", "doc"),
+        ("data-html", "html"),
+        ("data-head", "head"),
+        ("data-body", "body"),
+    ] {
+        assert!(
+            out.contains(&format!(r#"{attr}="{want}""#)),
+            "expando on {attr} node must persist (React root/fibers depend on it): {out}"
+        );
+    }
+}
+
 // ESM support (foundation): a `<script type="module">` must EVALUATE, not be skipped.
 // Next dev / turbopack serve their app as ES modules; the classic render tier used to
 // skip any `import`/`export` script, so dev builds never hydrated. This guards the

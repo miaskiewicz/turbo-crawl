@@ -1151,6 +1151,16 @@ globalThis.__importMeta = {
   resolve(spec) { try { return new globalThis.URL(spec, globalThis.location.href).href; } catch (_e) { return String(spec); } },
 };
 
+// esbuild's `keepNames` helper: transpiled code calls `__name(fn, "fn")` to restore
+// Function.name after minification. esbuild emits a local `var __name = ...` per module,
+// but injected/eval'd snippets (e.g. a test harness's tsx-transpiled addInitScript, or a
+// bundle chunk that expects the helper hoisted) can reference it free. Provide a no-op
+// passthrough global so such code doesn't ReferenceError. A module's own local `__name`
+// shadows this; this only catches the free-reference case.
+if (typeof globalThis.__name === "undefined") {
+  globalThis.__name = function (fn) { return fn; };
+}
+
 // --- hydration pump: the browser's script-loading model -----------------------
 // Real SPAs (Next.js/webpack) don't ship their code inline — they BOOT a tiny
 // runtime that injects more <script src> chunks at runtime and waits for each
@@ -1235,7 +1245,10 @@ globalThis.__execScriptEl = async function (el) {
       // Inline ESM is picked up separately by __takeModuleScript scanning textContent.
       if (src) {
         const abs = new URL(src, globalThis.location.href).href;
-        (globalThis.__esmSrcQueue || (globalThis.__esmSrcQueue = [])).push({ src: abs, code: __orig });
+        // Keep the element: turbopack chunks register via TURBOPACK.push([document
+        // .currentScript, …]) and derive their chunk path from currentScript.src. The
+        // module pump sets document.currentScript = el during eval so that path is right.
+        (globalThis.__esmSrcQueue || (globalThis.__esmSrcQueue = [])).push({ src: abs, code: __orig, el: el });
       }
       __fireScriptEvent(el, "load");
       return;
@@ -1286,6 +1299,7 @@ globalThis.__takeModuleScript = function () {
   const q = globalThis.__esmSrcQueue;
   if (q && q.length) {
     const item = q.shift();
+    globalThis.__currentModuleEl = item.el || null; // for document.currentScript during eval
     globalThis.__RESULT = JSON.stringify({ src: item.src, code: item.code });
     return;
   }
@@ -1300,9 +1314,11 @@ globalThis.__takeModuleScript = function () {
     if (!isModule) continue;
     el.__tcModule = true;
     el.__tcDone = true;
+    globalThis.__currentModuleEl = el; // for document.currentScript during eval
     globalThis.__RESULT = JSON.stringify({ src, code });
     return;
   }
+  globalThis.__currentModuleEl = null;
   globalThis.__RESULT = "";
 };
 // Pending-work signal for the Rust pump loop: "1" while timers are queued, a
@@ -1800,7 +1816,23 @@ async fn drain_module_scripts(rt: &mut JsRuntime, base: &str) -> Result<(), Stri
         };
         match loaded {
             Ok(id) => {
-                if let Err(e) = rt.mod_evaluate(id).await {
+                // Point document.currentScript at the chunk's element for the duration of
+                // evaluation: turbopack chunks self-register via TURBOPACK.push([document
+                // .currentScript, …]) and key the chunk by currentScript.src. Without this
+                // an ESM chunk registers under a stale path and the entry's chunk-load
+                // Promise.all never resolves (→ the app never hydrates, no error).
+                rt.execute_script(
+                    "<mod-cs>",
+                    "try{document.currentScript = globalThis.__currentModuleEl || null;}catch(_e){}",
+                )
+                .map_err(|e| e.to_string())?;
+                let ev = rt.mod_evaluate(id).await;
+                rt.execute_script(
+                    "<mod-cs0>",
+                    "try{document.currentScript = null;}catch(_e){}",
+                )
+                .map_err(|e| e.to_string())?;
+                if let Err(e) = ev {
                     eprintln!("module eval error ({spec_str}): {e}");
                 }
             }
