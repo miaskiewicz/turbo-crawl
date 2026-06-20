@@ -1965,6 +1965,13 @@ async fn drain_to_quiescence(rt: &mut JsRuntime) -> Result<(), String> {
     let mut stable = 0usize;
     let mut last_sig = String::new();
     for _ in 0..MAX_ROUNDS {
+        // RUN any newly-injected <script>s, then drain. An interaction can pull a chunk at
+        // runtime — Next's `dynamic(() => import('…'))` (lazy modals: AddVacationTimeModal,
+        // etc.) appends a <script src> when the component first renders. Without running it
+        // the chunk never executes, the import() promise never resolves, and the modal never
+        // appears. __hydrate is idempotent (skips already-run scripts via __tcDone).
+        rt.execute_script("<hydrate>", "globalThis.__tcHydrate = __hydrate();")
+            .map_err(|e| e.to_string())?;
         drain_event_loop(rt).await?;
         let fired = rt
             .execute_script("<timers>", "__runTimers(2000)")
