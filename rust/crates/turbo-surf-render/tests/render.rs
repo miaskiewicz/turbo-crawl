@@ -1193,18 +1193,60 @@ async fn react_document_root_hydrates_and_commits() {
     session.close();
 }
 
-// KNOWN-FAILING REPRO (ignored): a click on a React PORTAL'd element (createPortal under
-// hydrateRoot(document)) must fire its onClick. This is the MUI Autocomplete/Dialog/Menu
-// case — options/dialogs render in a Popper portal to <body>; their onClick must run for
-// selection/submit to work. In this env the portal's onClick does NOT fire: React attaches
-// delegated listeners per container in completeWork (HostPortal → listenToAllSupportedEvents
-// (containerInfo)), and the MUI portal container divs end up WITHOUT a `_reactListening`
-// marker, so React's root-container (document) listener — which by design SKIPS portal
-// targets — never dispatches to them. Main-tree clicks work; portal clicks don't. This
-// blocks the interaction half of the payroll e2e suite. Un-ignore once the portal event
-// path is fixed in the engine. Fixture: tests/fixture-gen/gen-react-currenttarget.mjs.
+// __tcGetBy resolves getByRole/getByText/getByLabel IN the live isolate, returning each
+// match's LIVE document-order index (querySelectorAll('*') position) so the shim dispatches
+// on the SAME node it matched (a re-serialized snapshot can reorder portal'd nodes → wrong
+// index). Guards role + accessible-name matching + that the returned idx maps to the right
+// live element.
 #[tokio::test]
-#[ignore = "portal onClick dispatch not yet working in the headless env (see comment); tracks the interaction-tier blocker"]
+async fn live_getby_returns_live_indices() {
+    let html = r#"<body>
+      <div><span>x</span><button>Cancel</button></div>
+      <ul role="listbox"><li role="option">Alice</li><li role="option">Bob</li></ul>
+    </body>"#;
+    let mut session = PageSession::open(
+        html,
+        "https://example.test/",
+        "",
+        "",
+        DEFAULT_RENDER_BUDGET_MS,
+    )
+    .await
+    .expect("session opens");
+    // role=option → two matches; verify each idx points at an <li role=option> in the live tree.
+    let r = session
+        .eval(r#"globalThis.__tcGetBy('role','option',null);
+          var hits=JSON.parse(globalThis.__RESULT);
+          var all=Array.prototype.slice.call(document.querySelectorAll('*'));
+          globalThis.__RESULT = JSON.stringify(hits.map(function(h){ var e=all[h.idx]; return e.tagName+'/'+e.getAttribute('role')+'/'+e.textContent; }));"#)
+        .await
+        .unwrap();
+    assert_eq!(
+        r, r#"["LI/option/Alice","LI/option/Bob"]"#,
+        "role=option must resolve to the two <li> by their live indices"
+    );
+    // role=button with accessible-name filter → the Cancel button only.
+    let b = session
+        .eval(r#"globalThis.__tcGetBy('role','button','Cancel');
+          var hits=JSON.parse(globalThis.__RESULT);
+          var all=Array.prototype.slice.call(document.querySelectorAll('*'));
+          globalThis.__RESULT = JSON.stringify(hits.map(function(h){ return all[h.idx].tagName+':'+all[h.idx].textContent; }));"#)
+        .await
+        .unwrap();
+    assert_eq!(
+        b, r#"["BUTTON:Cancel"]"#,
+        "role=button + name must resolve the Cancel button"
+    );
+    session.close();
+}
+
+// A click on a React PORTAL'd element (createPortal, here under createRoot(document.body),
+// portal into body) must fire its onClick — the MUI Autocomplete/Dialog/Menu case (options
+// render in a Popper portal to <body>; their onClick drives selection). React attaches
+// delegated listeners per container (completeWork HostPortal → listenToAllSupportedEvents
+// (containerInfo)); this guards that a click dispatched on a deep leaf of the portal'd <li>
+// runs the <li>'s onClick (records its data-option-index). Fixture: gen-react-currenttarget.mjs.
+#[tokio::test]
 async fn portal_element_onclick_dispatches() {
     let html = include_str!("fixtures/react-currenttarget.html");
     let mut session = PageSession::open(

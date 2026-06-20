@@ -1180,28 +1180,17 @@ function __fireScriptEvent(el, kind, err) {
   try { const h = kind === "load" ? el.onload : el.onerror; if (typeof h === "function") h.call(el, ev); } catch (_e) {}
   try { if (typeof el.dispatchEvent === "function") el.dispatchEvent(ev); } catch (_e) {}
 }
-// Make an ESM-flavored injected script runnable as a CLASSIC script (or signal skip).
-// Returns rewritten code to eval, or `null` to skip the script gracefully.
-//   - `import.meta` → the `__importMeta` global (the dev HMR runtime reads `.url`/`.env`).
-//   - top-level `import`/`export` STATEMENTS → no module loader headless, so skip (the
-//     dev runtime ships these only in the rare static-ESM chunk; running a broken
-//     classic eval of them would abort, and we can't resolve the graph anyway).
-// A coarse source rewrite, not a parse: `import.meta` is unambiguous, and import/export
-// STATEMENTS are detected only at statement starts (line start / after `;`/`{`/`}`) so
-// `export`-as-property or `import(` dynamic-import calls aren't misfired on.
-globalThis.__rewriteEsmForClassic = function __rewriteEsmForClassic(code, label) {
+// Rewrite `import.meta` (a SyntaxError in a classic script) onto the `__importMeta` global
+// stub the dev HMR runtime reads (`.url`/`.env`). Whether a chunk is a REAL ES module is
+// NOT decided by a regex here — a regex matches `import`/`export` inside comments + strings
+// too (e.g. a vendored package's JSDoc `import {X} from 'y'`), which would wrongly route a
+// CLASSIC turbopack chunk through the deno_core module pump and load it in a SEPARATE
+// module graph → a DUPLICATE module instance (a second react-dom, whose event-system keys
+// don't match the DOM's → portal/delegated onClick never fires). Instead `__execScriptEl`
+// just classic-evals; only a genuine module-syntax SyntaxError (thrown at PARSE, before any
+// code runs) routes the chunk to the module pump. Let V8 be the parser, not a regex.
+globalThis.__rewriteEsmForClassic = function __rewriteEsmForClassic(code) {
   if (typeof code !== "string" || !code) return code;
-  // Real module-graph syntax we can't honor classically → skip with a log.
-  // `import x from`, `import {`, `import 'side-effect'`, `import * as`, `export …`,
-  // `export default`, `export {` — anchored at a statement boundary.
-  const MODULE_STMT = /(^|[;{}\n\r])\s*(import\s+[^(]|import\s*['"]|export\s+|export\s*\{|export\s*\*)/;
-  if (MODULE_STMT.test(code)) {
-    // Real module-graph syntax. The caller decides what to do (a src chunk is routed to
-    // the module pump; inline ESM is claimed by __takeModuleScript) — don't log here.
-    return null;
-  }
-  // `import.meta` is safe to rewrite onto the global stub. Match the `import.meta`
-  // token (with optional whitespace before `.`) and leave everything else intact.
   if (/import\s*\.\s*meta/.test(code)) {
     code = code.replace(/import\s*\.\s*meta/g, "globalThis.__importMeta");
   }
@@ -1241,23 +1230,7 @@ globalThis.__execScriptEl = async function (el) {
     // don't have headless — those scripts are SKIPPED gracefully (logged) rather than
     // hung/aborted.
     const __orig = code;
-    code = globalThis.__rewriteEsmForClassic(code, src || "inline");
-    if (code === null) {
-      // Real ESM (top-level import/export). For a `<script src>` chunk we already have
-      // the fetched body in hand — hand it to the Rust module pump (keyed by the src URL
-      // so its import graph resolves) instead of skipping it. This is the turbopack/
-      // webpack DEV path: chunks served as classic <script src> but written as ES modules.
-      // Inline ESM is picked up separately by __takeModuleScript scanning textContent.
-      if (src) {
-        const abs = new URL(src, globalThis.location.href).href;
-        // Keep the element: turbopack chunks register via TURBOPACK.push([document
-        // .currentScript, …]) and derive their chunk path from currentScript.src. The
-        // module pump sets document.currentScript = el during eval so that path is right.
-        (globalThis.__esmSrcQueue || (globalThis.__esmSrcQueue = [])).push({ src: abs, code: __orig, el: el });
-      }
-      __fireScriptEvent(el, "load");
-      return;
-    }
+    code = globalThis.__rewriteEsmForClassic(code);
     // Set document.currentScript to THIS element during execution, like a browser.
     // Turbopack/webpack chunk runtimes do `TURBOPACK.push([document.currentScript, …])`
     // to correlate each chunk with the element that loaded it — a single static
@@ -1267,9 +1240,26 @@ globalThis.__execScriptEl = async function (el) {
     try { __prevCs = globalThis.document.currentScript; globalThis.document.currentScript = el; } catch (_e) {}
     try {
       (0, eval)(code); // classic-script semantics: run in global scope
-    } finally {
+    } catch (e) {
       try { globalThis.document.currentScript = __prevCs; } catch (_e) {}
+      // A genuine ES module? Classic V8 throws a module-syntax SyntaxError at PARSE time —
+      // before ANY code runs — so it's safe to re-run through the module pump (a real module
+      // graph + loader). This is the ONLY signal we route on: text that merely LOOKS like
+      // import/export (in a comment/string of a classic turbopack chunk) parses + runs fine
+      // here, so it stays classic (avoids a duplicate module instance — see __rewriteEsmForClassic).
+      const msg = String((e && e.message) || e);
+      if (e instanceof SyntaxError && /\b(import|export)\b|module/i.test(msg)) {
+        // Keep the element: the module pump points document.currentScript at it during eval
+        // so turbopack TURBOPACK.push([document.currentScript, …]) derives the right path.
+        const abs = src ? new URL(src, globalThis.location.href).href : "";
+        el.__tcModule = true; // claim it so the __takeModuleScript DOM scan won't double-run it
+        (globalThis.__esmSrcQueue || (globalThis.__esmSrcQueue = [])).push({ src: abs, code: __orig, el: el });
+        __fireScriptEvent(el, "load");
+        return;
+      }
+      throw e; // real runtime error
     }
+    try { globalThis.document.currentScript = __prevCs; } catch (_e) {}
     __fireScriptEvent(el, "load");
   } catch (e) {
     __fireScriptEvent(el, "error", e);
@@ -1326,6 +1316,70 @@ globalThis.__takeModuleScript = function () {
   globalThis.__currentModuleEl = null;
   globalThis.__RESULT = "";
 };
+// getByRole/getByText/getByLabel resolved IN the LIVE isolate, returning each match's
+// document-order index (querySelectorAll('*') position) so the Playwright shim can dispatch
+// on `*`[idx] in the SAME context. The shim used to resolve these over a re-serialized
+// snapshot (turbo-surf-view's by_role/by_text/by_label) and dispatch the snapshot's idx onto
+// the live DOM — but serialize→reparse can reorder elements (e.g. portal'd MUI Autocomplete
+// options / dialogs), so the idx pointed at the WRONG live node (a wrapper, not the option),
+// and the click never reached the option's onClick. Resolving here over the live DOM keeps
+// the idx and the dispatch in one context. Mirrors the Rust matchers (aria.rs/locator.rs).
+globalThis.__tcGetBy = function (kind, value, name) {
+  const all = Array.prototype.slice.call(document.querySelectorAll("*"));
+  const attr = (el, n) => (el && el.getAttribute ? el.getAttribute(n) : null) || "";
+  const roleOf = (el) => {
+    const r = attr(el, "role");
+    if (r) return r;
+    const tag = (el.tagName || "").toLowerCase();
+    if (tag === "input") {
+      const t = attr(el, "type").toLowerCase();
+      return t === "checkbox" ? "checkbox" : t === "radio" ? "radio"
+        : (t === "button" || t === "submit" || t === "reset") ? "button" : "textbox";
+    }
+    return ({ a: "link", button: "button", select: "combobox", textarea: "textbox" })[tag] || "generic";
+  };
+  const accName = (el) => {
+    const cands = [attr(el, "aria-label").trim(), (el.textContent || "").trim(),
+      attr(el, "placeholder").trim(), attr(el, "value").trim(), attr(el, "title").trim()];
+    for (const c of cands) if (c) return c;
+    return "";
+  };
+  // Substring match, or a `/pattern/flags` regex literal (mirrors turbo-surf-view).
+  const tmatch = (v, want) => {
+    if (want == null) return true;
+    const m = /^\/(.*)\/([a-z]*)$/.exec(want);
+    if (m) { try { return new RegExp(m[1], m[2]).test(v); } catch (_e) { return false; } }
+    return String(v).indexOf(want) >= 0;
+  };
+  const idxOf = (el) => all.indexOf(el);
+  let hits = [];
+  if (kind === "role") {
+    for (const el of all) if (roleOf(el) === value && tmatch(accName(el), name)) hits.push(el);
+  } else if (kind === "label") {
+    const seen = new Set();
+    const push = (el) => { if (el && !seen.has(el)) { seen.add(el); hits.push(el); } };
+    for (const lab of document.querySelectorAll("label")) {
+      if (!tmatch((lab.textContent || "").trim(), value)) continue;
+      const forId = attr(lab, "for");
+      if (forId) push(document.getElementById(forId));
+      const id = attr(lab, "id");
+      if (id) for (const t of document.querySelectorAll('[aria-labelledby~="' + id + '"]')) push(t);
+      push(lab.querySelector("input,select,textarea"));
+    }
+    for (const el of document.querySelectorAll("[aria-label]")) if (tmatch(attr(el, "aria-label"), value)) push(el);
+  } else if (kind === "text") {
+    // Leaf-text match: the element's text matches AND no descendant element also matches
+    // (so we target the tightest node, like turbo-surf-view's by_text).
+    for (const el of all) {
+      if (!tmatch((el.textContent || "").trim(), value)) continue;
+      let childMatch = false;
+      for (const c of el.querySelectorAll("*")) { if (tmatch((c.textContent || "").trim(), value)) { childMatch = true; break; } }
+      if (!childMatch) hits.push(el);
+    }
+  }
+  globalThis.__RESULT = JSON.stringify(hits.map((el) => ({ idx: idxOf(el) })));
+};
+
 // Pending-work signal for the Rust pump loop: "1" while timers are queued, a
 // <script> hasn't run, an ES module is unclaimed, or a fetch is in-flight (more to do
 // after the next async drain), else "0".

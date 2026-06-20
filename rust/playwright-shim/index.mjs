@@ -49,6 +49,10 @@ class Locator {
     this._resolve = resolve;
     this._index = opts.index ?? null;
     this._filter = opts.filter ?? null; // (match) => boolean, applied in JS
+    // getByRole/getByText/getByLabel carry {kind,value,name} so a LIVE dispatch can
+    // re-resolve the match IN the running isolate (live `*` indices) instead of trusting
+    // a re-serialized snapshot's index, which diverges for portal'd content (MUI options).
+    this._getBy = opts.getBy ?? null;
   }
 
   _all() {
@@ -76,7 +80,7 @@ class Locator {
   // stays selector-backed (→ drivable in a live session). `filter` makes it
   // unindexable for live dispatch (a JS predicate over matches), so it's dropped there.
   _derive(opts) {
-    const loc = new Locator(this._page, this._resolve, opts);
+    const loc = new Locator(this._page, this._resolve, { ...opts, getBy: this._getBy });
     if (this._selector && opts.filter == null) loc._selector = this._selector;
     return loc;
   }
@@ -249,6 +253,28 @@ class Locator {
   async _driveLive(kind, value) {
     if (this._selector)
       return this._page._sessionDispatch(this._selector, this._index ?? 0, kind, value);
+    // getByRole/getByText/getByLabel: resolve the match IN the live isolate so the index is
+    // a LIVE `querySelectorAll('*')` position (the same context we dispatch into). Resolving
+    // over a re-serialized snapshot can reorder portal'd nodes → wrong element clicked.
+    if (this._getBy && this._page._session != null) {
+      const g = this._getBy;
+      const raw = await native.liveEval(
+        this._page._session,
+        `globalThis.__tcGetBy(${JSON.stringify(g.kind)},${JSON.stringify(g.value)},${g.name == null ? "null" : JSON.stringify(g.name)});`,
+      );
+      let matches = [];
+      try {
+        matches = JSON.parse(raw);
+      } catch {
+        matches = [];
+      }
+      if (!matches.length) throw new Error("turbo-surf: locator matched no elements");
+      const i =
+        this._index == null ? 0 : this._index < 0 ? matches.length + this._index : this._index;
+      const target = matches[i];
+      if (!target || target.idx == null) throw new Error("turbo-surf: locator matched no elements");
+      return this._page._sessionDispatch("*", target.idx, kind, value);
+    }
     const m = this._all();
     if (!m.length || m[0].idx == null) throw new Error("turbo-surf: locator matched no elements");
     return this._page._sessionDispatch("*", m[0].idx, kind, value);
@@ -1005,15 +1031,20 @@ class Page {
     return this._locFromSelector(selector);
   }
   getByRole(role, opts = {}) {
-    return new Locator(this, (h) =>
-      JSON.parse(native.getBy(h, "role", role, opts.name != null ? String(opts.name) : null)),
-    );
+    const name = opts.name != null ? String(opts.name) : null;
+    return new Locator(this, (h) => JSON.parse(native.getBy(h, "role", role, name)), {
+      getBy: { kind: "role", value: role, name },
+    });
   }
   getByText(text, _o) {
-    return new Locator(this, (h) => JSON.parse(native.getBy(h, "text", String(text))));
+    return new Locator(this, (h) => JSON.parse(native.getBy(h, "text", String(text))), {
+      getBy: { kind: "text", value: String(text), name: null },
+    });
   }
   getByLabel(text, _o) {
-    return new Locator(this, (h) => JSON.parse(native.getBy(h, "label", String(text))));
+    return new Locator(this, (h) => JSON.parse(native.getBy(h, "label", String(text))), {
+      getBy: { kind: "label", value: String(text), name: null },
+    });
   }
   // The native get_by handles role/text/label; placeholder/alt/title map cleanly
   // to attribute selectors (substring, like Playwright's default exact:false).
