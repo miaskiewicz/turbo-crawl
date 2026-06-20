@@ -1180,7 +1180,71 @@ async fn esm_module_import_graph_loads_over_net() {
     );
 }
 
+// ESM dev-build path: turbopack/webpack serve app chunks as CLASSIC `<script src>`
+// (no `type=module`) whose BODY is an ES module (top-level import/export). The classic
+// tier used to skip any import/export script, so those chunks never ran. Now a src chunk
+// with an ESM body is handed to the module pump keyed by its src URL, so its import graph
+// resolves relative to that URL. Guards item (1): src-ESM chunks hydrate.
+#[tokio::test]
+async fn esm_src_chunk_with_module_body_loads_and_resolves_imports() {
+    // /chunk.mjs is an ESM that imports a sibling /dep.mjs and writes the result to DOM.
+    let port = spawn_paths_js_server(&[
+        (
+            "/chunk.mjs",
+            "import { v } from '/dep.mjs'; document.getElementById('app').setAttribute('data-chunk', v);",
+        ),
+        ("/dep.mjs", "export const v = 'chunk-ok';"),
+    ])
+    .await;
+    // CLASSIC script element (no type=module) — exactly how dev chunks are served.
+    let html = r#"<body><div id="app">x</div><script src="/chunk.mjs"></script></body>"#;
+    let out = render_hydrate(html, &base(port)).await.unwrap();
+    assert!(
+        out.contains(r#"data-chunk="chunk-ok""#),
+        "classic <script src> with an ESM body must route to the module pump + resolve its imports: {out}"
+    );
+}
+
 // --- helpers ----------------------------------------------------------------
+// Serves distinct JS bodies per request path (matched against the request line) —
+// for ESM import graphs where the chunk and its dependency differ.
+async fn spawn_paths_js_server(routes: &[(&'static str, &'static str)]) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    let routes: Vec<(String, String)> = routes
+        .iter()
+        .map(|(p, b)| ((*p).to_string(), (*b).to_string()))
+        .collect();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            let mut b = [0u8; 1024];
+            let n = s.read(&mut b).await.unwrap_or(0);
+            let req = String::from_utf8_lossy(&b[..n]).to_string();
+            let path = req
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("/")
+                .split('#')
+                .next()
+                .unwrap_or("/")
+                .to_string();
+            let body = routes
+                .iter()
+                .find(|(p, _)| *p == path)
+                .map(|(_, b)| b.as_str())
+                .unwrap_or("");
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\nConnection: close\r\n\r\n{body}"
+            );
+            let _ = s.write_all(resp.as_bytes()).await;
+            let _ = s.flush().await;
+        }
+    });
+    port
+}
+
 // Serves any path with the given JS body (application/javascript) — for ESM imports.
 async fn spawn_js_server(body: &'static str) -> u16 {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

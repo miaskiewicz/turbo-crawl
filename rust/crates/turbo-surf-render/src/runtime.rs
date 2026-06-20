@@ -1181,7 +1181,8 @@ globalThis.__rewriteEsmForClassic = function __rewriteEsmForClassic(code, label)
   // `export default`, `export {` — anchored at a statement boundary.
   const MODULE_STMT = /(^|[;{}\n\r])\s*(import\s+[^(]|import\s*['"]|export\s+|export\s*\{|export\s*\*)/;
   if (MODULE_STMT.test(code)) {
-    Deno.core.print("script skipped (" + label + "): ESM import/export not supported in the classic render tier\n");
+    // Real module-graph syntax. The caller decides what to do (a src chunk is routed to
+    // the module pump; inline ESM is claimed by __takeModuleScript) — don't log here.
     return null;
   }
   // `import.meta` is safe to rewrite onto the global stub. Match the `import.meta`
@@ -1224,8 +1225,21 @@ globalThis.__execScriptEl = async function (el) {
     // works. Real `import`/`export` statements need a module loader + resolved graph we
     // don't have headless — those scripts are SKIPPED gracefully (logged) rather than
     // hung/aborted.
+    const __orig = code;
     code = globalThis.__rewriteEsmForClassic(code, src || "inline");
-    if (code === null) { __fireScriptEvent(el, "load"); return; } // skipped (real module graph)
+    if (code === null) {
+      // Real ESM (top-level import/export). For a `<script src>` chunk we already have
+      // the fetched body in hand — hand it to the Rust module pump (keyed by the src URL
+      // so its import graph resolves) instead of skipping it. This is the turbopack/
+      // webpack DEV path: chunks served as classic <script src> but written as ES modules.
+      // Inline ESM is picked up separately by __takeModuleScript scanning textContent.
+      if (src) {
+        const abs = new URL(src, globalThis.location.href).href;
+        (globalThis.__esmSrcQueue || (globalThis.__esmSrcQueue = [])).push({ src: abs, code: __orig });
+      }
+      __fireScriptEvent(el, "load");
+      return;
+    }
     // Set document.currentScript to THIS element during execution, like a browser.
     // Turbopack/webpack chunk runtimes do `TURBOPACK.push([document.currentScript, …])`
     // to correlate each chunk with the element that loaded it — a single static
@@ -1267,6 +1281,14 @@ globalThis.__hydrate = async function (maxRounds = 300, timerBudget = 200000) {
 // (`__execScriptEl` deliberately skips them). `__tcModule` is the claim marker.
 globalThis.__moduleStmt = /(^|[;{}\n\r])\s*(import\s+[^(]|import\s*['"]|export\s+|export\s*\{|export\s*\*)/;
 globalThis.__takeModuleScript = function () {
+  // src chunks whose body was ESM, already fetched + queued by __execScriptEl. Both
+  // `src` (its URL identity, for import resolution) and `code` (the fetched body) set.
+  const q = globalThis.__esmSrcQueue;
+  if (q && q.length) {
+    const item = q.shift();
+    globalThis.__RESULT = JSON.stringify({ src: item.src, code: item.code });
+    return;
+  }
   const scripts = Array.prototype.slice.call(document.querySelectorAll("script"));
   for (let i = 0; i < scripts.length; i++) {
     const el = scripts[i];
@@ -1287,7 +1309,7 @@ globalThis.__takeModuleScript = function () {
 // <script> hasn't run, an ES module is unclaimed, or a fetch is in-flight (more to do
 // after the next async drain), else "0".
 globalThis.__pendingWork = () =>
-  (globalThis.__pendingFetches || 0) > 0 || __timers.length > 0 || Array.prototype.some.call(document.querySelectorAll("script"), (s) => !s.__tcDone || (((s.getAttribute && s.getAttribute("type")) || "").toLowerCase() === "module" && !s.__tcModule)) ? "1" : "0";
+  (globalThis.__pendingFetches || 0) > 0 || __timers.length > 0 || ((globalThis.__esmSrcQueue || []).length) > 0 || Array.prototype.some.call(document.querySelectorAll("script"), (s) => !s.__tcDone || (((s.getAttribute && s.getAttribute("type")) || "").toLowerCase() === "module" && !s.__tcModule)) ? "1" : "0";
 // In-flight fetch count — the interaction drain must keep pumping while > 0 even if
 // the visible tree looks stable (the response's re-render hasn't happened yet).
 globalThis.__pendingFetchCount = () => String(globalThis.__pendingFetches || 0);
@@ -1767,10 +1789,14 @@ async fn drain_module_scripts(rt: &mut JsRuntime, base: &str) -> Result<(), Stri
         let Ok(spec) = ModuleSpecifier::parse(&spec_str) else {
             continue;
         };
-        let loaded = if src.is_empty() {
-            rt.load_side_es_module_from_code(&spec, code).await
-        } else {
+        // Code in hand (inline module, OR a `<script src>` chunk whose fetched body was
+        // ESM — `__execScriptEl` already fetched it and queued it) → evaluate from that
+        // code with `spec` as its identity so the import graph still resolves relative to
+        // the src URL. Only a bare `src` with no body re-fetches through the loader.
+        let loaded = if code.is_empty() {
             rt.load_side_es_module(&spec).await
+        } else {
+            rt.load_side_es_module_from_code(&spec, code).await
         };
         match loaded {
             Ok(id) => {
