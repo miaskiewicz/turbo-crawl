@@ -275,10 +275,17 @@ let __tid = 1;
 // work (microtasks / the React scheduler) still drains promptly (it never advances the
 // clock); only delayed polls are time-gated.
 let __now = 0;
-// Virtual-time ceiling: once the clock passes this, delayed timers stop firing so a
-// never-idle poll can't hold the render budget. Generous enough for real load-time
-// timeouts (debounces, retries, refresh backoffs) to run.
+// Virtual-time ceiling, RELATIVE to the start of the current pump/drain (`__budgetBase`).
+// Once the clock passes base+budget, delayed timers stop firing so a never-idle poll can't
+// hold a drain open. RELATIVE (not absolute) is essential: `__now` accumulates across a
+// long session (each modal transition / poll advances it), so an absolute ceiling would,
+// late in a flow, refuse to fire even a brand-new short timer — e.g. a closing MUI modal's
+// 195ms Fade-exit timer never fires, so the modal never unmounts and `waitFor(hidden)` /
+// subsequent `[role=dialog].first()` break. Resetting the base per drain gives every
+// interaction a fresh window so its transitions complete, while still capping runaway polls.
 const __VIRTUAL_BUDGET_MS = 15000;
+let __budgetBase = 0;
+globalThis.__resetTimerBudget = () => { __budgetBase = __now; };
 globalThis.setTimeout = (fn, delay = 0, ...args) => {
   __timers.push({ id: __tid, fn, due: __now + (+delay || 0), args });
   return __tid++;
@@ -305,9 +312,9 @@ globalThis.__runTimers = (max = 100000) => {
     let bi = 0;
     for (let i = 1; i < __timers.length; i++) if (__timers[i].due < __timers[bi].due) bi = i;
     const t = __timers[bi];
-    // A delayed timer past the virtual budget is a never-idle poll — stop firing it so
-    // the drain can quiesce. (Delay-0 work has due <= __now and always runs.)
-    if (t.due > __now && t.due > __VIRTUAL_BUDGET_MS) break;
+    // A delayed timer past the (relative) virtual budget is a never-idle poll — stop firing
+    // it so the drain can quiesce. (Delay-0 work has due <= __now and always runs.)
+    if (t.due > __now && t.due - __budgetBase > __VIRTUAL_BUDGET_MS) break;
     __timers.splice(bi, 1);
     if (t.due > __now) __now = t.due; // advance the virtual clock
     n++;
@@ -1943,6 +1950,13 @@ impl Drop for Watchdog {
 // nothing is pending. Used after an interaction event re-enters the running app (the
 // handler may setState → schedule a re-render → fetch → schedule more).
 async fn drain_to_quiescence(rt: &mut JsRuntime) -> Result<(), String> {
+    // Fresh virtual-time window for this interaction so its transitions (e.g. a closing
+    // MUI modal's Fade-exit timer) fire + complete even when the clock is already large.
+    rt.execute_script(
+        "<reset-budget>",
+        "globalThis.__resetTimerBudget && globalThis.__resetTimerBudget();",
+    )
+    .map_err(|e| e.to_string())?;
     const MAX_ROUNDS: usize = 500;
     // Stop early once the visible tree has been STABLE for this many rounds even though
     // timers keep firing: a real app's analytics/idle-scheduler never stops posting
