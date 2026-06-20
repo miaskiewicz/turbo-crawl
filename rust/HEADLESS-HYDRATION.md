@@ -506,3 +506,49 @@ So the ESM foundation is in, but "boot the dev build headlessly for a named fram
 at the empty commit" needs: (1) route src ESM chunks to the module pump, (2) skip
 CSS-bodied `<script>`s, (3) get the dev app to actually execute its chunks. That's
 the continuation.
+
+## Turbopack dev: entry runs, flight delivers — RSC client-ref resolution is the wall
+
+Status after the currentScript + `__name` fixes (commit "make turbopack dev entry
+execution work"): on `next dev --turbopack`, the App Router boot now gets FAR:
+
+What works (verified through the shim against the live payroll app):
+- All ~36 turbopack chunks register (incl. the ESM vendor chunk, now keyed by its real
+  src via the module-pump `document.currentScript` fix).
+- The runtime entry instantiates: `window.next` = `{version, appDir, turbopack, router}`,
+  `__REACT_DEVTOOLS_GLOBAL_HOOK__` present, app-bootstrap + app-index run, `hydrate()` is
+  reached (`self.__next_s` is undefined → `loadScriptsInSequence` calls hydrate directly).
+- `ReactDOMClient.hydrateRoot(document, …)` is reached with NO throw and NO unhandled
+  rejection (drain_event_loop's swallow path stays silent).
+- The RSC flight stream fully DELIVERS: instrumenting the env ReadableStream showed 45
+  streams created, 79 chunks enqueued, **45 closed, 0 errored** — the flight payload and
+  all chunk bodies stream + close cleanly. `nextServerDataCallback` is installed as
+  `__next_f.push`; rows are buffered then flushed to the controller registered in the
+  stream's (synchronous) `start`.
+
+What DOESN'T work — the remaining wall:
+- Nothing COMMITS to the DOM. After render: 0 `[data-testid]` elements, 0 React fibers,
+  no `__reactContainer$`-style marker enumerable on `document` (note: expandos DO persist
+  on document/html/body — see `expando_properties_persist_on_document_and_root_nodes` —
+  and a plain `hydrateRoot(document, <App/>)` DOES commit + stay interactive — see
+  `react_document_root_hydrates_and_commits`; so the binding is fine).
+- So the React root SUSPENDS and never commits. `document.body.textContent` is dominated
+  by the flight `<script>` rows (the 400KB+ is flight payload text, not rendered DOM);
+  "wizard text" matches were false positives from the flight strings.
+- The flight ROOT model immediately references client components (`8c:["$","$L1f",…]`
+  where `1f:I["…/next/dist/client/…"]` is a client-import reference — providers/layout).
+  The suspension is in **client-reference resolution**: the bundled
+  `react-server-dom-turbopack` client resolving `I[moduleId, [chunks], name]` rows into
+  real modules. Because the refs are at the top of the tree, the whole root suspends →
+  zero commit.
+- This is NOT wizard-specific: settings + off-cycle authed pages fail identically (10s+
+  `getByTestId(...) not visible` timeouts). Only the unauth landing (smoke, no hydration)
+  passes. So authed interactive hydration is broadly blocked on turbopack dev by this one
+  thing.
+
+Next focused step: make the flight client's `preloadModule`/`requireModule` resolve
+client refs in the headless turbopack runtime. The chunks ARE preloaded + registered, so
+`__turbopack_context__.r(id)` should resolve and `loadChunk(url)` should hit an
+already-resolved resolver — instrument the bundled flight client's resolve path
+(`createFromReadableStream` lives in the next-client chunk; refs go through the turbopack
+context, not free `__turbopack_require__` globals) to find which call parks forever.
