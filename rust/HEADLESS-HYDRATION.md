@@ -480,3 +480,29 @@ failing internal + give stack frames, but the classic render tier skips ESM
 support in the render tier (tracked on `main`) → run the dev build → named frame at
 the empty commit → fix. That's the next lever, not more black-box probing of the
 prod bundle.
+
+## ESM support landed (foundation) + dev-build status
+
+The render tier now runs ES modules (commit `feat(render): ES module support`):
+- `NetModuleLoader` resolves + fetches `import` graphs over the host net (shared
+  cookie jar, same-origin), wired into `make_runtime`.
+- The hydration pump drains `<script type="module">` (and inline import/export
+  scripts) via `load_side_es_module[_from_code]` + `mod_evaluate`; `__execScriptEl`
+  leaves them for the module pump.
+- Tests: `esm_inline_module_script_evaluates`, `esm_module_import_graph_loads_over_net`.
+
+**Running the actual Next dev build for named diagnostics — still blocked, separately:**
+- `next dev --turbopack` serves classic `<script src>` chunks whose CONTENT has
+  top-level `import`/`export` → `__execScriptEl` skips them (they're not
+  `type=module`, so the module pump doesn't claim them either). Routing src chunks
+  with import/export to the module pump is the next step.
+- `next dev` (webpack, no turbopack) serves classic `webpackChunk.push` chunks (run
+  fine), but: the Next **dev-tools inject CSS inside a `<script>`** (`.nextjs-data-
+  copy-button{…}`) which evals as JS → `SyntaxError: Unexpected token '.'` (caught,
+  noisy; skip CSS-bodied scripts), and the dev page still hydrates 0 fibers (≈35
+  nodes) — dev SSR + chunk-execution quirks beyond the ESM foundation.
+
+So the ESM foundation is in, but "boot the dev build headlessly for a named frame
+at the empty commit" needs: (1) route src ESM chunks to the module pump, (2) skip
+CSS-bodied `<script>`s, (3) get the dev app to actually execute its chunks. That's
+the continuation.
