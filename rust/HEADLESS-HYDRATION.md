@@ -428,3 +428,34 @@ mechanism in a self-contained fixture driven through the render tier.
   requires the bundler-only `react-server` export condition, and the client's flight
   references resolve through the real app's webpack runtime. Until that's stubbed, its
   repro is the full-app shim e2e (the payroll wizard vacation specs).
+
+### Correction (flight capture): NOT a dehydrated Suspense boundary
+
+Captured the real wizard HTML + flight (`gen` via the shim). Key facts that
+**overturn the "dehydrated boundary" guess**:
+
+- The wizard HTML has **0** Suspense stream markers (`<!--$?-->`) and **0** `B:`
+  templates. So the page content is NOT a server-streamed/dehydrated boundary.
+- 11 `__next_f.push([1,…])` flight rows: client-ref tables (`I[id,[chunks],name]`)
+  + the App Router segment tree (row 8: `entity→admin→payroll→scheduled→
+  [payrollRunId]→__PAGE__`, each wrapped in `$L5` ClientSegmentRoot) + the full
+  element tree (row 9, ~324 KB, `$L{id}` client refs).
+- The **generic** React-18 streaming dehydrated-boundary path PASSES the harness
+  fixture (`react18_streaming_suspense_boundary_hydrates`).
+
+So the failure is: React hydrates the **layout** (`payroll-admin-shell`→`MAIN`),
+but the `__PAGE__` segment's **client tree built from the RSC flight doesn't
+reconcile onto the SSR page DOM** (the SSR rendered the button; the client tree
+resolves that segment to empty) → the page subtree gets no fibers. Most likely a
+`$L{id}` client ref for the page component whose **webpack chunk loads but its
+module factory doesn't register** in the isolate (so `__PAGE__` resolves empty),
+or an RSDW flight-row reconciliation gap. Confirmed in the isolate: 251 chunks load
+`200`, but module-registration of the specific page client ref isn't verified.
+
+**Next:** verify webpack module registration in the isolate — after load, check
+`__webpack_require__`/`self.webpackChunk_*` has the page component's module id (the
+`$L{id}` for `__PAGE__`); if the chunk pushed before the webpack runtime installed
+its array `.push` handler, the module never registers. (A `next dev`, non-minified
+build would name it directly, but the classic render tier skips ESM `import`/`export`
+scripts, so dev/turbopack chunks don't run — dev diagnostics need the ESM-script
+support tracked on `main`.)
