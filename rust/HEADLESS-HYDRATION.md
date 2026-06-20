@@ -239,3 +239,127 @@ that's an env fix, not turbo-surf.)
 JS-gated and worth the isolate: near-empty rendered text + heavy external scripts, or
 an empty known SPA mount (`#root`/`#app`/`#__next`/`[data-reactroot]`). A caller picks
 Lane A (no-JS parse) vs Lane B (`render_page`) from its verdict.
+
+## Driving the full Playwright suite through the shim (what we built + what stalls)
+
+Running the payroll-app Playwright e2e suite through the `playwright-shim` (over the
+napi addon, no Chromium) took it from **6/114 → ~75/102 passing, 0 skipped**. The
+work split into render-tier capabilities and shim parity. This section is the field
+record: what we implemented, and — equally important — what we *tried that did not
+work* so the next person doesn't re-walk it.
+
+### Implemented (render tier)
+
+- **RSC soft-nav follow.** Next App Router client navigation (`router.push/replace`)
+  fetches the target's RSC flight with an `RSC` header and never changes
+  `location.href` headlessly. The fetch wrapper records the target on `__rscNav`; the
+  live-session driver re-loads that route as a fresh page (browser hard-nav
+  equivalent), following a redirect CHAIN hop-by-hop. This is what makes login
+  (`/login → /post-login → /entity/…`) complete.
+- **Fetch-aware drain.** `drain_to_quiescence`/`__pendingWork` tracked timers +
+  un-run scripts but NOT in-flight fetches, so a save `POST` could resolve *after* the
+  drain quiesced (the DOM looks "stable" while waiting) and its success re-render — a
+  modal close, a redirect — was lost. A `__pendingFetches` counter now keeps the drain
+  pumping until requests settle.
+- **Network log → events.** Each live-app `fetch` is appended to `__netLog`; the shim
+  drains it to emit `page.on('response')` and back a real `waitForResponse`. Tests use
+  these to capture API payloads (payroll period, employments lists).
+- **Globals:** `KeyboardEvent` dispatch path, `navigator.clipboard` (in-memory
+  write/read), `structuredClone` (deep clone w/ Date/RegExp/Map/Set/cycles). Apps
+  probe `globalThis.structuredClone.prototype`; absent it threw.
+
+### Implemented (shim parity)
+
+- **getBy\* live-drive.** `getByRole/getByLabel/getByText` have no CSS selector, so
+  `fill`/`click`/`check` fell back to mutating the static HTML snapshot — never
+  reaching the running React app (empty form fields → failed saves). napi `get_by`
+  now returns the matched element's document-order `idx`; the shim dispatches into the
+  live isolate via `querySelectorAll('*')[idx]`.
+- **Deepest-descendant event dispatch.** A real click lands on the leaf under the
+  cursor and bubbles up; dispatching on the matched wrapper missed handlers bound to
+  inner nodes (a MUI `Select`'s inner `role="combobox"` opens on its own mousedown).
+  Events now fire on the deepest child; focus + form-submit logic stay on the control.
+- **preventDefault honoring.** A click reports `defaultPrevented`; the static-intent
+  fallback (anchor navigate / form POST) is skipped when the app handled it — an
+  `<a href="#">` whose React `onClick` toggles state no longer also navigates to `#`
+  and wipes the new state (the company-settings edit toggles).
+- **Web-first assertion retry.** `expect(locator|page)` re-evaluates (re-pumping the
+  live app between tries) until it passes or times out — a UI change that lands just
+  after an action (modal close, async row, redirect) is observed.
+- **`addInitScript` actually runs** (prepended as the first `<head>` script of the
+  live session) — `injectTestPartner`'s `window.__FLUX_DYNAMIC_PARTNERS__` etc.
+- **`waitFor` polls real state** (visible/hidden/attached), `evaluate` awaits a
+  returned Promise, `setInputFiles` (File objects in the isolate), `hover`,
+  `dispatchEvent` (+checkbox toggle), `test.skip(cond, reason)` overloads (killed 12
+  bogus skips), per-test fixture sharing (afterEach gets the live logged-in page),
+  live-session close on teardown (isolate leak), RegExp locator names, `boundingBox`
+  → null.
+
+### The remaining wall: RSC-flight hydration of deferred Suspense boundaries
+
+~7–8 failures (vacation, time-entry, parts of company-settings) all reduce to ONE
+thing: a deep client subtree never hydrates. On the payroll wizard, React hydrated
+**484 of 996** elements (stable — more pumping doesn't change it); the static
+"Add Manually" button has **no React fiber**, so it has no `onClick` and clicks are
+dead (native or synthetic), so the `dynamic()` modal it would open never mounts.
+
+**Bisected with repros (each run through the real render tier):**
+
+| Hypothesis | Verdict |
+| --- | --- |
+| Dynamic `<script>` inject → `onload` → promise → wire handler | **works** — `dynamically_injected_script_runs_and_fires_load` (committed) |
+| Real React 18 `Suspense` + `lazy()`, client render | works (ad-hoc diag, React 18 UMD) |
+| Real React 18 `hydrateRoot` of pre-rendered `Suspense`+`lazy` | works (ad-hoc diag) |
+
+So **React core hydration + code-splitting work in the engine.** The failure is
+specific to **Next App Router RSC**: the wizard page content is a Suspense boundary
+that suspended during SSR; client hydration of it is deferred until its **RSC flight
+chunk** (`self.__next_f` → `react-server-dom-webpack` reader) is consumed, and in the
+isolate that deferred boundary's flight never reaches React's reader. Click-triggered
+selective hydration can't rescue it either — it needs the same flight data.
+
+### Things we TRIED that did NOT fix it (don't repeat)
+
+- **More pumping / bigger budget.** Fiber count is stable at 484 regardless of extra
+  drains — hydration isn't merely incomplete-by-budget, that boundary is never
+  scheduled.
+- **Non-zero layout measurement.** Forced `getBoundingClientRect`/`offsetWidth`/
+  `clientWidth` to a real box (theory: libs gate render on measurement). No effect on
+  the un-hydrated subtree. **Reverted** (risk to the passing set).
+- **`structuredClone`.** Added it (was genuinely missing) — did not change hydration.
+- **The `TypeError: …reading 'prototype'` (×5).** Red herring. It's **caught** (never
+  reaches `window.onerror` nor the page `console.error`; the page's own override sees
+  nothing) — a PostHog native-prototype probe. Not in React's hydration path.
+- **Chunk-load / script-skip failures.** None: 251 chunks load with **0** failures,
+  **no** `script skipped (ESM…)` and **no** `script error` during the wizard load.
+- **DB flush + reseed.** Net wash for this (helped grant-leak/locale data pollution,
+  but a fresh DB lacked KB seed data and exposed a flux-apis platform-role seed gap →
+  KB `403`). NOT a turbo-surf issue. `migration:revert:all` is also blocked by an
+  irreversible app migration — don't rely on it for a clean rebuild.
+
+### Where to start next (RSC flight)
+
+The tractable next step is instrumenting how `self.__next_f` (the array Next replaces
+with a stream-feeding `.push`) is consumed by Next's bundled `react-server-dom-webpack`
+client reader in the isolate — specifically whether late `__next_f.push([1, …])`
+chunks (the deferred boundary's flight) reach the reader, and whether the flight
+`ReadableStream` is ever closed. That reader is bundled + minified inside the Next
+chunks, so it can't be unit-tested in isolation here; a focused diagnostic that taps
+`__next_f.push` and the flight stream controller is the way in. This is a render-engine
+project, not a shim gap.
+
+### Other non-turbo-surf blockers seen (env, not engine)
+
+- **KB write `403`** — KB uses `@RequireAnyLocalRole('FLUX_ADMIN')` resolved from a
+  *local* DB role mapping; after a postgres reset the PropelAuth user persists but the
+  local role row isn't recreated → 403. flux-apis seed gap.
+- **es-MX locale test** — the shim seeds `NEXT_LOCALE=en-US` (needed so English
+  text/role-name assertions match everywhere else); the one settings test wants the
+  es-MX default. Proper fix is per-user backend-pref locale, not a global cookie.
+- **Grant order-dependency** — delegated-write grants are shared server state; the
+  auth-guard grant tests pass in isolation but bounce in the full run. The
+  `afterEach` revoke (now driven correctly via fixture sharing) mitigates but doesn't
+  fully serialize it.
+- **Run serial.** `node --test` defaults to parallel → concurrent PropelAuth logins
+  trip rate-limiting; the real Playwright config is `workers: 1`. Use
+  `--test-concurrency=1` (set in payroll-app's `test:e2e:turbo:run`).
