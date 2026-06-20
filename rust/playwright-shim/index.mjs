@@ -381,6 +381,18 @@ class Locator {
     return null;
   }
 
+  // An ElementHandle stand-in: carries enough to re-resolve the element in the live
+  // isolate (selector / getBy + index), so `page.waitForFunction(fn, handle)` can run
+  // `fn(element)` against the live node (e.g. wait for a submit button's !disabled).
+  async elementHandle() {
+    return {
+      __turboHandle: true,
+      selector: this._selector ?? null,
+      getBy: this._getBy ?? null,
+      index: this._index ?? 0,
+    };
+  }
+
   // Hover has no rendering effect here, but JS hover handlers (menu-open) are real.
   // Drive the live app with mouseenter/over events; otherwise best-effort no-op.
   async hover() {
@@ -1118,14 +1130,76 @@ class Page {
       throw new Error(`turbo-surf: waitForSelector(${selector}) found no element`);
     return present ? this.locator(selector) : null;
   }
-  async waitForFunction(fn, arg) {
-    const r = await this.evaluate(fn, arg);
-    return r;
+  // Poll `fn(arg)` in the live isolate until truthy. `arg` may be an ElementHandle
+  // (from locator.elementHandle()) — resolved to the live element so e.g.
+  // `waitForFunction((btn) => !btn.disabled, await uploadButton.elementHandle())` works.
+  async waitForFunction(fn, arg, opts) {
+    const timeout = (opts && typeof opts === "object" && opts.timeout) || 30000;
+    await this._ensureLive();
+    const fnStr = typeof fn === "function" ? fn.toString() : String(fn);
+    let argExpr;
+    if (arg && arg.__turboHandle) {
+      if (arg.selector) {
+        argExpr = `document.querySelectorAll(${JSON.stringify(arg.selector)})[${arg.index}]`;
+      } else if (arg.getBy) {
+        const g = arg.getBy;
+        argExpr =
+          `(function(){ globalThis.__tcGetBy(${JSON.stringify(g.kind)},${JSON.stringify(g.value)},${g.name == null ? "null" : JSON.stringify(g.name)}); ` +
+          `var h=JSON.parse(globalThis.__RESULT||"[]"); var all=document.querySelectorAll("*"); return h[${arg.index}]?all[h[${arg.index}].idx]:undefined; })()`;
+      } else {
+        argExpr = "undefined";
+      }
+    } else {
+      argExpr = JSON.stringify(arg ?? null);
+    }
+    if (this._session == null) return undefined;
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+      const script = `(() => { try { var __a = ${argExpr}; var __r = (${fnStr})(__a); globalThis.__RESULT = __r ? "1" : "0"; } catch (_e) { globalThis.__RESULT = "0"; } })();`;
+      let r;
+      try {
+        r = await native.liveEval(this._session, script);
+      } catch {
+        r = null;
+      }
+      await this._refreshFromSession();
+      if (r === "1") return true;
+      await new Promise((res) => setTimeout(res, 40));
+    }
+    throw new Error("turbo-surf: waitForFunction timed out");
   }
   async waitForNavigation() {
     return makeResponse({ status: 200, finalUrl: this._url });
   }
-  async waitForEvent() {
+  // waitForEvent('download') — resolve when a client-side export fires (the env captures
+  // `<a download>` clicks into __downloads). Used as `Promise.all([waitForEvent('download'),
+  // …click()])`: the click drives the session (running the anchor click → __downloads push)
+  // while this polls + drains __downloads from the live isolate.
+  async waitForEvent(event, opts) {
+    if (event !== "download") return undefined;
+    const timeout = (opts && typeof opts === "object" && opts.timeout) || 30000;
+    await this._ensureLive();
+    if (this._session == null) return undefined;
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+      let raw;
+      try {
+        raw = await native.liveEval(
+          this._session,
+          "globalThis.__RESULT = JSON.stringify((globalThis.__downloads || []).splice(0));",
+        );
+      } catch {
+        raw = null;
+      }
+      let entries = [];
+      try {
+        entries = JSON.parse(raw || "[]");
+      } catch {
+        entries = [];
+      }
+      if (entries.length) return makeDownload(entries[0]);
+      await new Promise((r) => setTimeout(r, 30)); // let the concurrent click drive + push
+    }
     return undefined;
   }
   async waitForResponse(matcher, opts = {}) {
@@ -1345,6 +1419,43 @@ function makeNetResponse(e) {
     async finished() {
       return null;
     },
+  };
+}
+
+// A Playwright-like Download built from a captured client-side export (a `<a download>`
+// click over a createObjectURL blob — see the env's __downloads). The bytes are written to
+// a temp file lazily so download.path()/saveAs() behave like the real thing.
+function makeDownload(entry) {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  let cached = null;
+  const writeTemp = () => {
+    if (cached) return cached;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "turbo-surf-dl-"));
+    const p = path.join(dir, entry.filename || "download");
+    fs.writeFileSync(p, entry.content ?? "");
+    cached = p;
+    return p;
+  };
+  return {
+    suggestedFilename: () => entry.filename || "download",
+    url: () => entry.url || "",
+    async path() {
+      return writeTemp();
+    },
+    async saveAs(dest) {
+      const fs2 = require("node:fs");
+      fs2.writeFileSync(dest, entry.content ?? "");
+    },
+    async failure() {
+      return null;
+    },
+    async createReadStream() {
+      return require("node:fs").createReadStream(writeTemp());
+    },
+    async delete() {},
+    async cancel() {},
   };
 }
 

@@ -971,6 +971,66 @@ if (typeof globalThis.URL === "undefined") {
   globalThis.URL.revokeObjectURL = () => {};
 }
 
+// Object-URL registry + download capture. The common client-side export pattern is
+// `URL.createObjectURL(blob)` → set it on a `<a download href=…>` → `link.click()`. A real
+// createObjectURL (keyed store) lets us recover the blob bytes when the anchor is clicked,
+// and a wrapped HTMLAnchorElement.prototype.click records {filename, content} so the shim
+// can resolve `page.waitForEvent('download')` + `download.path()`. Runs after browser_env
+// installed the anchor prototype (ENV_BOOTSTRAP runs last).
+(() => {
+  const blobs = new Map();
+  let bid = 0;
+  globalThis.URL.createObjectURL = (obj) => {
+    const url = "blob:turbo-surf/" + bid++;
+    try { blobs.set(url, obj); } catch (_e) {}
+    return url;
+  };
+  globalThis.URL.revokeObjectURL = () => {}; // keep the blob for a later .path() read
+  globalThis.__readBlobUrl = (url) => {
+    const b = blobs.get(url);
+    if (b == null) return null;
+    return b._s != null ? String(b._s) : "";
+  };
+  globalThis.__downloads = globalThis.__downloads || [];
+  const record = (el) => {
+    try {
+      let n = el;
+      while (n && n.nodeType === 1) {
+        if (n.tagName === "A" && n.getAttribute) {
+          let dl = n.getAttribute("download");
+          if (dl == null && n.download) dl = n.download;
+          if (dl != null) {
+            const href = (n.getAttribute("href") || n.href || "");
+            const content = globalThis.__readBlobUrl(String(href));
+            // Dedupe: an attached anchor records via BOTH the document listener and the
+            // prototype wrap for one click — keep only one.
+            const last = globalThis.__downloads[globalThis.__downloads.length - 1];
+            if (last && last.url === String(href) && last.filename === (dl || "download")) return true;
+            globalThis.__downloads.push({ filename: dl || "download", url: String(href), content: content == null ? "" : content });
+            return true;
+          }
+        }
+        n = n.parentElement;
+      }
+    } catch (_e) {}
+    return false;
+  };
+  // Capture-phase listener for ATTACHED `<a download>` clicks (the event bubbles to the
+  // document). Plus a prototype wrap for DETACHED anchors (createElement + click without
+  // appendChild), whose dispatched event never reaches the document.
+  try {
+    globalThis.document.addEventListener("click", (e) => { record(e && e.target); }, true);
+  } catch (_e) {}
+  const proto = globalThis.HTMLAnchorElement && globalThis.HTMLAnchorElement.prototype;
+  if (proto && typeof proto.click === "function") {
+    const orig = proto.click;
+    proto.click = function () {
+      record(this);
+      return orig.call(this);
+    };
+  }
+})();
+
 // location — back it with a real URL so setting `location.href` (done at install time,
 // and by history.pushState/replaceState) UPDATES pathname/search/hash/host/origin too.
 // browser_env.js ships a plain static object whose href is just a string field, so

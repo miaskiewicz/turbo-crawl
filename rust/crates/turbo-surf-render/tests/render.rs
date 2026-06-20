@@ -1193,6 +1193,34 @@ async fn react_document_root_hydrates_and_commits() {
     session.close();
 }
 
+// Client-side export capture: `URL.createObjectURL(blob)` → `<a download href=…>` →
+// `link.click()` must be recorded in `__downloads` (filename + bytes) so the shim's
+// page.waitForEvent('download') + download.path() work (CSV-template / file exports).
+#[tokio::test]
+async fn createobjecturl_anchor_download_is_captured() {
+    let html = r#"<body><a id="dl">x</a>
+      <script>
+        var blob = new Blob(["a,b,c\n1,2,3"], { type: "text/csv" });
+        var url = URL.createObjectURL(blob);
+        var a = document.getElementById('dl');
+        a.setAttribute('download', 'template.csv');
+        a.setAttribute('href', url);
+        a.click();
+        var d = (globalThis.__downloads || [])[0] || {};
+        document.body.setAttribute('data-fn', String(d.filename));
+        document.body.setAttribute('data-content', String(d.content));
+      </script></body>"#;
+    let out = render_hydrate(html, "https://example.test/").await.unwrap();
+    assert!(
+        out.contains(r#"data-fn="template.csv""#),
+        "download filename must be captured: {out}"
+    );
+    assert!(
+        out.contains("a,b,c"),
+        "download blob content must be captured: {out}"
+    );
+}
+
 // __tcGetBy resolves getByRole/getByText/getByLabel IN the live isolate, returning each
 // match's LIVE document-order index (querySelectorAll('*') position) so the shim dispatches
 // on the SAME node it matched (a re-serialized snapshot can reorder portal'd nodes → wrong
