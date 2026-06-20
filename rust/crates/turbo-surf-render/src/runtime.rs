@@ -389,6 +389,25 @@ class __NoopObserver {
 globalThis.MutationObserver = __NoopObserver;
 globalThis.IntersectionObserver = __NoopObserver;
 globalThis.ResizeObserver = __NoopObserver;
+// structuredClone — apps/SDKs use it (and probe `globalThis.structuredClone.prototype`);
+// absent, that probe throws. deno_core doesn't ship it. Structured-ish deep clone with a
+// few common types; falls back to JSON for the rest.
+if (typeof globalThis.structuredClone === "undefined") {
+  globalThis.structuredClone = (v) => {
+    const seen = new WeakMap();
+    const clone = (x) => {
+      if (x === null || typeof x !== "object") return x;
+      if (seen.has(x)) return seen.get(x);
+      if (x instanceof Date) return new Date(x.getTime());
+      if (x instanceof RegExp) return new RegExp(x.source, x.flags);
+      if (Array.isArray(x)) { const a = []; seen.set(x, a); for (const e of x) a.push(clone(e)); return a; }
+      if (x instanceof Map) { const m = new Map(); seen.set(x, m); for (const [k, val] of x) m.set(clone(k), clone(val)); return m; }
+      if (x instanceof Set) { const s = new Set(); seen.set(x, s); for (const e of x) s.add(clone(e)); return s; }
+      const o = {}; seen.set(x, o); for (const k of Object.keys(x)) o[k] = clone(x[k]); return o;
+    };
+    return clone(v);
+  };
+}
 // NOTE: getComputedStyle + matchMedia are provided by the vendored browser_env.js
 // (a jsdom-style getComputedStyle the Playwright shim's cssValue/visibility reads,
 // and a matchMedia stub). Do NOT redefine them here — ENV_BOOTSTRAP runs AFTER the

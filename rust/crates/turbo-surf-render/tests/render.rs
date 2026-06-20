@@ -1027,6 +1027,80 @@ fn iframe_content_window_exposes_builtins() {
     );
 }
 
+// Repro of the payroll wizard's partial hydration: a code-split bundle attaches its
+// interactivity from a DYNAMICALLY injected <script> (webpack's
+// `__webpack_require__.e`: appendChild a <script>, await its `onload`, then the chunk
+// runs and wires handlers). If the render tier doesn't run a runtime-injected script
+// AND fire its `load` so the awaiting promise resolves, the dependent code never runs
+// and the element stays "un-hydrated" (no click handler) — exactly the dead
+// "Add Manually" button. This must pass for the dynamic-import hydration path to work.
+#[tokio::test]
+async fn dynamically_injected_script_runs_and_fires_load() {
+    let html = r#"<body>
+      <div id="app">
+        <button id="btn">go</button>
+        <span data-test-id="status">cold</span>
+      </div>
+      <script>
+        // The "chunk": when it runs it wires the delegated click handler and marks ready.
+        function loadChunk() {
+          return new Promise((resolve, reject) => {
+            const s = document.createElement('script');
+            s.textContent = "globalThis.__wireHandlers();";
+            s.onload = () => resolve();
+            s.onerror = () => reject(new Error('chunk failed'));
+            document.head.appendChild(s);
+          });
+        }
+        globalThis.__wireHandlers = () => {
+          document.addEventListener('click', (e) => {
+            if (e.target && e.target.id === 'btn') {
+              document.querySelector('[data-test-id="status"]').textContent = 'hydrated';
+            }
+          });
+        };
+        // Like a lazy boundary: load the chunk, then mark the boundary resolved.
+        loadChunk().then(() => {
+          document.querySelector('[data-test-id="status"]').textContent = 'ready';
+        });
+      </script>
+    </body>"#;
+
+    let mut session = PageSession::open(
+        html,
+        "https://example.test/",
+        "",
+        "",
+        DEFAULT_RENDER_BUDGET_MS,
+    )
+    .await
+    .expect("session opens");
+
+    // After hydration the boundary's promise must have resolved (chunk ran + onload fired).
+    assert!(
+        session
+            .serialize()
+            .contains(r#"data-test-id="status">ready<"#),
+        "dynamic chunk must run and its load event resolve the awaiting promise: {}",
+        session.serialize()
+    );
+
+    // And the handler the chunk wired must be live.
+    session
+        .eval(r#"document.getElementById('btn').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));"#)
+        .await
+        .unwrap();
+    assert!(
+        session
+            .serialize()
+            .contains(r#"data-test-id="status">hydrated<"#),
+        "handler wired by the injected chunk must fire on click: {}",
+        session.serialize()
+    );
+
+    session.close();
+}
+
 // --- helpers ----------------------------------------------------------------
 async fn spawn_json_server(body: &'static str) -> u16 {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
