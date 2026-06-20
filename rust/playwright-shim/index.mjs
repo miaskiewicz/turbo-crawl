@@ -323,12 +323,27 @@ class Locator {
   async blur() {}
   async scrollIntoViewIfNeeded() {}
   async highlight() {}
-  async waitFor() {
+  async waitFor(opts = {}) {
     // "Wait for this element" — for an SPA the element only exists after the app runs, so
     // ensure the page is hydrated (a live session). This covers the bare `goto(/login)` +
-    // `emailField.waitFor()` login flow (no `waitUntil:'networkidle'`). Cheap: hydrates
-    // at most once per document.
+    // `emailField.waitFor()` login flow (no `waitUntil:'networkidle'`).
     await this._page._ensureLive();
+    // Then actually poll for the requested state (Playwright defaults to 'visible'),
+    // re-pumping the live app between tries — so the wait reflects reality instead of
+    // resolving immediately (which masked "the element/modal never appeared").
+    const state = opts.state ?? "visible";
+    const timeout = opts.timeout ?? 5000;
+    const ok = () => {
+      const snap = this._snapshot();
+      if (state === "attached") return snap != null;
+      if (state === "detached") return snap == null;
+      if (state === "hidden") return snap == null || !snap.visible;
+      return snap != null && snap.visible; // 'visible'
+    };
+    if (!this._page._live) return undefined; // static page: best-effort, no polling surface
+    const start = Date.now();
+    while (!ok() && Date.now() - start < timeout) await this._page._redrain();
+    if (!ok()) throw new Error(`turbo-surf: waitFor(state=${state}) timed out`);
     return undefined;
   }
 
