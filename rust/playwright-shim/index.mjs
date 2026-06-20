@@ -624,6 +624,8 @@ class Page {
     this._loadedPath = null; // path the live DOM was loaded at (to detect in-app nav)
     this._navHops = 0; // auto-followed redirects since the last user navigation
     this._autoHydrate = true; // hydrate-on-demand unless a goto opted out (commit)
+    this._actionSeq = 0; // bumps per real user interaction; tags drained responses so
+    // waitForResponse can tell a fresh response from one that drained in an earlier step
   }
 
   get _live() {
@@ -757,6 +759,7 @@ class Page {
     this._recentResponses = this._recentResponses ?? [];
     for (const e of entries) {
       const resp = makeNetResponse(e);
+      resp._seq = this._actionSeq; // which interaction produced it (see waitForResponse)
       this._recentResponses.push(resp);
       this._emit("response", resp);
       this._emit("requestfinished", resp.request());
@@ -786,6 +789,9 @@ class Page {
   // Drive an interaction in the live isolate (real DOM events → running app handlers →
   // re-render), then refresh the Page snapshot. `kind` is "click" | "fill".
   async _sessionDispatch(selector, index, kind, value) {
+    // A new user interaction: responses produced by THIS action (and after) are "fresh"
+    // for any waitForResponse paired with it; responses from before are stale.
+    this._actionSeq++;
     const r = await native.liveEval(
       this._session,
       interactionScript(selector, index ?? 0, kind, value),
@@ -1212,9 +1218,14 @@ class Page {
         return false;
       }
     };
-    // A matching response may already have been captured (e.g. it landed during an
-    // action that ran before this call) — check the recent buffer first.
-    const buffered = (this._recentResponses ?? []).find(test);
+    // Real Playwright only matches responses received AFTER this call. Our live engine
+    // drains network in batches, so a matching response may already sit in the buffer —
+    // but ONLY accept one produced by the current interaction (or later). A response that
+    // drained in an EARLIER step is stale and must not match, else a loose predicate like
+    // url.includes('/bulk-upload') grabs the template GET from a prior step instead of
+    // waiting for this step's POST. (_seq is the action that produced the response.)
+    const callSeq = this._actionSeq;
+    const buffered = (this._recentResponses ?? []).find((r) => (r._seq ?? 0) >= callSeq && test(r));
     if (buffered) return buffered;
     return new Promise((resolve) => {
       // On timeout resolve a synthetic response rather than rejecting: many callers

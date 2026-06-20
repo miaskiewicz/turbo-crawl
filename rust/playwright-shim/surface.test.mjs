@@ -622,3 +622,34 @@ test("honest throws: pixel / input / network-interception", async () => {
   await assert.rejects(() => p.route("**"), /interception/);
   await assert.rejects(() => p.exposeFunction("f", () => {}), /binding/);
 });
+
+// --- waitForResponse staleness (Playwright semantics) ---------------------
+// The live engine drains network in batches into a buffer. waitForResponse must NOT
+// return a response that drained in an EARLIER interaction — only one produced by the
+// current action (or later). Regression guard for the bulk-upload bug: a loose predicate
+// like url.includes('/bulk-upload') would otherwise grab the prior step's template GET
+// (.../bulk-upload/template) instead of waiting for this step's POST (.../bulk-upload).
+test("waitForResponse ignores a response that drained in an earlier step", async () => {
+  const p = newPage();
+  const mk = (url, status, seq) => ({ url: () => url, status: () => status, _seq: seq });
+  // Step 1 (action seq 1) drained the template GET. Step 2 is now current (seq 2).
+  p._recentResponses = [mk("https://x/leave-requests/bulk-upload/template", 200, 1)];
+  p._actionSeq = 2;
+  const matcher = (r) => r.url().includes("/leave-requests/bulk-upload");
+  // The stale template GET must be skipped; the fresh POST (seq 2) arrives via emit.
+  const fresh = mk("https://x/leave-requests/bulk-upload", 201, 2);
+  const pending = p.waitForResponse(matcher, { timeout: 2000 });
+  p._recentResponses.push(fresh);
+  p._emit("response", fresh);
+  const got = await pending;
+  assert.equal(got.status(), 201, "should resolve to the fresh POST, not the stale GET");
+});
+
+test("waitForResponse returns a buffered response from the current action", async () => {
+  const p = newPage();
+  const mk = (url, status, seq) => ({ url: () => url, status: () => status, _seq: seq });
+  p._actionSeq = 3;
+  p._recentResponses = [mk("https://x/api/details", 200, 3)]; // drained THIS action, pre-call
+  const got = await p.waitForResponse((r) => r.url().includes("/api/details"), { timeout: 1000 });
+  assert.equal(got.status(), 200);
+});
