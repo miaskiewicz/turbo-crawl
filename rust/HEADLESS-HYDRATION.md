@@ -584,3 +584,31 @@ With hydration fixed, suites that were 0/N on the flight wall now partially pass
 - `403 Missing required permissions` (e.g. `deduction:read`, `/expenses`) — the e2e seed
   admin lacks some grants (seed/permission issue, not the engine).
 These are per-interaction, not the structural hydration blocker — that is solved.
+
+## Interaction tier: click fixed for non-portal; PORTAL onClick is the open blocker
+
+After hydration was solved, the e2e failures moved to interactions. Two findings:
+
+1. **Click made browser-accurate** (shim `index.mjs`): fire pointerdown→mousedown→focus→
+   pointerup→mouseup→click, pointer events FIRST (MUI v7/Radix gate on them), and focus
+   the target only when mousedown wasn't preventDefault'd (MUI Select/Autocomplete
+   listboxes preventDefault mousedown to keep input focus; we were focusing the option
+   <li tabindex=-1>, blurring the input, and clearOnBlur discarded the selection).
+   Result: company-settings 4/14 → 7/7.
+
+2. **Portal onClick does NOT dispatch** (OPEN — ignored repro `portal_element_onclick_
+   dispatches`). A click on a React `createPortal`'d element under `hydrateRoot(document)`
+   never fires its onClick. Diagnosis: React attaches delegated listeners per container in
+   `completeWork` (HostPortal → `listenToAllSupportedEvents(containerInfo)`), marking each
+   container with `_reactListening<rand>`. In this env the MUI portal container divs end
+   up WITHOUT that marker (the autocomplete options' chain: li[option]→…→div→div→BODY; the
+   intermediate divs have no marker; only `body` does). React's root-container (document)
+   listener by design SKIPS portal targets (the `isMatchingRootContainer` walk returns
+   early, expecting the portal container's own listener to handle it). With no effective
+   listener on the option's portal path, the synthetic onClick is never dispatched —
+   confirmed in the live app (MUI `handleOptionClick` never runs; `event.currentTarget`
+   index never read) and in the minimal repro fixture. Keyboard selection (ArrowDown+
+   Enter) DOES work (it goes through the input, which is dispatched normally), proving the
+   gap is portal click-dispatch specifically. This blocks autocomplete/dialog-heavy suites
+   (payroll wizard). Next: get React's per-portal-container listeners to attach + fire in
+   the headless env (or have the root listener dispatch to portal targets).
