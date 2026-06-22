@@ -123,7 +123,12 @@ class Locator {
     return this._page.getByLabel(t, o);
   }
   getByTestId(t) {
-    return this._page.getByTestId(t);
+    // Scope to this locator's subtree when it is selector-backed (like `locator()` does) —
+    // `card.getByTestId('x')` must match only descendants of the card, not the whole document.
+    // (A getBy-rooted parent isn't CSS-expressible, so it stays document-scoped — see LIMITATIONS.)
+    if (!this._selector) return this._page.getByTestId(t);
+    const attr = this._page._context._testIdAttribute;
+    return this._page.locator(`${this._selector} [${attr}="${t}"]`);
   }
   getByPlaceholder(t, o) {
     return this._page.getByPlaceholder(t, o);

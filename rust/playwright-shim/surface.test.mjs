@@ -653,3 +653,18 @@ test("waitForResponse returns a buffered response from the current action", asyn
   const got = await p.waitForResponse((r) => r.url().includes("/api/details"), { timeout: 1000 });
   assert.equal(got.status(), 200);
 });
+
+// Locator.getByTestId must scope to the parent locator's subtree (like .locator()), not the
+// whole document — e.g. a UserMenu wrapper that also has a same-test-id twin in a mobile menu.
+// Regression guard: it used to delegate to page.getByTestId and return BOTH.
+test("Locator.getByTestId scopes to the parent locator subtree", async () => {
+  const p = newPage();
+  await p.setContent(
+    "<div data-testid='wrap'><button data-testid='go'>in</button></div>" +
+      "<button data-testid='go'>out</button>",
+  );
+  assert.equal(await p.getByTestId("go").count(), 2, "unscoped sees both");
+  const scoped = p.getByTestId("wrap").getByTestId("go");
+  assert.equal(await scoped.count(), 1, "scoped sees only the descendant");
+  assert.equal(await scoped.textContent(), "in", "scoped resolves the in-subtree match");
+});
