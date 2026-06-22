@@ -690,3 +690,33 @@ Net: the engine is solid for authed journeys; remaining e2e reds are app PRs / b
 data isolation, not the render or shim. Open engine-suspect still to side-by-side cleanly:
 **payroll-config** (turbo-surf hangs ~30s on an `about://blank` fetch; Playwright flaked at
 login so the feature step wasn't compared).
+
+### Update — additional shim fixes + ticket resolution
+
+More shim/parity fixes landed after the side-by-side (all in `surface.test.mjs`):
+- **`about:blank` navigation** → a no-fetch blank document (was a `builder error for url
+  (about:blank)` when a goto/reload hit the net layer; a login helper reloading a blank page
+  before navigating then threw).
+- **`waitForFunction`** returns the function's VALUE (not a boolean) and works on a static
+  snapshot — regression from the polling-handle rewrite.
+- **`test.extend` custom fixtures inject** — a test fn with its own extDefs opens its own
+  fixture set instead of reusing the base-only shared `_current` (custom fixtures / a `page`
+  override resolved to `undefined`).
+- **Test isolation:** an env-mapping test restored `TURBO_SHIM_*` with `= undefined` (coerces
+  to the STRING `"undefined"`), leaking `testIdAttribute`/`baseURL` into every later context →
+  cascaded failures across the serial run. Fixed with `delete`. Surface suite now 51/52 green
+  (1 intentional skip). KEY LESSON: a "fails only late in the full run, passes in isolation"
+  cascade was test-isolation env leakage, NOT an engine/isolate leak — reproduce in the real
+  multi-test run (the shim is robust to 60+ unclosed hydrated sessions in a raw loop).
+
+Ticket resolution (the confirmed not-engine reds — all merged to staging):
+- FLUX-1332 (KB platform-role RBAC) → payroll-app#254 (honor FLUX_* platform flags in role
+  guards when an entity is selected).
+- FLUX-1335 (pay/work-schedule assign missing `effectiveFrom`) → payroll-app#209.
+- FLUX-1336 (data-seed leaks Person + language_preference on user delete) → flux-apis#255.
+- FLUX-1337 (robust e2e PropelAuth cleanup: bulk + per-run + stale-local-run) → in progress.
+
+payroll-config: resolved as NOT engine — its `openConfig` calls `login()` without first
+navigating to the login page, so it fails at login in BOTH Playwright and turbo-surf (a spec
+issue); the `about:blank` console error during it is benign (the pending-fetch counter settles
+in a finally) and is now a no-fetch blank doc anyway.

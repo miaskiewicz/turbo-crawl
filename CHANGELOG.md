@@ -68,6 +68,21 @@ captured`, `hover_reveals_css_hover_menu`, `tcgetby_scopes_to_root`,
 `tcresolvescoped_walks_nth_chain`, `aria_hidden_stays_visible`, waitForResponse
 staleness guards, getByTestId/getByRole scoping guards.
 
+Additional shim fixes:
+
+- **`about:blank` navigation** is a no-fetch blank document (a `goto`/`reload` of
+  about:blank used to hit the net layer → `builder error for url (about:blank)`).
+- **`waitForFunction` resolves the function's return value** (not a boolean) and
+  works against a static snapshot — `Number(await waitForFunction(() => 1 + 1))`
+  is `2` again (regression from the polling-handle rewrite).
+- **`test.extend` custom fixtures inject** — a test fn with its own extDefs (a
+  custom fixture or a `page` override) opens its own fixture set instead of
+  reusing the base-only shared one (they resolved to `undefined` before).
+- **Test isolation:** the env-var-mapping test restored `TURBO_SHIM_*` with
+  `delete` instead of `= undefined` (the latter coerces to the string
+  `"undefined"`, leaking `testIdAttribute`/`baseURL` into every later context and
+  cascading failures across the serial suite).
+
 ## [0.2.0]
 
 **turbo-surf is a browserless, native-speed crawler _and_ Playwright-compatible
