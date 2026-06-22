@@ -550,6 +550,9 @@ function interactionScript(selector, index, kind, value) {
       t.dispatchEvent(new MouseEvent("pointerenter", oe));
       t.dispatchEvent(new MouseEvent("mouseenter", oe));
       t.dispatchEvent(new MouseEvent("mousemove", o));
+      // Also apply CSS :hover styles — a menu revealed purely by a hover descendant rule has
+      // no JS handler; without this it stays display:none (no pointer state in the cascade).
+      if (typeof globalThis.__tcApplyHover === "function") globalThis.__tcApplyHover(el);
       globalThis.__RESULT = "OK";
     } })();`;
   }

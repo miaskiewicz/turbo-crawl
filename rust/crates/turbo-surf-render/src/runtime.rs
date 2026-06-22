@@ -1447,6 +1447,126 @@ globalThis.__tcGetBy = function (kind, value, name) {
   globalThis.__RESULT = JSON.stringify(hits.map((el) => ({ idx: idxOf(el) })));
 };
 
+// Apply CSS `:hover` styles for a hovered element. turbo-dom's cascade has no pointer state,
+// so content revealed only by `.trigger:hover .menu { display:block }` (hover dropdowns/menus
+// — e.g. the app's UserMenu, overridden to open on hover) stays display:none and waitFor
+// (state:'visible') hangs. We simulate hover: mark the hovered chain (the element, its
+// ancestors, and its deepest-first-child descendant path — the nodes a pointer over the
+// element is "on") with [data-tc-hover], then for every `:hover` style rule (from <style>
+// text AND any constructable/inserted sheets), rewrite `:hover` → `[data-tc-hover]`, match it
+// live, and apply the rule's declarations INLINE on the matched elements — inline style feeds
+// both this env's getComputedStyle and rtdom's native cascade (is_visible), so the reveal is
+// observable. Best-effort + flat-rule only (skips nested @media); enough for hover menus.
+globalThis.__tcApplyHover = function (el) {
+  if (!el || !el.setAttribute) return;
+  const mark = (n) => {
+    if (n && n.setAttribute) n.setAttribute("data-tc-hover", "");
+  };
+  // A pointer over `el` is "on" el, all its ancestors, and (since we have no layout to know
+  // which leaf the cursor lands on) any of its descendants — mark all three so a `:hover`
+  // rule anchored on a nested trigger (e.g. MUI's `&:hover` on the menu root inside the
+  // hovered wrapper) still matches.
+  mark(el);
+  for (let a = el.parentElement; a; a = a.parentElement) mark(a);
+  try {
+    const desc = el.querySelectorAll("*");
+    for (let i = 0; i < desc.length; i++) mark(desc[i]);
+  } catch (e) {}
+  const cssTexts = [];
+  try {
+    const styles = document.querySelectorAll("style");
+    for (let i = 0; i < styles.length; i++) cssTexts.push(styles[i].textContent || "");
+  } catch (e) {}
+  try {
+    const sheets = document.styleSheets || [];
+    for (let si = 0; si < sheets.length; si++) {
+      let rules;
+      try {
+        rules = sheets[si].cssRules || [];
+      } catch (e) {
+        rules = [];
+      }
+      for (let ri = 0; ri < rules.length; ri++) cssTexts.push(String(rules[ri].cssText || ""));
+    }
+  } catch (e) {}
+  // Flatten nested CSS (emotion serializes `.css-x{ base; &:hover .menu{ … } }`) into flat
+  // (selector, decls) rules, resolving `&` to the parent selector. A flat-regex parse can't
+  // do this — the reveal rule is nested under the trigger's class, with `&` standing in for it.
+  const flat = [];
+  const resolveSel = (parent, sel) =>
+    sel
+      .split(",")
+      .map((p) => {
+        p = p.trim();
+        if (!parent) return p;
+        return p.indexOf("&") >= 0 ? p.replace(/&/g, parent) : parent + " " + p;
+      })
+      .join(",");
+  const flatten = (css) => {
+    let pos = 0;
+    const parse = (parentSel) => {
+      let buf = "";
+      let declBuf = "";
+      while (pos < css.length) {
+        const ch = css[pos++];
+        if (ch === "}") {
+          if (buf.indexOf(":") >= 0) declBuf += buf;
+          if (declBuf.trim() && parentSel) flat.push({ sel: parentSel, decls: declBuf.trim() });
+          return;
+        }
+        if (ch === ";") {
+          declBuf += buf + ";";
+          buf = "";
+          continue;
+        }
+        if (ch === "{") {
+          parse(resolveSel(parentSel, buf.trim()));
+          buf = "";
+          continue;
+        }
+        buf += ch;
+      }
+      if (declBuf.trim() && parentSel) flat.push({ sel: parentSel, decls: declBuf.trim() });
+    };
+    parse("");
+  };
+  for (let ci = 0; ci < cssTexts.length; ci++) flatten(cssTexts[ci]);
+  for (let fi = 0; fi < flat.length; fi++) {
+    const sel = flat[fi].sel;
+    if (sel.indexOf(":hover") < 0) continue;
+    const parts = sel.split(",");
+    for (let pi = 0; pi < parts.length; pi++) {
+      const s = parts[pi].trim();
+      if (s.indexOf(":hover") < 0) continue;
+      const rw = s.replace(/:hover/g, "[data-tc-hover]");
+      let targets;
+      try {
+        targets = document.querySelectorAll(rw);
+      } catch (e) {
+        continue;
+      }
+      for (let ti = 0; ti < targets.length; ti++) {
+        const t = targets[ti];
+        const decls = flat[fi].decls.split(";");
+        for (let di = 0; di < decls.length; di++) {
+          const c = decls[di].indexOf(":");
+          if (c < 0) continue;
+          const prop = decls[di].slice(0, c).trim();
+          const val = decls[di].slice(c + 1).trim();
+          if (!prop) continue;
+          try {
+            t.style.setProperty(prop, val);
+          } catch (e) {
+            try {
+              t.style[prop] = val;
+            } catch (e2) {}
+          }
+        }
+      }
+    }
+  }
+};
+
 // Pending-work signal for the Rust pump loop: "1" while timers are queued, a
 // <script> hasn't run, an ES module is unclaimed, or a fetch is in-flight (more to do
 // after the next async drain), else "0".

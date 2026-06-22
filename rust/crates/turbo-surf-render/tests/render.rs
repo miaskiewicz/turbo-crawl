@@ -1629,3 +1629,50 @@ async fn spawn_json_server(body: &'static str) -> u16 {
 fn base(port: u16) -> String {
     format!("http://127.0.0.1:{port}/")
 }
+
+// CSS :hover-revealed content (a hover dropdown / menu) must become visible when the shim
+// hovers the trigger. turbo-dom's cascade does not apply the :hover pseudo-class (no pointer
+// state), so a menu shown via `.trigger:hover .menu { display:block }` stays display:none and
+// waitFor(visible) hangs. __tcApplyHover marks the hovered chain with [data-tc-hover], rewrites
+// each stylesheet rule's `:hover` → `[data-tc-hover]`, and applies the matched rules' decls
+// INLINE so both the JS getComputedStyle and rtdom's native cascade (is_visible) see the reveal.
+// Real case: the app's UserMenu (overridden to open on hover) — the logout item lives in a
+// `&:hover .user-menu` dropdown; the auth-logout e2e hovers the menu then clicks logout.
+#[tokio::test]
+async fn hover_reveals_css_hover_menu() {
+    // Real shape: the dropdown is `visibility:hidden`, revealed by an emotion-style NESTED
+    // `&:hover .dd { visibility:visible }` under the trigger's class (`&` = the trigger). The
+    // flattener must resolve `&` to `.menu` and apply visibility inline on hover.
+    let html = r#"<style>.dd{visibility:hidden}.menu{color:red;&:hover .dd{visibility:visible}}</style>
+      <body><div class="menu" id="m"><span>trigger</span><div class="dd" id="d">logout</div></div></body>"#;
+    let mut session = PageSession::open(
+        html,
+        "https://example.test/",
+        "",
+        "",
+        DEFAULT_RENDER_BUDGET_MS,
+    )
+    .await
+    .expect("session opens");
+    // The `<style>` rule lives in rtdom's cascade (which is_visible reads); this env's
+    // getComputedStyle doesn't parse <style> text, so assert on the inline style
+    // __tcApplyHover applies — exactly what feeds the Rust cascade / is_visible.
+    let before = session
+        .eval(r#"globalThis.__RESULT = document.getElementById('d').style.visibility || '';"#)
+        .await
+        .unwrap();
+    assert_eq!(before, "", "no inline visibility before hover");
+    session
+        .eval(r#"globalThis.__tcApplyHover(document.getElementById('m')); globalThis.__RESULT = 'ok';"#)
+        .await
+        .unwrap();
+    let after = session
+        .eval(r#"globalThis.__RESULT = document.getElementById('d').style.visibility || '';"#)
+        .await
+        .unwrap();
+    assert_eq!(
+        after, "visible",
+        "hovering resolves the nested &:hover rule + applies visibility inline"
+    );
+    session.close();
+}
