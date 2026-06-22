@@ -1674,5 +1674,12 @@ async fn hover_reveals_css_hover_menu() {
         after, "visible",
         "hovering resolves the nested &:hover rule + applies visibility inline"
     );
+    // is_visible reads the SERIALIZED snapshot, not the live DOM — the applied inline style
+    // must survive serialization or the shim's waitFor(state:'visible') never observes it.
+    let snap = session.serialize();
+    assert!(
+        snap.contains("visibility") && snap.contains("visible"),
+        "serialized snapshot must carry the applied inline visibility: {snap}"
+    );
     session.close();
 }
