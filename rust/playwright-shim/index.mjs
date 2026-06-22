@@ -1569,7 +1569,9 @@ class BrowserContext {
     // app picks UI language from the `NEXT_LOCALE` cookie (next-intl) — with none it
     // defaults to es-MX, so English text/role-name assertions miss. Seed NEXT_LOCALE to
     // match the browser locale (default en-US) unless the caller already provided one.
-    this._locale = opts.locale ?? process.env.TURBO_SHIM_LOCALE ?? "en-US";
+    // NOTE: the settings suite expects the es-MX default (Chrome shows es-MX there) — a known
+    // parity gap; the post-login NEXT_LOCALE=en-US source is not yet pinned. See memory.
+    this._locale = opts.locale ?? process.env.TURBO_SHIM_LOCALE ?? null;
     if (this._locale && !cookies.some((c) => c.name === "NEXT_LOCALE")) {
       let host = "localhost";
       try {
