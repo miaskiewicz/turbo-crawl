@@ -113,14 +113,37 @@ class Locator {
     const scoped = this._selector ? `${this._selector} ${selector}` : selector;
     return this._page.locator(scoped);
   }
+  // Scope getBy* to this locator's subtree when it is selector-backed (descendant matching
+  // via the `root` selector). A getBy-rooted parent isn't CSS-expressible → document-scoped.
   getByRole(role, o) {
-    return this._page.getByRole(role, o);
+    if (!this._selector) return this._page.getByRole(role, o);
+    const name = o?.name != null ? String(o.name) : null;
+    const root = this._selector;
+    return new Locator(this._page, (h) => JSON.parse(native.getBy(h, "role", role, name, root)), {
+      getBy: { kind: "role", value: role, name, root },
+    });
   }
   getByText(t, o) {
-    return this._page.getByText(t, o);
+    if (!this._selector) return this._page.getByText(t, o);
+    const root = this._selector;
+    return new Locator(
+      this._page,
+      (h) => JSON.parse(native.getBy(h, "text", String(t), null, root)),
+      {
+        getBy: { kind: "text", value: String(t), name: null, root },
+      },
+    );
   }
   getByLabel(t, o) {
-    return this._page.getByLabel(t, o);
+    if (!this._selector) return this._page.getByLabel(t, o);
+    const root = this._selector;
+    return new Locator(
+      this._page,
+      (h) => JSON.parse(native.getBy(h, "label", String(t), null, root)),
+      {
+        getBy: { kind: "label", value: String(t), name: null, root },
+      },
+    );
   }
   getByTestId(t) {
     // Scope to this locator's subtree when it is selector-backed (like `locator()` does) —
@@ -265,7 +288,7 @@ class Locator {
       const g = this._getBy;
       const raw = await native.liveEval(
         this._page._session,
-        `globalThis.__tcGetBy(${JSON.stringify(g.kind)},${JSON.stringify(g.value)},${g.name == null ? "null" : JSON.stringify(g.name)});`,
+        `globalThis.__tcGetBy(${JSON.stringify(g.kind)},${JSON.stringify(g.value)},${g.name == null ? "null" : JSON.stringify(g.name)},${g.root == null ? "null" : JSON.stringify(g.root)});`,
       );
       let matches = [];
       try {

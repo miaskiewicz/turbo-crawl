@@ -137,7 +137,13 @@ pub fn query(html: String, selector: String, kind: Option<String>) -> String {
 /// Locate by `kind` ("role" | "text" | "label") → JSON `[{ node, text }]`.
 /// `name` filters a role match by accessible name (substring).
 #[napi]
-pub fn get_by(html: String, kind: String, value: String, name: Option<String>) -> String {
+pub fn get_by(
+    html: String,
+    kind: String,
+    value: String,
+    name: Option<String>,
+    root: Option<String>,
+) -> String {
     let tree = parsed(&html);
     let mode_for = |s: &str| {
         if view::locator::is_regex_literal(s) {
@@ -147,12 +153,30 @@ pub fn get_by(html: String, kind: String, value: String, name: Option<String>) -
         }
     };
     let nm = name.as_deref().map(|n| (n, mode_for(n)));
-    let hits = match kind.as_str() {
+    let mut hits = match kind.as_str() {
         "role" => view::by_role(&tree, &value, nm),
         "text" => view::by_text(&tree, &value, mode_for(&value)),
         "label" => view::by_label(&tree, &value, mode_for(&value)),
         _ => Vec::new(),
     };
+    // Scope to a parent locator's subtree: keep only hits that are a descendant (or self) of
+    // some element matching `root`. Backs `parentLocator.getByRole/getByText/getByLabel(...)`.
+    if let Some(root_sel) = root.as_deref().filter(|s| !s.is_empty()) {
+        let roots: std::collections::HashSet<u32> =
+            tree.query_selector_all(root_sel).iter().copied().collect();
+        if !roots.is_empty() {
+            hits.retain(|&h| {
+                let mut n = Some(h);
+                while let Some(x) = n {
+                    if roots.contains(&x) {
+                        return true;
+                    }
+                    n = tree.parent(x);
+                }
+                false
+            });
+        }
+    }
     // `idx` = the element's position in document order (querySelectorAll('*')), so the
     // Playwright shim can drive a getBy* match in the LIVE isolate by index (these
     // locators have no CSS selector to dispatch through).

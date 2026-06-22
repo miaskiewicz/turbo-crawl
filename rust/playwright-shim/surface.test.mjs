@@ -668,3 +668,14 @@ test("Locator.getByTestId scopes to the parent locator subtree", async () => {
   assert.equal(await scoped.count(), 1, "scoped sees only the descendant");
   assert.equal(await scoped.textContent(), "in", "scoped resolves the in-subtree match");
 });
+
+// Locator.getByRole/getByText/getByLabel scope to the parent locator's subtree (descendant
+// matching), not the whole document — e.g. `step.getByTestId('x').getByRole('combobox')`.
+test("Locator.getByRole scopes to the parent locator subtree", async () => {
+  const p = newPage();
+  await p.setContent("<div data-testid='a'><button>in</button></div><button>out</button>");
+  assert.equal(await p.getByRole("button").count(), 2, "unscoped sees both buttons");
+  const scoped = p.getByTestId("a").getByRole("button");
+  assert.equal(await scoped.count(), 1, "scoped sees only the in-subtree button");
+  assert.equal(await scoped.textContent(), "in", "scoped resolves the descendant");
+});

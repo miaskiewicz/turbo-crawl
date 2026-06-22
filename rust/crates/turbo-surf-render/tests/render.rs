@@ -1683,3 +1683,43 @@ async fn hover_reveals_css_hover_menu() {
     );
     session.close();
 }
+
+// __tcGetBy(kind,value,name,root) scopes role/text/label matching to within elements matching
+// `root` (descendant-or-self) — backs the shim's `parentLocator.getByRole/getByText/getByLabel`,
+// so `step.getByTestId('x').getByRole('combobox')` drives the combobox INSIDE that step, not the
+// first one in the document. idx stays the GLOBAL position so the shim dispatches on `*`[idx].
+#[tokio::test]
+async fn tcgetby_scopes_to_root() {
+    let html = r#"<body>
+      <div id="a"><div role="combobox">A</div></div>
+      <div id="b"><div role="combobox">B</div></div>
+    </body>"#;
+    let mut session = PageSession::open(
+        html,
+        "https://example.test/",
+        "",
+        "",
+        DEFAULT_RENDER_BUDGET_MS,
+    )
+    .await
+    .expect("session opens");
+    let unscoped = session
+        .eval(
+            r#"globalThis.__tcGetBy('role','combobox',null,null);
+               globalThis.__RESULT = String(JSON.parse(globalThis.__RESULT).length);"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(unscoped, "2", "unscoped sees both comboboxes");
+    let scoped = session
+        .eval(
+            r#"globalThis.__tcGetBy('role','combobox',null,'#a');
+               var h = JSON.parse(globalThis.__RESULT);
+               var all = Array.prototype.slice.call(document.querySelectorAll('*'));
+               globalThis.__RESULT = h.length + ':' + (h[0] ? all[h[0].idx].textContent : '');"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(scoped, "1:A", "root='#a' scopes to the combobox inside #a");
+    session.close();
+}

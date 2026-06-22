@@ -1391,8 +1391,21 @@ globalThis.__takeModuleScript = function () {
 // options / dialogs), so the idx pointed at the WRONG live node (a wrapper, not the option),
 // and the click never reached the option's onClick. Resolving here over the live DOM keeps
 // the idx and the dispatch in one context. Mirrors the Rust matchers (aria.rs/locator.rs).
-globalThis.__tcGetBy = function (kind, value, name) {
+globalThis.__tcGetBy = function (kind, value, name, root) {
+  // `idx` is always the GLOBAL document-order position (so the shim dispatches on `*`[idx]).
+  // `root` scopes matching to within elements matching that selector (descendant-or-self) —
+  // backs `parentLocator.getByRole/getByText/getByLabel(...)`.
   const all = Array.prototype.slice.call(document.querySelectorAll("*"));
+  let inScope = null;
+  if (root) {
+    inScope = new Set();
+    const roots = Array.prototype.slice.call(document.querySelectorAll(root));
+    for (let ri = 0; ri < roots.length; ri++) {
+      inScope.add(roots[ri]);
+      const sub = roots[ri].querySelectorAll("*");
+      for (let si = 0; si < sub.length; si++) inScope.add(sub[si]);
+    }
+  }
   const attr = (el, n) => (el && el.getAttribute ? el.getAttribute(n) : null) || "";
   const roleOf = (el) => {
     const r = attr(el, "role");
@@ -1444,6 +1457,7 @@ globalThis.__tcGetBy = function (kind, value, name) {
       if (!childMatch) hits.push(el);
     }
   }
+  if (inScope) hits = hits.filter((el) => inScope.has(el));
   globalThis.__RESULT = JSON.stringify(hits.map((el) => ({ idx: idxOf(el) })));
 };
 
