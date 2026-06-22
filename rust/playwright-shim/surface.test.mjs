@@ -539,8 +539,11 @@ test("BrowserContext reads baseURL/testIdAttribute from env (config use{} mappin
     assert.equal(ctx2._baseURL, "http://opt");
     assert.equal(ctx2._testIdAttribute, "data-x");
   } finally {
-    process.env.TURBO_SHIM_BASE_URL = undefined;
-    process.env.TURBO_SHIM_TESTID_ATTR = undefined;
+    // DELETE (not `= undefined`) — assigning undefined coerces to the STRING "undefined",
+    // which then leaks: later `new BrowserContext()` reads testIdAttribute="undefined" (breaks
+    // getByTestId) and baseURL="undefined" (makes `new URL(url,"undefined")` throw in goto).
+    delete process.env.TURBO_SHIM_BASE_URL;
+    delete process.env.TURBO_SHIM_TESTID_ATTR;
   }
 });
 
