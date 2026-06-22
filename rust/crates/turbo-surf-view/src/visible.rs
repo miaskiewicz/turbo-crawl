@@ -1,8 +1,13 @@
 //! Cascade-based visibility (port of `src/visible.mjs`, SPEC §7.3). We can't
 //! measure pixels — visibility is approximated from turbo-dom's real CSS cascade
-//! (declared, not rendered). Not-visible if: `hidden` attr, `aria-hidden=true`,
-//! `<input type=hidden>`, computed `visibility:hidden` (inherits → self check),
-//! or self/any ancestor `display:none` (does NOT inherit → walk up).
+//! (declared, not rendered). Not-visible if: `hidden` attr, `<input type=hidden>`,
+//! computed `visibility:hidden` (inherits → self check), self/any ancestor
+//! `display:none` (does NOT inherit → walk up), or effective `opacity:0`.
+//!
+//! `aria-hidden` is deliberately NOT consulted: Playwright's `isVisible()` is purely
+//! CSS/layout — an `aria-hidden` element (e.g. a decorative MUI SVG icon that carries a
+//! test-id) is still visible to it. aria-hidden is an accessibility-tree concern and is
+//! handled separately in `ax.rs` for role/name queries.
 
 use turbo_dom_parser::rtdom::cascade::{computed_style, get_property_value};
 use turbo_dom_parser::rtdom::Tree;
@@ -69,9 +74,6 @@ pub fn is_visible(tree: &Tree, h: u32) -> bool {
     if tree.get_attribute(h, "hidden").is_some() {
         return false;
     }
-    if tree.get_attribute(h, "aria-hidden") == Some("true") {
-        return false;
-    }
     if is_hidden_input(tree, h) {
         return false;
     }
@@ -100,11 +102,18 @@ mod tests {
     }
 
     #[test]
-    fn hidden_attr_and_aria_hidden() {
+    fn hidden_attr_hides() {
         let t1 = Tree::parse("<div id='a' hidden>x</div>");
         assert!(!is_visible(&t1, first(&t1, "#a")));
-        let t2 = Tree::parse("<div id='a' aria-hidden='true'>x</div>");
-        assert!(!is_visible(&t2, first(&t2, "#a")));
+    }
+
+    // Playwright's isVisible() ignores aria-hidden — a decorative MUI SVG icon that carries a
+    // test-id (aria-hidden='true') is still "visible". aria-hidden is an accessibility concern,
+    // resolved in ax.rs for role/name queries, NOT a CSS visibility signal.
+    #[test]
+    fn aria_hidden_stays_visible() {
+        let tree = Tree::parse("<div id='a' aria-hidden='true'>x</div>");
+        assert!(is_visible(&tree, first(&tree, "#a")));
     }
 
     #[test]
