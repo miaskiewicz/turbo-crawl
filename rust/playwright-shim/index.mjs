@@ -53,6 +53,16 @@ class Locator {
     // re-resolve the match IN the running isolate (live `*` indices) instead of trusting
     // a re-serialized snapshot's index, which diverges for portal'd content (MUI options).
     this._getBy = opts.getBy ?? null;
+    // nth-aware scope chain ([{sel, idx}, …]) for nested locators where a parent had `.nth(i)`
+    // — a CSS-concat selector can't express "the i-th match's subtree", so the live drive walks
+    // this chain via __tcResolveScoped. Empty for the common (non-indexed) case.
+    this._scope = opts.scope ?? [];
+  }
+
+  // The scope chain a CHILD of this locator inherits: our chain plus this locator's own
+  // selector + index. Only meaningful when this locator is selector-backed.
+  _childScope() {
+    return [...this._scope, { sel: this._selector, idx: this._index ?? null }];
   }
 
   _all() {
@@ -80,7 +90,11 @@ class Locator {
   // stays selector-backed (→ drivable in a live session). `filter` makes it
   // unindexable for live dispatch (a JS predicate over matches), so it's dropped there.
   _derive(opts) {
-    const loc = new Locator(this._page, this._resolve, { ...opts, getBy: this._getBy });
+    const loc = new Locator(this._page, this._resolve, {
+      ...opts,
+      getBy: this._getBy,
+      scope: this._scope,
+    });
     if (this._selector && opts.filter == null) loc._selector = this._selector;
     return loc;
   }
@@ -107,51 +121,65 @@ class Locator {
   or(other) {
     return new Locator(this._page, (h) => [...this._resolve(h), ...other._resolve(h)]);
   }
-  // Nested locators: CSS-concat when this locator is selector-backed (the common
-  // `.card`→`button` case). getBy-rooted nesting is document-scoped — see LIMITATIONS.
-  locator(selector) {
-    const scoped = this._selector ? `${this._selector} ${selector}` : selector;
-    return this._page.locator(scoped);
+  // When this locator (or an ancestor) was indexed via `.nth(i)`, a CSS-concat selector can't
+  // express "the i-th match's subtree" — return the scope CHAIN so the child drives via
+  // __tcResolveScoped. Null for the common non-indexed case (keep the simple CSS-concat path).
+  _indexedScope() {
+    const sc = this._childScope();
+    return sc.some((s) => s.idx != null) ? sc : null;
   }
-  // Scope getBy* to this locator's subtree when it is selector-backed (descendant matching
-  // via the `root` selector). A getBy-rooted parent isn't CSS-expressible → document-scoped.
+  // A selector-backed child carrying the nth-aware scope chain (live-driven via the chain).
+  _scopedSelectorChild(selector, scope) {
+    const loc = this._page._locFromSelector(selector);
+    loc._scope = scope;
+    return loc;
+  }
+  // Nested locators: CSS-concat when this locator is selector-backed (the common
+  // `.card`→`button` case); a scope chain when an ancestor was `.nth(i)`. getBy-rooted nesting
+  // is document-scoped — see LIMITATIONS.
+  locator(selector) {
+    if (!this._selector) return this._page.locator(selector);
+    const scope = this._indexedScope();
+    if (scope) return this._scopedSelectorChild(selector, scope);
+    return this._page.locator(`${this._selector} ${selector}`);
+  }
+  // Scope getBy* to this locator's subtree when it is selector-backed (descendant matching via
+  // the `root` selector, or the nth-aware scope chain when an ancestor was `.nth(i)`). A
+  // getBy-rooted parent isn't CSS-expressible → document-scoped.
+  _scopedGetBy(kind, value, name) {
+    const scope = this._indexedScope();
+    if (scope) {
+      return new Locator(this._page, (h) => JSON.parse(native.getBy(h, kind, value, name)), {
+        getBy: { kind, value, name },
+        scope,
+      });
+    }
+    const root = this._selector;
+    return new Locator(this._page, (h) => JSON.parse(native.getBy(h, kind, value, name, root)), {
+      getBy: { kind, value, name, root },
+    });
+  }
   getByRole(role, o) {
     if (!this._selector) return this._page.getByRole(role, o);
-    const name = o?.name != null ? String(o.name) : null;
-    const root = this._selector;
-    return new Locator(this._page, (h) => JSON.parse(native.getBy(h, "role", role, name, root)), {
-      getBy: { kind: "role", value: role, name, root },
-    });
+    return this._scopedGetBy("role", role, o?.name != null ? String(o.name) : null);
   }
   getByText(t, o) {
     if (!this._selector) return this._page.getByText(t, o);
-    const root = this._selector;
-    return new Locator(
-      this._page,
-      (h) => JSON.parse(native.getBy(h, "text", String(t), null, root)),
-      {
-        getBy: { kind: "text", value: String(t), name: null, root },
-      },
-    );
+    return this._scopedGetBy("text", String(t), null);
   }
   getByLabel(t, o) {
     if (!this._selector) return this._page.getByLabel(t, o);
-    const root = this._selector;
-    return new Locator(
-      this._page,
-      (h) => JSON.parse(native.getBy(h, "label", String(t), null, root)),
-      {
-        getBy: { kind: "label", value: String(t), name: null, root },
-      },
-    );
+    return this._scopedGetBy("label", String(t), null);
   }
   getByTestId(t) {
     // Scope to this locator's subtree when it is selector-backed (like `locator()` does) —
     // `card.getByTestId('x')` must match only descendants of the card, not the whole document.
     // (A getBy-rooted parent isn't CSS-expressible, so it stays document-scoped — see LIMITATIONS.)
     if (!this._selector) return this._page.getByTestId(t);
-    const attr = this._page._context._testIdAttribute;
-    return this._page.locator(`${this._selector} [${attr}="${t}"]`);
+    const childSel = `[${this._page._context._testIdAttribute}="${t}"]`;
+    const scope = this._indexedScope();
+    if (scope) return this._scopedSelectorChild(childSel, scope);
+    return this._page.locator(`${this._selector} ${childSel}`);
   }
   getByPlaceholder(t, o) {
     return this._page.getByPlaceholder(t, o);
@@ -279,6 +307,33 @@ class Locator {
   // is what lets getByRole/getByLabel/getByText drive the running app (fill/click), not
   // just mutate the static HTML snapshot.
   async _driveLive(kind, value) {
+    // nth-aware scope chain: a CSS selector can't target "the i-th match's subtree", so walk
+    // the chain in the live isolate and dispatch on the matched element's global index.
+    if (this._scope && this._scope.some((s) => s.idx != null) && this._page._session != null) {
+      const leaf = this._selector
+        ? { selector: this._selector }
+        : this._getBy
+          ? { getBy: { kind: this._getBy.kind, value: this._getBy.value, name: this._getBy.name } }
+          : null;
+      if (leaf) {
+        const raw = await native.liveEval(
+          this._page._session,
+          `globalThis.__tcResolveScoped(${JSON.stringify(this._scope)},${JSON.stringify(leaf)});`,
+        );
+        let matches = [];
+        try {
+          matches = JSON.parse(raw);
+        } catch {
+          matches = [];
+        }
+        const i =
+          this._index == null ? 0 : this._index < 0 ? matches.length + this._index : this._index;
+        const target = matches[i];
+        if (!target || target.idx == null)
+          throw new Error("turbo-surf: locator matched no elements");
+        return this._page._sessionDispatch("*", target.idx, kind, value);
+      }
+    }
     if (this._selector)
       return this._page._sessionDispatch(this._selector, this._index ?? 0, kind, value);
     // getByRole/getByText/getByLabel: resolve the match IN the live isolate so the index is

@@ -1723,3 +1723,51 @@ async fn tcgetby_scopes_to_root() {
     assert_eq!(scoped, "1:A", "root='#a' scopes to the combobox inside #a");
     session.close();
 }
+
+// nth-scoped descendant resolution: `steps.nth(i).getByTestId('x').getByRole('combobox')` must
+// drive the combobox inside the i-th step, not the first in the document. A CSS-concat selector
+// can't express "the nth match's subtree", so the shim carries a scope CHAIN of {sel, idx} and
+// __tcResolveScoped walks it (picking idx at each level) before matching the leaf (a selector OR
+// a getBy). idx stays the GLOBAL position so the shim dispatches on `*`[idx]. Backs the
+// payroll-approval-chain flow (two steps, each configured independently).
+#[tokio::test]
+async fn tcresolvescoped_walks_nth_chain() {
+    let html = r#"<body>
+      <div class="s"><div data-testid="x"><div role="combobox">A</div></div></div>
+      <div class="s"><div data-testid="x"><div role="combobox">B</div></div></div>
+    </body>"#;
+    let mut session = PageSession::open(
+        html,
+        "https://example.test/",
+        "",
+        "",
+        DEFAULT_RENDER_BUDGET_MS,
+    )
+    .await
+    .expect("session opens");
+    // getBy leaf scoped to the 2nd step → combobox "B"
+    let b = session
+        .eval(
+            r#"globalThis.__tcResolveScoped(
+                 [{"sel":".s","idx":1},{"sel":"[data-testid=\"x\"]","idx":null}],
+                 {"getBy":{"kind":"role","value":"combobox","name":null}});
+               var h = JSON.parse(globalThis.__RESULT);
+               var all = Array.prototype.slice.call(document.querySelectorAll('*'));
+               globalThis.__RESULT = h.length + ':' + (h[0] ? all[h[0].idx].textContent : '');"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(b, "1:B", "scope chain picks the 2nd step's combobox");
+    // selector leaf scoped to the 1st step → its [data-testid=x]
+    let a = session
+        .eval(
+            r#"globalThis.__tcResolveScoped([{"sel":".s","idx":0}], {"selector":"[data-testid=\"x\"]"});
+               var h = JSON.parse(globalThis.__RESULT);
+               var all = Array.prototype.slice.call(document.querySelectorAll('*'));
+               globalThis.__RESULT = h.length + ':' + (h[0] ? all[h[0].idx].querySelector('[role=combobox]').textContent : '');"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(a, "1:A", "selector leaf scoped to the 1st step");
+    session.close();
+}

@@ -1461,6 +1461,60 @@ globalThis.__tcGetBy = function (kind, value, name, root) {
   globalThis.__RESULT = JSON.stringify(hits.map((el) => ({ idx: idxOf(el) })));
 };
 
+// Resolve a locator through an nth-aware scope CHAIN, then match its leaf. `scope` is an
+// ordered list of {sel, idx}: at each level, querySelectorAll(sel) within the current set,
+// and when idx != null keep only that one (the `.nth(i)` of a parent locator). The leaf is
+// either {selector} (getByTestId/locator) or {getBy:{kind,value,name}} (getByRole/Text/Label).
+// idx in the output is the GLOBAL document-order position so the shim dispatches on `*`[idx].
+// Needed because a CSS-concat selector can't express "the nth match's subtree".
+globalThis.__tcResolveScoped = function (scope, leaf) {
+  let cur = [document];
+  for (let si = 0; si < (scope || []).length; si++) {
+    const s = scope[si];
+    let next = [];
+    for (let ci = 0; ci < cur.length; ci++) {
+      let m;
+      try {
+        m = cur[ci].querySelectorAll(s.sel);
+      } catch (e) {
+        m = [];
+      }
+      for (let mi = 0; mi < m.length; mi++) next.push(m[mi]);
+    }
+    if (s.idx != null) {
+      const i = s.idx < 0 ? next.length + s.idx : s.idx;
+      next = next[i] ? [next[i]] : [];
+    }
+    cur = next;
+  }
+  const all = Array.prototype.slice.call(document.querySelectorAll("*"));
+  if (leaf && leaf.selector) {
+    let res = [];
+    for (let ci = 0; ci < cur.length; ci++) {
+      let m;
+      try {
+        m = cur[ci].querySelectorAll(leaf.selector);
+      } catch (e) {
+        m = [];
+      }
+      for (let mi = 0; mi < m.length; mi++) res.push(m[mi]);
+    }
+    globalThis.__RESULT = JSON.stringify(res.map((el) => ({ idx: all.indexOf(el) })));
+    return;
+  }
+  if (leaf && leaf.getBy) {
+    // Reuse __tcGetBy's role/text/label matcher by marking the resolved roots and scoping to
+    // them (descendant-or-self via the [data-tc-scope] root selector).
+    for (let ci = 0; ci < cur.length; ci++) if (cur[ci].setAttribute) cur[ci].setAttribute("data-tc-scope", "");
+    globalThis.__tcGetBy(leaf.getBy.kind, leaf.getBy.value, leaf.getBy.name, "[data-tc-scope]");
+    const out = globalThis.__RESULT;
+    for (let ci = 0; ci < cur.length; ci++) if (cur[ci].removeAttribute) cur[ci].removeAttribute("data-tc-scope");
+    globalThis.__RESULT = out;
+    return;
+  }
+  globalThis.__RESULT = "[]";
+};
+
 // Apply CSS `:hover` styles for a hovered element. turbo-dom's cascade has no pointer state,
 // so content revealed only by `.trigger:hover .menu { display:block }` (hover dropdowns/menus
 // — e.g. the app's UserMenu, overridden to open on hover) stays display:none and waitFor
