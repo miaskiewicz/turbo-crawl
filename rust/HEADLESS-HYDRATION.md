@@ -612,3 +612,81 @@ After hydration was solved, the e2e failures moved to interactions. Two findings
    gap is portal click-dispatch specifically. This blocks autocomplete/dialog-heavy suites
    (payroll wizard). Next: get React's per-portal-container listeners to attach + fire in
    the headless env (or have the root listener dispatch to portal targets).
+
+## Interaction + parity tier: SOLVED (2026-06, clean-staging side-by-side)
+
+With hydration solved (above), the work moved to making authed journeys drive + assert the
+SAME as real Chrome. Run against **clean staging** (payroll-app + flux-apis both at
+`origin/staging`, the flux-apis backend clean): **login works, payroll-wizard 5/5, invites
+26/26, auth-guards 32/38, smoke 1/1**. The fixes below are each TDD-guarded (render-crate test
+and/or shim `surface.test.mjs`) and committed on `fix-login-rsc-nav`.
+
+### Engine/shim fixes that greened real suites
+- **Portal/getBy live resolution** (`runtime.rs __tcGetBy`): getByRole/getByText/getByLabel
+  resolve in the LIVE isolate, returning each match's live `querySelectorAll('*')` index, so
+  the shim dispatches on the SAME node it matched. Fixed the portal onClick blocker (MUI
+  Autocomplete option selection commits). The earlier snapshot-index approach reordered
+  portal'd nodes → wrong target.
+- **Click = browser-accurate** (`index.mjs`): pointerdown→mousedown→focus(only if mousedown
+  not preventDefault'd + focusable)→pointerup→mouseup→click.
+- **Modal close after mutation**: virtual-timer budget made RELATIVE per drain
+  (`__resetTimerBudget`) — an absolute budget killed late short timers (a closing MUI Fade's
+  ~195ms exit), so `waitFor(state:'hidden')` hung. Plus `is_visible` treats effective
+  `opacity:0` (and `display:none`/`visibility:hidden` ancestors) as hidden, so a faded-out
+  modal reads hidden. `next/dynamic` lazy modals: `drain_to_quiescence` now runs runtime-
+  injected `<script>`s (kicks `__hydrate` each round).
+- **waitForResponse staleness** (`index.mjs`): it returned ANY buffered response, so a loose
+  predicate (`url.includes('/leave-requests/bulk-upload')`) grabbed the prior step's template
+  GET instead of this step's POST. Now tags each drained response with an action sequence
+  (`_actionSeq`, bumped per interaction) and only accepts one from the current action or later
+  — matching Playwright's "responses after the call" semantics. Greened the vacation bulk
+  upload (→ payroll-wizard 5/5).
+- **Download capture + ElementHandle + polling waitForFunction**: a real `URL.createObjectURL`
+  registry + capture-phase click listener record `<a download>` clicks over blob URLs into
+  `__downloads`; `page.waitForEvent('download')` → a Download with `path()/saveAs()/
+  suggestedFilename()`. `Locator.elementHandle()` + a polling `page.waitForFunction(fn, handle)`
+  that resolves the handle to the live element. Backs CSV-template download → fill → upload.
+- **CSS `:hover` reveal** (`runtime.rs __tcApplyHover` + shim hover): turbo-dom's cascade has
+  no pointer state, so a menu shown only by `.trigger:hover .menu{visibility:visible}` (incl.
+  emotion's nested `&:hover .menu`) stayed hidden and `waitFor(visible)` hung. We mark the
+  hovered chain with `[data-tc-hover]`, FLATTEN stylesheet + `<style>` rules resolving nested
+  `&`, rewrite `:hover`→`[data-tc-hover]`, and apply the matched rules' decls INLINE (survives
+  serialize → both getComputedStyle and rtdom's cascade see the reveal). Real case: the app's
+  UserMenu (overridden to open on hover) — logout lives in a `&:hover .user-menu` dropdown.
+- **Locator scoping** (`index.mjs` + `napi get_by` + `runtime.rs __tcGetBy/__tcResolveScoped`):
+  `card.getByTestId('x')` and `card.getByRole(...)` delegated to the page and matched the whole
+  document. Now scope to the parent's subtree (descendant matching). And `steps.nth(i).getBy*`
+  carries an nth-aware scope CHAIN of `{sel, idx}` resolved by `__tcResolveScoped` (walk picking
+  idx per level, then match the leaf) — a CSS-concat selector can't express "the i-th match's
+  subtree". Greened the payroll-approval-chain (2 steps configured independently) + the UserMenu
+  logout (desktop vs mobile twin).
+- **`is_visible` ignores aria-hidden** (`visible.rs`): Playwright's `isVisible()` is purely
+  CSS/layout — a decorative MUI SVG icon carrying a test-id (icons are aria-hidden) is still
+  visible. aria-hidden stays handled in `ax.rs` for role/name queries. → auth-logout green.
+- **Locale parity** (`index.mjs`): the shim no longer force-seeds `NEXT_LOCALE=en-US`; with no
+  cookie next-intl resolves the app default (es-MX), matching real Playwright (which sets none).
+
+### Method: resolve engine-vs-not by side-by-side (Playwright vs turbo-surf)
+Run each failing suite in BOTH real Chromium (Playwright, reusing the running dev servers) and
+turbo-surf, one suite at a time. **Playwright PASS + turbo-surf FAIL = engine bug** (fix it).
+**Both FAIL = not engine** (app/backend/data/test). Note: Playwright's `globalTeardown` deletes
+the seed entity, so RE-SEED for turbo-surf after a Playwright run; the turbo-surf runner now has
+a matching `globalTeardown` lifecycle for the same per-run isolation.
+
+### Confirmed NOT-engine (tickets filed) — fail in real Chrome too / data-only
+- **Knowledge-base 403s** (FLUX-1332): backend `@RequireAnyLocalRole(FLUX_*)` checks the
+  entity-context-FILTERED roles; a flux-admin with an auto-selected entity has FLUX_* stripped
+  from `roles` (the PLATFORM flags stay true) → 403. Backend should use `isFluxPlatformActor`.
+- **Pay/work-schedule create** (FLUX-1335): the app's `assign()` omits the backend-required
+  `effectiveFrom` → 400 → success banner never shows.
+- **settings language** (FLUX-1336): the engine renders es-MX on fresh data; the failure is the
+  data-seed leaking the `Person` + `language_preference` on user-delete, so a reused user keeps
+  a stale en-US. Not a product/engine defect.
+- **off-cycle**: `SKIP_ON_REMOTE` tests (CI skips via `E2E_USE_REMOTE_TARGETS=1`).
+- **auth-guards delegated-write**: passes 7/7 on a fresh seed; matrix reds were stale grants
+  from cross/intra-run pollution (data, not engine).
+
+Net: the engine is solid for authed journeys; remaining e2e reds are app PRs / backend / test
+data isolation, not the render or shim. Open engine-suspect still to side-by-side cleanly:
+**payroll-config** (turbo-surf hangs ~30s on an `about://blank` fetch; Playwright flaked at
+login so the feature step wasn't compared).
