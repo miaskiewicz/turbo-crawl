@@ -908,6 +908,17 @@ class Page {
 
   async _navigate(url, method, body) {
     this._closeSession(); // a fresh document — discard the prior live app
+    // `about:blank` (and other about: URLs) are not network resources — a browser shows an
+    // empty document with NO request. Short-circuit so a goto/reload of about:blank yields a
+    // blank page instead of a "builder error for url (about:blank)" from the net layer.
+    if (/^about:/i.test(url)) {
+      this._html = "<html><head></head><body></body></html>";
+      this._url = url;
+      this._hydrated = false;
+      this._emit("load");
+      this._emit("domcontentloaded");
+      return makeResponse({ status: 200, finalUrl: url, html: this._html });
+    }
     const r = JSON.parse(
       await native.fetchWithCookies(
         url,
@@ -1244,19 +1255,39 @@ class Page {
     } else {
       argExpr = JSON.stringify(arg ?? null);
     }
-    if (this._session == null) return undefined;
-    const start = Date.now();
-    while (Date.now() - start < timeout) {
-      const script = `(() => { try { var __a = ${argExpr}; var __r = (${fnStr})(__a); globalThis.__RESULT = __r ? "1" : "0"; } catch (_e) { globalThis.__RESULT = "0"; } })();`;
-      let r;
-      try {
-        r = await native.liveEval(this._session, script);
-      } catch {
-        r = null;
+    // Capture BOTH truthiness and the VALUE — Playwright's waitForFunction resolves to the
+    // function's return value, not a boolean. Works live (poll the running app) and static
+    // (one eval over the snapshot; a static DOM won't change so don't spin).
+    const probe = `(() => { try { var __a = ${argExpr}; var __r = (${fnStr})(__a); return JSON.stringify({ ok: !!__r, v: __r === undefined ? null : __r }); } catch (_e) { return JSON.stringify({ ok: false, v: null }); } })()`;
+    const evalOnce = async () => {
+      let raw;
+      if (this._session != null) {
+        try {
+          raw = await native.liveEval(this._session, `globalThis.__RESULT = ${probe};`);
+        } catch {
+          raw = null;
+        }
+        await this._refreshFromSession();
+      } else {
+        try {
+          raw = native.evaluate(this._html, probe);
+        } catch {
+          raw = null;
+        }
       }
-      await this._refreshFromSession();
-      if (r === "1") return true;
-      await new Promise((res) => setTimeout(res, 40));
+      try {
+        return JSON.parse(raw);
+      } catch {
+        return { ok: false, v: null };
+      }
+    };
+    const start = Date.now();
+    for (;;) {
+      const res = await evalOnce();
+      if (res && res.ok) return res.v;
+      if (this._session == null) break; // static snapshot won't change
+      if (Date.now() - start >= timeout) break;
+      await new Promise((res2) => setTimeout(res2, 40));
     }
     throw new Error("turbo-surf: waitForFunction timed out");
   }
@@ -2168,7 +2199,11 @@ function makeTestFn(baseDefs, extDefs = {}) {
       _activeT = t;
       const testInfo = makeTestInfo(name);
       try {
-        if (_current) {
+        // The shared `_current` set is opened once (by the wired beforeEach) with the BASE
+        // fixtures, so it only covers plain `test(...)`. A `test.extend(...)` fn has its own
+        // extDefs (custom fixtures / a `page` override) that `_current` doesn't carry — it must
+        // open its OWN fixtures, else custom fixtures resolve to undefined.
+        if (_current && Object.keys(extDefs).length === 0) {
           await fn(_current.arg, testInfo);
           return;
         }

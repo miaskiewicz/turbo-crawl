@@ -612,12 +612,14 @@ test("honest throws: pixel / input / network-interception", async () => {
   await assert.rejects(() => p.screenshot(), /unavailable/);
   await assert.rejects(() => p.pdf(), /unavailable/);
   await assert.rejects(() => p.locator("#go").screenshot(), /unavailable/);
-  await assert.rejects(() => p.locator("#go").boundingBox(), /unavailable/);
-  await assert.rejects(() => p.locator("#go").hover(), /input/);
+  // boundingBox returns null (no layout engine → unmeasurable), matching Playwright's null for
+  // a non-laid-out element — not a throw. hover()/keyboard.press are now real features. The rest
+  // (screenshot/pdf/dragTo/selectText/mouse/touchscreen/route/exposeFunction) stay honest throws.
+  assert.equal(await p.locator("#go").boundingBox(), null);
   await assert.rejects(() => p.locator("#go").dragTo(p.locator("h1")), /input/);
   await assert.rejects(() => p.locator("#name").selectText(), /input/);
   await assert.rejects(() => p.mouse.click(0, 0), /input/);
-  await assert.rejects(() => p.keyboard.press("a"), /input/);
+  // keyboard.press is implemented (key-event dispatch via the live session) — not a throw.
   await assert.rejects(() => p.touchscreen.tap(0, 0), /input/);
   await assert.rejects(() => p.route("**"), /interception/);
   await assert.rejects(() => p.exposeFunction("f", () => {}), /binding/);
@@ -678,4 +680,21 @@ test("Locator.getByRole scopes to the parent locator subtree", async () => {
   const scoped = p.getByTestId("a").getByRole("button");
   assert.equal(await scoped.count(), 1, "scoped sees only the in-subtree button");
   assert.equal(await scoped.textContent(), "in", "scoped resolves the descendant");
+});
+
+// about:blank (and other about: URLs) are not network resources — a browser shows an empty
+// document with no request. The shim used to `fetchWithCookies('about:blank')`, which hit the
+// net layer and errored ("builder error for url (about://blank)"); a reload of a blank page
+// (e.g. login helper's waitForLoginForm reload before any navigation) then threw/hung. goto +
+// reload of about:blank must yield a clean empty document with no fetch.
+test("goto('about:blank') yields a blank document with no network fetch", async () => {
+  const p = newPage();
+  const resp = await p.goto("about:blank");
+  assert.equal(p.url(), "about:blank");
+  assert.equal(resp.status(), 200);
+  const html = await p.content();
+  assert.match(html, /<body>\s*<\/body>/, "blank body, no error markup");
+  // reload of the blank page must also be a no-fetch no-op (the failing real-world path)
+  await p.reload();
+  assert.equal(p.url(), "about:blank");
 });
