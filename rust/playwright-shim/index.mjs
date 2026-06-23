@@ -53,16 +53,29 @@ class Locator {
     // re-resolve the match IN the running isolate (live `*` indices) instead of trusting
     // a re-serialized snapshot's index, which diverges for portal'd content (MUI options).
     this._getBy = opts.getBy ?? null;
-    // nth-aware scope chain ([{sel, idx}, …]) for nested locators where a parent had `.nth(i)`
-    // — a CSS-concat selector can't express "the i-th match's subtree", so the live drive walks
-    // this chain via __tcResolveScoped. Empty for the common (non-indexed) case.
+    // nth-aware scope chain ([{sel, idx, filter}, …]) for nested locators where a parent had
+    // `.nth(i)` or `.filter(...)` — a CSS-concat selector can't express "the i-th (or
+    // text-filtered) match's subtree", so the live drive walks this chain via
+    // __tcResolveScoped. Empty for the common (non-indexed, non-filtered) case.
     this._scope = opts.scope ?? [];
+    // The base selector this locator's match set comes from. Unlike `_selector` (the
+    // own-dispatch selector, dropped by `.filter()` since a filtered set isn't one CSS
+    // selector) this SURVIVES `.filter()` so children of a filtered parent can still scope
+    // to it via the chain. Set wherever `_selector` is (and carried through `_derive`).
+    this._scopeSel = opts.scopeSel ?? null;
+    // Serializable form of an applied `.filter()` ({hasText|hasNotText} strings only) so the
+    // scope chain can re-apply it in the live isolate. null for regex/has/hasNot filters
+    // (those keep the JS-predicate-only behaviour — no live child scoping).
+    this._filterSpec = opts.filterSpec ?? null;
   }
 
   // The scope chain a CHILD of this locator inherits: our chain plus this locator's own
-  // selector + index. Only meaningful when this locator is selector-backed.
+  // base selector, index, and (serializable) filter.
   _childScope() {
-    return [...this._scope, { sel: this._selector, idx: this._index ?? null }];
+    return [
+      ...this._scope,
+      { sel: this._scopeSel ?? this._selector, idx: this._index ?? null, filter: this._filterSpec },
+    ];
   }
 
   _all() {
@@ -94,6 +107,10 @@ class Locator {
       ...opts,
       getBy: this._getBy,
       scope: this._scope,
+      // The base selector survives composition (incl. `.filter()`); the serializable filter
+      // spec carries unless this derivation sets its own (a `.filter()` call passes one).
+      scopeSel: this._scopeSel ?? this._selector,
+      filterSpec: opts.filterSpec !== undefined ? opts.filterSpec : this._filterSpec,
     });
     if (this._selector && opts.filter == null) loc._selector = this._selector;
     return loc;
@@ -109,7 +126,7 @@ class Locator {
   }
   filter(opts = {}) {
     const pred = buildFilter(this._page, opts);
-    return this._derive({ index: this._index, filter: pred });
+    return this._derive({ index: this._index, filter: pred, filterSpec: serializableFilterSpec(opts) });
   }
   and(other) {
     const keep = new Set();
@@ -126,7 +143,7 @@ class Locator {
   // __tcResolveScoped. Null for the common non-indexed case (keep the simple CSS-concat path).
   _indexedScope() {
     const sc = this._childScope();
-    return sc.some((s) => s.idx != null) ? sc : null;
+    return sc.some((s) => s.idx != null || s.filter != null) ? sc : null;
   }
   // A selector-backed child carrying the nth-aware scope chain (live-driven via the chain).
   _scopedSelectorChild(selector, scope) {
@@ -138,9 +155,11 @@ class Locator {
   // `.card`→`button` case); a scope chain when an ancestor was `.nth(i)`. getBy-rooted nesting
   // is document-scoped — see LIMITATIONS.
   locator(selector) {
-    if (!this._selector) return this._page.locator(selector);
+    // A `.nth()`/`.filter()` ancestor → walk the scope chain (it carries the index/filter a
+    // CSS-concat can't express), even if `.filter()` dropped our own `_selector`.
     const scope = this._indexedScope();
     if (scope) return this._scopedSelectorChild(selector, scope);
+    if (!this._selector) return this._page.locator(selector);
     return this._page.locator(`${this._selector} ${selector}`);
   }
   // Scope getBy* to this locator's subtree when it is selector-backed (descendant matching via
@@ -160,25 +179,26 @@ class Locator {
     });
   }
   getByRole(role, o) {
-    if (!this._selector) return this._page.getByRole(role, o);
+    if (!this._selector && !this._indexedScope()) return this._page.getByRole(role, o);
     return this._scopedGetBy("role", role, o?.name != null ? String(o.name) : null);
   }
   getByText(t, o) {
-    if (!this._selector) return this._page.getByText(t, o);
+    if (!this._selector && !this._indexedScope()) return this._page.getByText(t, o);
     return this._scopedGetBy("text", String(t), null);
   }
   getByLabel(t, o) {
-    if (!this._selector) return this._page.getByLabel(t, o);
+    if (!this._selector && !this._indexedScope()) return this._page.getByLabel(t, o);
     return this._scopedGetBy("label", String(t), null);
   }
   getByTestId(t) {
     // Scope to this locator's subtree when it is selector-backed (like `locator()` does) —
     // `card.getByTestId('x')` must match only descendants of the card, not the whole document.
-    // (A getBy-rooted parent isn't CSS-expressible, so it stays document-scoped — see LIMITATIONS.)
-    if (!this._selector) return this._page.getByTestId(t);
+    // A `.filter()`/`.nth()` ancestor walks the scope chain (it carries the filter/index our
+    // own `_selector` can't), so check that BEFORE falling back to a document-wide getByTestId.
     const childSel = `[${this._page._context._testIdAttribute}="${t}"]`;
     const scope = this._indexedScope();
     if (scope) return this._scopedSelectorChild(childSel, scope);
+    if (!this._selector) return this._page.getByTestId(t);
     return this._page.locator(`${this._selector} ${childSel}`);
   }
   getByPlaceholder(t, o) {
@@ -309,7 +329,11 @@ class Locator {
   async _driveLive(kind, value) {
     // nth-aware scope chain: a CSS selector can't target "the i-th match's subtree", so walk
     // the chain in the live isolate and dispatch on the matched element's global index.
-    if (this._scope && this._scope.some((s) => s.idx != null) && this._page._session != null) {
+    if (
+      this._scope &&
+      this._scope.some((s) => s.idx != null || s.filter != null) &&
+      this._page._session != null
+    ) {
       const leaf = this._selector
         ? { selector: this._selector }
         : this._getBy
@@ -516,6 +540,20 @@ function buildFilter(_page, opts) {
     checks.push((m) => !(m.text ?? "").includes(opts.hasNotText));
   }
   return (m) => checks.every((c) => c(m));
+}
+
+// Serializable subset of a `.filter()` for the live scope chain — __tcResolveScoped re-applies
+// it in the isolate so children of a filtered parent scope to the RIGHT element. Only plain
+// string hasText/hasNotText survive; regex / has / hasNot return null (those keep the
+// JS-predicate-only path: correct for reads, no live child scoping).
+function serializableFilterSpec(opts) {
+  if (opts.has != null || opts.hasNot != null) return null;
+  if (opts.hasText != null && typeof opts.hasText !== "string") return null;
+  if (opts.hasNotText != null && typeof opts.hasNotText !== "string") return null;
+  const spec = {};
+  if (typeof opts.hasText === "string") spec.hasText = opts.hasText;
+  if (typeof opts.hasNotText === "string") spec.hasNotText = opts.hasNotText;
+  return spec.hasText != null || spec.hasNotText != null ? spec : null;
 }
 
 // Build the JS run in a live session to drive an interaction by dispatching REAL DOM

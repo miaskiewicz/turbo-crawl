@@ -224,6 +224,88 @@ async fn live_session_dispatches_events_into_running_app() {
     session.close();
 }
 
+// RSC soft-nav must preserve the target's QUERY STRING. Next App Router client
+// navigation (`router.push('/x?employeeIds=42')`) fetches the target's RSC flight with
+// an `RSC` header; we record the target on `__rscNav` and the live-session driver hard-
+// reloads it. Recording only `u.pathname` dropped the query, so the off-cycle termination
+// flow (which passes the selected employee as `?employeeIds=`) landed on the bare route and
+// `waitForURL(/…\/termination\?employeeIds=/)` never matched. The recorded target must keep
+// the app query but STRIP Next's internal `_rsc` cache-buster (a hard reload carrying `_rsc`
+// returns a flight payload, not HTML).
+#[tokio::test]
+async fn rsc_soft_nav_preserves_query_and_strips_rsc_param() {
+    let html = r#"<body><div id="app">people</div></body>"#;
+    let mut session = PageSession::open(
+        html,
+        "https://example.test/entity/x/admin/people/active",
+        "",
+        "",
+        DEFAULT_RENDER_BUDGET_MS,
+    )
+    .await
+    .expect("session opens");
+
+    let nav = session
+        .eval(
+            r#"globalThis.__rscNav = '';
+        globalThis.fetch('/entity/x/admin/payroll/off-cycle/new/termination?employeeIds=42&_rsc=abc123',
+            { headers: { RSC: '1' } }).catch(() => {});
+        globalThis.__RESULT = globalThis.__rscNav || '';"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        nav, "/entity/x/admin/payroll/off-cycle/new/termination?employeeIds=42",
+        "__rscNav must preserve the app query string (employeeIds) and drop Next's _rsc param"
+    );
+
+    session.close();
+}
+
+// __tcResolveScoped must apply a Locator.filter({hasNotText}) BEFORE indexing, so
+// `cards.filter({hasNotText: x}).first().getByTestId('y')` scopes the child to the SAME
+// element the static read path picks. The pay-schedule delete-409 guard does exactly this
+// (target a SEEDED card by filtering OUT the just-created one); without filter-in-scope the
+// child resolved against the unfiltered set → the toggle click landed on the wrong card and
+// its delete button never revealed.
+#[tokio::test]
+async fn scoped_resolve_applies_filter_before_indexing() {
+    let html = r#"<body>
+      <div class="card"><span>alpha cycle</span><button data-test-id="del">x</button></div>
+      <div class="card"><span>beta seeded</span><button data-test-id="del">x</button></div>
+    </body>"#;
+    let mut session = PageSession::open(
+        html,
+        "https://example.test/",
+        "",
+        "",
+        DEFAULT_RENDER_BUDGET_MS,
+    )
+    .await
+    .expect("session opens");
+
+    // Scope: `.card` filtered to NOT contain "alpha cycle", first → the beta card; leaf = its
+    // del button. The resolved element's parent card text must be the BETA card's.
+    let card_text = session
+        .eval(
+            r#"globalThis.__tcResolveScoped(
+            [{ sel: '.card', idx: 0, filter: { hasNotText: 'alpha cycle' } }],
+            { selector: '[data-test-id="del"]' });
+        const arr = JSON.parse(globalThis.__RESULT);
+        const all = document.querySelectorAll('*');
+        const el = arr.length ? all[arr[0].idx] : null;
+        globalThis.__RESULT = el ? el.parentNode.textContent : 'NONE';"#,
+        )
+        .await
+        .unwrap();
+    assert!(
+        card_text.contains("beta seeded") && !card_text.contains("alpha"),
+        "filtered scope must resolve the del button inside the BETA card, got: {card_text}"
+    );
+
+    session.close();
+}
+
 // Mirrors the payroll /login hydration crash: the page's client JS (Next.js +
 // the PropelAuth SDK) uses WHATWG `URL` / `URLSearchParams` while building the
 // login form. deno_core doesn't ship those globals, so hydration died with

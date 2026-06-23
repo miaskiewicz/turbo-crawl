@@ -388,7 +388,13 @@ globalThis.fetch = async (url, init) => {
     for (const k in (hdrs || {})) lc[k.toLowerCase()] = hdrs[k];
     if (lc.rsc && !lc["next-router-prefetch"]) {
       const u = new URL(String((url && url.url) || url), globalThis.location.href);
-      if (u.pathname !== globalThis.location.pathname) globalThis.__rscNav = u.pathname;
+      if (u.pathname !== globalThis.location.pathname) {
+        // Keep the app's own query (e.g. the off-cycle termination flow passes the selected
+        // employee as `?employeeIds=`) but drop Next's internal `_rsc` cache-buster — a hard
+        // reload carrying `_rsc` returns a flight payload, not HTML.
+        u.searchParams.delete("_rsc");
+        globalThis.__rscNav = u.pathname + u.search + u.hash;
+      }
     }
   } catch (_e) {}
   const initJson = JSON.stringify({ method: o.method, headers: hdrs || undefined, body });
@@ -1480,6 +1486,17 @@ globalThis.__tcResolveScoped = function (scope, leaf) {
         m = [];
       }
       for (let mi = 0; mi < m.length; mi++) next.push(m[mi]);
+    }
+    // Apply a Locator.filter({hasText|hasNotText}) at this level BEFORE indexing, so a
+    // `parent.filter(...).first()/nth()` scopes children to the same element the static
+    // read path picks (a CSS-concat selector can't express the text filter).
+    if (s.filter) {
+      next = next.filter((el) => {
+        const txt = (el.textContent || "");
+        if (s.filter.hasText != null && txt.indexOf(s.filter.hasText) === -1) return false;
+        if (s.filter.hasNotText != null && txt.indexOf(s.filter.hasNotText) !== -1) return false;
+        return true;
+      });
     }
     if (s.idx != null) {
       const i = s.idx < 0 ? next.length + s.idx : s.idx;
