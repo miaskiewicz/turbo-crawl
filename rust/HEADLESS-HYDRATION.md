@@ -239,3 +239,546 @@ that's an env fix, not turbo-surf.)
 JS-gated and worth the isolate: near-empty rendered text + heavy external scripts, or
 an empty known SPA mount (`#root`/`#app`/`#__next`/`[data-reactroot]`). A caller picks
 Lane A (no-JS parse) vs Lane B (`render_page`) from its verdict.
+
+## Driving the full Playwright suite through the shim (what we built + what stalls)
+
+Running the payroll-app Playwright e2e suite through the `playwright-shim` (over the
+napi addon, no Chromium) took it from **6/114 → ~75/102 passing, 0 skipped**. The
+work split into render-tier capabilities and shim parity. This section is the field
+record: what we implemented, and — equally important — what we *tried that did not
+work* so the next person doesn't re-walk it.
+
+### Implemented (render tier)
+
+- **RSC soft-nav follow.** Next App Router client navigation (`router.push/replace`)
+  fetches the target's RSC flight with an `RSC` header and never changes
+  `location.href` headlessly. The fetch wrapper records the target on `__rscNav`; the
+  live-session driver re-loads that route as a fresh page (browser hard-nav
+  equivalent), following a redirect CHAIN hop-by-hop. This is what makes login
+  (`/login → /post-login → /entity/…`) complete.
+- **Fetch-aware drain.** `drain_to_quiescence`/`__pendingWork` tracked timers +
+  un-run scripts but NOT in-flight fetches, so a save `POST` could resolve *after* the
+  drain quiesced (the DOM looks "stable" while waiting) and its success re-render — a
+  modal close, a redirect — was lost. A `__pendingFetches` counter now keeps the drain
+  pumping until requests settle.
+- **Network log → events.** Each live-app `fetch` is appended to `__netLog`; the shim
+  drains it to emit `page.on('response')` and back a real `waitForResponse`. Tests use
+  these to capture API payloads (payroll period, employments lists).
+- **Globals:** `KeyboardEvent` dispatch path, `navigator.clipboard` (in-memory
+  write/read), `structuredClone` (deep clone w/ Date/RegExp/Map/Set/cycles). Apps
+  probe `globalThis.structuredClone.prototype`; absent it threw.
+
+### Implemented (shim parity)
+
+- **getBy\* live-drive.** `getByRole/getByLabel/getByText` have no CSS selector, so
+  `fill`/`click`/`check` fell back to mutating the static HTML snapshot — never
+  reaching the running React app (empty form fields → failed saves). napi `get_by`
+  now returns the matched element's document-order `idx`; the shim dispatches into the
+  live isolate via `querySelectorAll('*')[idx]`.
+- **Deepest-descendant event dispatch.** A real click lands on the leaf under the
+  cursor and bubbles up; dispatching on the matched wrapper missed handlers bound to
+  inner nodes (a MUI `Select`'s inner `role="combobox"` opens on its own mousedown).
+  Events now fire on the deepest child; focus + form-submit logic stay on the control.
+- **preventDefault honoring.** A click reports `defaultPrevented`; the static-intent
+  fallback (anchor navigate / form POST) is skipped when the app handled it — an
+  `<a href="#">` whose React `onClick` toggles state no longer also navigates to `#`
+  and wipes the new state (the company-settings edit toggles).
+- **Web-first assertion retry.** `expect(locator|page)` re-evaluates (re-pumping the
+  live app between tries) until it passes or times out — a UI change that lands just
+  after an action (modal close, async row, redirect) is observed.
+- **`addInitScript` actually runs** (prepended as the first `<head>` script of the
+  live session) — `injectTestPartner`'s `window.__FLUX_DYNAMIC_PARTNERS__` etc.
+- **`waitFor` polls real state** (visible/hidden/attached), `evaluate` awaits a
+  returned Promise, `setInputFiles` (File objects in the isolate), `hover`,
+  `dispatchEvent` (+checkbox toggle), `test.skip(cond, reason)` overloads (killed 12
+  bogus skips), per-test fixture sharing (afterEach gets the live logged-in page),
+  live-session close on teardown (isolate leak), RegExp locator names, `boundingBox`
+  → null.
+
+### The remaining wall: RSC-flight hydration of deferred Suspense boundaries
+
+~7–8 failures (vacation, time-entry, parts of company-settings) all reduce to ONE
+thing: a deep client subtree never hydrates. On the payroll wizard, React hydrated
+**484 of 996** elements (stable — more pumping doesn't change it); the static
+"Add Manually" button has **no React fiber**, so it has no `onClick` and clicks are
+dead (native or synthetic), so the `dynamic()` modal it would open never mounts.
+
+**Bisected with repros (each run through the real render tier):**
+
+| Hypothesis | Verdict |
+| --- | --- |
+| Dynamic `<script>` inject → `onload` → promise → wire handler | **works** — `dynamically_injected_script_runs_and_fires_load` (committed) |
+| Real React 18 `Suspense` + `lazy()`, client render | works (ad-hoc diag, React 18 UMD) |
+| Real React 18 `hydrateRoot` of pre-rendered `Suspense`+`lazy` | works (ad-hoc diag) |
+
+So **React core hydration + code-splitting work in the engine.** The failure is
+specific to **Next App Router RSC**: the wizard page content is a Suspense boundary
+that suspended during SSR; client hydration of it is deferred until its **RSC flight
+chunk** (`self.__next_f` → `react-server-dom-webpack` reader) is consumed, and in the
+isolate that deferred boundary's flight never reaches React's reader. Click-triggered
+selective hydration can't rescue it either — it needs the same flight data.
+
+### Things we TRIED that did NOT fix it (don't repeat)
+
+- **More pumping / bigger budget.** Fiber count is stable at 484 regardless of extra
+  drains — hydration isn't merely incomplete-by-budget, that boundary is never
+  scheduled.
+- **Non-zero layout measurement.** Forced `getBoundingClientRect`/`offsetWidth`/
+  `clientWidth` to a real box (theory: libs gate render on measurement). No effect on
+  the un-hydrated subtree. **Reverted** (risk to the passing set).
+- **`structuredClone`.** Added it (was genuinely missing) — did not change hydration.
+- **The `TypeError: …reading 'prototype'` (×5).** Red herring. It's **caught** (never
+  reaches `window.onerror` nor the page `console.error`; the page's own override sees
+  nothing) — a PostHog native-prototype probe. Not in React's hydration path.
+- **Chunk-load / script-skip failures.** None: 251 chunks load with **0** failures,
+  **no** `script skipped (ESM…)` and **no** `script error` during the wizard load.
+- **DB flush + reseed.** Net wash for this (helped grant-leak/locale data pollution,
+  but a fresh DB lacked KB seed data and exposed a flux-apis platform-role seed gap →
+  KB `403`). NOT a turbo-surf issue. `migration:revert:all` is also blocked by an
+  irreversible app migration — don't rely on it for a clean rebuild.
+
+### Precise diagnosis (validated against real Chromium)
+
+With the env finally correct — **real Chromium on `next dev` PASSES the vacation
+spec** (prod CSP drops `http://localhost:*` from `connect-src`, so a real browser
+on a prod build can't reach flux-apis `:3001` → "Failed to load organizations" →
+empty entity-select; the shim isn't subject to CSP since it fetches via the host
+net layer, so it uses the **prod** build for classic chunks). So the wizard failure
+is **confirmed turbo-surf-specific**: same flow, real Chromium green, shim red.
+
+Walking the dead "Add Manually" button's ancestors in the shim's hydrated DOM:
+
+```
+BUTTON#vacation-time-add-manually-button : none
+DIV … (the whole page/wizard subtree)    : none
+MAIN                                      : FIBER
+DIV / DIV#payroll-admin-shell            : FIBER
+```
+
+React hydrates the **layout** (`payroll-admin-shell` → `MAIN`) but NOT the App
+Router **page-segment** inside `MAIN` — that boundary stays **dehydrated**, so its
+whole client subtree (incl. the button) has no fiber and no handlers.
+
+Ruled out (each tested): deps mismatch, prod-vs-dev CSP (that's the *real-browser*
+blocker, not the shim), failed/missing chunks (251 load, 0 fail), skipped ESM
+scripts (none), React core (Suspense+lazy+hydrate all work via React-18-UMD diags),
+the flight stream not closing (**328 ReadableStreams created, 328 closed**),
+`useSearchParams` (page uses `useParams`, which doesn't suspend), the `prototype`
+TypeError (caught PostHog probe, not in the hydration path), and "needs more pumping"
+(fiber count is stable at 484/997 across redraws + clicks + load/DOMContentLoaded
+events — React is waiting on a *signal*, not scheduler ticks).
+
+So: the page-segment dehydrated Suspense boundary's flight arrives + the stream
+closes, but the **flight-resolved → reconciler "retry the dehydrated boundary"
+link never fires** in the isolate, and selective-hydration-on-click doesn't rescue
+it (a synthetic click doesn't trigger React's continuous-event replay for the
+dehydrated boundary). That link lives inside Next's bundled
+`react-server-dom-webpack` + React reconciler.
+
+### Where to start next (RSC flight)
+
+The tractable next step is instrumenting how `self.__next_f` (the array Next replaces
+with a stream-feeding `.push`) is consumed by Next's bundled `react-server-dom-webpack`
+client reader in the isolate — specifically whether late `__next_f.push([1, …])`
+chunks (the deferred boundary's flight) reach the reader, and whether the flight
+`ReadableStream` is ever closed. That reader is bundled + minified inside the Next
+chunks, so it can't be unit-tested in isolation here; a focused diagnostic that taps
+`__next_f.push` and the flight stream controller is the way in. This is a render-engine
+project, not a shim gap.
+
+### Other non-turbo-surf blockers seen (env, not engine)
+
+- **KB write `403`** — KB uses `@RequireAnyLocalRole('FLUX_ADMIN')` resolved from a
+  *local* DB role mapping; after a postgres reset the PropelAuth user persists but the
+  local role row isn't recreated → 403. flux-apis seed gap.
+- **es-MX locale test** — the shim seeds `NEXT_LOCALE=en-US` (needed so English
+  text/role-name assertions match everywhere else); the one settings test wants the
+  es-MX default. Proper fix is per-user backend-pref locale, not a global cookie.
+- **Grant order-dependency** — delegated-write grants are shared server state; the
+  auth-guard grant tests pass in isolation but bounce in the full run. The
+  `afterEach` revoke (now driven correctly via fixture sharing) mitigates but doesn't
+  fully serialize it.
+- **Run serial.** `node --test` defaults to parallel → concurrent PropelAuth logins
+  trip rate-limiting; the real Playwright config is `workers: 1`. Use
+  `--test-concurrency=1` (set in payroll-app's `test:e2e:turbo:run`).
+
+## Hydration regression harness (standing rule)
+
+**Every headless-hydration issue we fix gets a permanent, committable repro here.**
+Don't rely on the live payroll app (it churns + needs the full env) — capture the
+mechanism in a self-contained fixture driven through the render tier.
+
+- **Render-tier fixtures:** `rust/crates/turbo-surf-render/tests/fixtures/*.html` —
+  self-contained pages (React/ReactDOM UMD **inlined**, no npm dep at test time),
+  loaded by a `#[tokio::test]` in `tests/render.rs` via `include_str!`, asserted by
+  opening a `PageSession` and checking the hydrated behaviour (e.g. a button's
+  `onClick` firing → `window.__clicked`).
+- **Generators:** `rust/crates/turbo-surf-render/tests/fixture-gen/*.mjs` regenerate
+  the fixtures from real React (run with the app's `node_modules` path). Committed so
+  the fixtures are reproducible, not magic blobs.
+- First guard: `react18_streaming_suspense_boundary_hydrates` (fixture
+  `react-streaming-hydration.html`, generator `gen-react-streaming.mjs`). Real React 18
+  streaming SSR: a `<Suspense>` that suspended on the server → streams its content late
+  with a `$RC` completion script that walks the `<!--$?-->…<!--/$-->` comment markers
+  and calls the boundary's `_reactRetry`. **It passes** — proving the generic
+  dehydrated-boundary hydration path (comment markers + `_reactRetry`) works in the
+  isolate, which is exactly why the Next App Router wizard failure is narrowed to the
+  **RSC-flight (`react-server-dom-webpack`)** variant, not generic React.
+- The RSC-flight variant can't be isolated cheaply: `react-server-dom-webpack/server`
+  requires the bundler-only `react-server` export condition, and the client's flight
+  references resolve through the real app's webpack runtime. Until that's stubbed, its
+  repro is the full-app shim e2e (the payroll wizard vacation specs).
+
+### Correction (flight capture): NOT a dehydrated Suspense boundary
+
+Captured the real wizard HTML + flight (`gen` via the shim). Key facts that
+**overturn the "dehydrated boundary" guess**:
+
+- The wizard HTML has **0** Suspense stream markers (`<!--$?-->`) and **0** `B:`
+  templates. So the page content is NOT a server-streamed/dehydrated boundary.
+- 11 `__next_f.push([1,…])` flight rows: client-ref tables (`I[id,[chunks],name]`)
+  + the App Router segment tree (row 8: `entity→admin→payroll→scheduled→
+  [payrollRunId]→__PAGE__`, each wrapped in `$L5` ClientSegmentRoot) + the full
+  element tree (row 9, ~324 KB, `$L{id}` client refs).
+- The **generic** React-18 streaming dehydrated-boundary path PASSES the harness
+  fixture (`react18_streaming_suspense_boundary_hydrates`).
+
+So the failure is: React hydrates the **layout** (`payroll-admin-shell`→`MAIN`),
+but the `__PAGE__` segment's **client tree built from the RSC flight doesn't
+reconcile onto the SSR page DOM** (the SSR rendered the button; the client tree
+resolves that segment to empty) → the page subtree gets no fibers. Most likely a
+`$L{id}` client ref for the page component whose **webpack chunk loads but its
+module factory doesn't register** in the isolate (so `__PAGE__` resolves empty),
+or an RSDW flight-row reconciliation gap. Confirmed in the isolate: 251 chunks load
+`200`, but module-registration of the specific page client ref isn't verified.
+
+**Next:** verify webpack module registration in the isolate — after load, check
+`__webpack_require__`/`self.webpackChunk_*` has the page component's module id (the
+`$L{id}` for `__PAGE__`); if the chunk pushed before the webpack runtime installed
+its array `.push` handler, the module never registers. (A `next dev`, non-minified
+build would name it directly, but the classic render tier skips ESM `import`/`export`
+scripts, so dev/turbopack chunks don't run — dev diagnostics need the ESM-script
+support tracked on `main`.)
+
+### Also ruled out: webpack module registration
+
+`self.webpackChunk_N_E.push !== Array.prototype.push` (the webpack runtime DID
+install its jsonp callback) and chunk entries carry registered modules
+(`[[8441],{…}]`, mods≥1). So client-component modules register fine — consistent
+with the layout hydrating. Not a chunk/registration bug.
+
+**Convergence:** with dehydrated-boundary, flight-close, webpack-registration,
+generic-React, and env/CSP all ruled out, this re-confirms the §3 finding — the
+`__PAGE__` segment's client render RUNS (component markers fire) but the atomic
+React commit for the **flux-payroll-ui `DataTable` grid subtree** is empty (no
+thrown error surfaced; `matchMedia` stub is complete so `useMediaQuery` isn't it).
+It's a render/commit-phase failure in that design-system grid.
+
+**The real unblock is tooling:** a `next dev` (non-minified) build would name the
+failing internal + give stack frames, but the classic render tier skips ESM
+`import`/`export` scripts, so turbopack/dev chunks don't execute. Landing ESM-script
+support in the render tier (tracked on `main`) → run the dev build → named frame at
+the empty commit → fix. That's the next lever, not more black-box probing of the
+prod bundle.
+
+## ESM support landed (foundation) + dev-build status
+
+The render tier now runs ES modules (commit `feat(render): ES module support`):
+- `NetModuleLoader` resolves + fetches `import` graphs over the host net (shared
+  cookie jar, same-origin), wired into `make_runtime`.
+- The hydration pump drains `<script type="module">` (and inline import/export
+  scripts) via `load_side_es_module[_from_code]` + `mod_evaluate`; `__execScriptEl`
+  leaves them for the module pump.
+- Tests: `esm_inline_module_script_evaluates`, `esm_module_import_graph_loads_over_net`.
+
+**Running the actual Next dev build for named diagnostics — still blocked, separately:**
+- `next dev --turbopack` serves classic `<script src>` chunks whose CONTENT has
+  top-level `import`/`export` → `__execScriptEl` skips them (they're not
+  `type=module`, so the module pump doesn't claim them either). Routing src chunks
+  with import/export to the module pump is the next step.
+- `next dev` (webpack, no turbopack) serves classic `webpackChunk.push` chunks (run
+  fine), but: the Next **dev-tools inject CSS inside a `<script>`** (`.nextjs-data-
+  copy-button{…}`) which evals as JS → `SyntaxError: Unexpected token '.'` (caught,
+  noisy; skip CSS-bodied scripts), and the dev page still hydrates 0 fibers (≈35
+  nodes) — dev SSR + chunk-execution quirks beyond the ESM foundation.
+
+So the ESM foundation is in, but "boot the dev build headlessly for a named frame
+at the empty commit" needs: (1) route src ESM chunks to the module pump, (2) skip
+CSS-bodied `<script>`s, (3) get the dev app to actually execute its chunks. That's
+the continuation.
+
+## Turbopack dev: entry runs, flight delivers — RSC client-ref resolution is the wall
+
+Status after the currentScript + `__name` fixes (commit "make turbopack dev entry
+execution work"): on `next dev --turbopack`, the App Router boot now gets FAR:
+
+What works (verified through the shim against the live payroll app):
+- All ~36 turbopack chunks register (incl. the ESM vendor chunk, now keyed by its real
+  src via the module-pump `document.currentScript` fix).
+- The runtime entry instantiates: `window.next` = `{version, appDir, turbopack, router}`,
+  `__REACT_DEVTOOLS_GLOBAL_HOOK__` present, app-bootstrap + app-index run, `hydrate()` is
+  reached (`self.__next_s` is undefined → `loadScriptsInSequence` calls hydrate directly).
+- `ReactDOMClient.hydrateRoot(document, …)` is reached with NO throw and NO unhandled
+  rejection (drain_event_loop's swallow path stays silent).
+- The RSC flight stream fully DELIVERS: instrumenting the env ReadableStream showed 45
+  streams created, 79 chunks enqueued, **45 closed, 0 errored** — the flight payload and
+  all chunk bodies stream + close cleanly. `nextServerDataCallback` is installed as
+  `__next_f.push`; rows are buffered then flushed to the controller registered in the
+  stream's (synchronous) `start`.
+
+What DOESN'T work — the remaining wall:
+- Nothing COMMITS to the DOM. After render: 0 `[data-testid]` elements, 0 React fibers,
+  no `__reactContainer$`-style marker enumerable on `document` (note: expandos DO persist
+  on document/html/body — see `expando_properties_persist_on_document_and_root_nodes` —
+  and a plain `hydrateRoot(document, <App/>)` DOES commit + stay interactive — see
+  `react_document_root_hydrates_and_commits`; so the binding is fine).
+- So the React root SUSPENDS and never commits. `document.body.textContent` is dominated
+  by the flight `<script>` rows (the 400KB+ is flight payload text, not rendered DOM);
+  "wizard text" matches were false positives from the flight strings.
+- The flight ROOT model immediately references client components (`8c:["$","$L1f",…]`
+  where `1f:I["…/next/dist/client/…"]` is a client-import reference — providers/layout).
+  The suspension is in **client-reference resolution**: the bundled
+  `react-server-dom-turbopack` client resolving `I[moduleId, [chunks], name]` rows into
+  real modules. Because the refs are at the top of the tree, the whole root suspends →
+  zero commit.
+- This is NOT wizard-specific: settings + off-cycle authed pages fail identically (10s+
+  `getByTestId(...) not visible` timeouts). Only the unauth landing (smoke, no hydration)
+  passes. So authed interactive hydration is broadly blocked on turbopack dev by this one
+  thing.
+
+Next focused step: make the flight client's `preloadModule`/`requireModule` resolve
+client refs in the headless turbopack runtime. The chunks ARE preloaded + registered, so
+`__turbopack_context__.r(id)` should resolve and `loadChunk(url)` should hit an
+already-resolved resolver — instrument the bundled flight client's resolve path
+(`createFromReadableStream` lives in the next-client chunk; refs go through the turbopack
+context, not free `__turbopack_require__` globals) to find which call parks forever.
+
+## SOLVED: App Router hydrates headless on turbopack dev (`document.location`)
+
+The RSC-flight wall (above) was ONE missing global: **`document.location`**. The env
+defined `window.location` but not `document.location` (a browser invariant —
+`document.location === window.location`). Next's DEV RSC flight client replays server
+console entries; `resolveConsoleEntry → buildFakeCallStack → findSourceMapURL` reads
+`document.location.origin`, which threw `Cannot read properties of undefined (reading
+'origin')` INSIDE `processFullStringRow`. That abort killed the entire flight stream
+parse — so the React root suspended forever, silently (the throw became a rejected flight
+chunk; no console error).
+
+The hunt that pinned it (all reproducible via the diag specs): flight stream fully
+delivers (48 reads, all rows) → 17 client refs all resolve (`resolveModuleChunk` ×17, 0
+errors) → but only 6 components render → dumping `response._chunks` showed **2 rejected**
+chunks → their `reason.stack` pointed at `findSourceMapURL` reading `.origin`.
+
+Fix: one line — `def("location", () => globalThis.location)` (runtime.rs). Impact on the
+live payroll wizard route through the shim: **0 → 488 React fibers / 1993 elements**; the
+shell, nav, sidebar hydrate; login works; all `:3001` data fetches fire (`/auth/me`,
+`/payroll-runs/:id/roster`, `/leave-balances`, `/employments`, …) and the wizard renders
+("Step 1: Employees & Leave"). Guarded by `document_location_mirrors_window_location`.
+
+### Remaining (NOT hydration — interaction/seed long-tail)
+With hydration fixed, suites that were 0/N on the flight wall now partially pass
+(off-cycle 1/2, company-settings 4/14, …). The remaining wizard failures are:
+- `waitFor(state=hidden/visible) timed out` on modal open/close after a submit click
+  (e.g. add-to-payroll modal not detected closing) — likely a MUI Dialog transition /
+  visibility-detection refinement in the shim. Highest leverage (modals are everywhere).
+- `403 Missing required permissions` (e.g. `deduction:read`, `/expenses`) — the e2e seed
+  admin lacks some grants (seed/permission issue, not the engine).
+These are per-interaction, not the structural hydration blocker — that is solved.
+
+## Interaction tier: click fixed for non-portal; PORTAL onClick is the open blocker
+
+After hydration was solved, the e2e failures moved to interactions. Two findings:
+
+1. **Click made browser-accurate** (shim `index.mjs`): fire pointerdown→mousedown→focus→
+   pointerup→mouseup→click, pointer events FIRST (MUI v7/Radix gate on them), and focus
+   the target only when mousedown wasn't preventDefault'd (MUI Select/Autocomplete
+   listboxes preventDefault mousedown to keep input focus; we were focusing the option
+   <li tabindex=-1>, blurring the input, and clearOnBlur discarded the selection).
+   Result: company-settings 4/14 → 7/7.
+
+2. **Portal onClick does NOT dispatch** (OPEN — ignored repro `portal_element_onclick_
+   dispatches`). A click on a React `createPortal`'d element under `hydrateRoot(document)`
+   never fires its onClick. Diagnosis: React attaches delegated listeners per container in
+   `completeWork` (HostPortal → `listenToAllSupportedEvents(containerInfo)`), marking each
+   container with `_reactListening<rand>`. In this env the MUI portal container divs end
+   up WITHOUT that marker (the autocomplete options' chain: li[option]→…→div→div→BODY; the
+   intermediate divs have no marker; only `body` does). React's root-container (document)
+   listener by design SKIPS portal targets (the `isMatchingRootContainer` walk returns
+   early, expecting the portal container's own listener to handle it). With no effective
+   listener on the option's portal path, the synthetic onClick is never dispatched —
+   confirmed in the live app (MUI `handleOptionClick` never runs; `event.currentTarget`
+   index never read) and in the minimal repro fixture. Keyboard selection (ArrowDown+
+   Enter) DOES work (it goes through the input, which is dispatched normally), proving the
+   gap is portal click-dispatch specifically. This blocks autocomplete/dialog-heavy suites
+   (payroll wizard). Next: get React's per-portal-container listeners to attach + fire in
+   the headless env (or have the root listener dispatch to portal targets).
+
+## Interaction + parity tier: SOLVED (2026-06, clean-staging side-by-side)
+
+With hydration solved (above), the work moved to making authed journeys drive + assert the
+SAME as real Chrome. Run against **clean staging** (payroll-app + flux-apis both at
+`origin/staging`, the flux-apis backend clean): **login works, payroll-wizard 5/5, invites
+26/26, auth-guards 32/38, smoke 1/1**. The fixes below are each TDD-guarded (render-crate test
+and/or shim `surface.test.mjs`) and committed on `fix-login-rsc-nav`.
+
+### Engine/shim fixes that greened real suites
+- **Portal/getBy live resolution** (`runtime.rs __tcGetBy`): getByRole/getByText/getByLabel
+  resolve in the LIVE isolate, returning each match's live `querySelectorAll('*')` index, so
+  the shim dispatches on the SAME node it matched. Fixed the portal onClick blocker (MUI
+  Autocomplete option selection commits). The earlier snapshot-index approach reordered
+  portal'd nodes → wrong target.
+- **Click = browser-accurate** (`index.mjs`): pointerdown→mousedown→focus(only if mousedown
+  not preventDefault'd + focusable)→pointerup→mouseup→click.
+- **Modal close after mutation**: virtual-timer budget made RELATIVE per drain
+  (`__resetTimerBudget`) — an absolute budget killed late short timers (a closing MUI Fade's
+  ~195ms exit), so `waitFor(state:'hidden')` hung. Plus `is_visible` treats effective
+  `opacity:0` (and `display:none`/`visibility:hidden` ancestors) as hidden, so a faded-out
+  modal reads hidden. `next/dynamic` lazy modals: `drain_to_quiescence` now runs runtime-
+  injected `<script>`s (kicks `__hydrate` each round).
+- **waitForResponse staleness** (`index.mjs`): it returned ANY buffered response, so a loose
+  predicate (`url.includes('/leave-requests/bulk-upload')`) grabbed the prior step's template
+  GET instead of this step's POST. Now tags each drained response with an action sequence
+  (`_actionSeq`, bumped per interaction) and only accepts one from the current action or later
+  — matching Playwright's "responses after the call" semantics. Greened the vacation bulk
+  upload (→ payroll-wizard 5/5).
+- **Download capture + ElementHandle + polling waitForFunction**: a real `URL.createObjectURL`
+  registry + capture-phase click listener record `<a download>` clicks over blob URLs into
+  `__downloads`; `page.waitForEvent('download')` → a Download with `path()/saveAs()/
+  suggestedFilename()`. `Locator.elementHandle()` + a polling `page.waitForFunction(fn, handle)`
+  that resolves the handle to the live element. Backs CSV-template download → fill → upload.
+- **CSS `:hover` reveal** (`runtime.rs __tcApplyHover` + shim hover): turbo-dom's cascade has
+  no pointer state, so a menu shown only by `.trigger:hover .menu{visibility:visible}` (incl.
+  emotion's nested `&:hover .menu`) stayed hidden and `waitFor(visible)` hung. We mark the
+  hovered chain with `[data-tc-hover]`, FLATTEN stylesheet + `<style>` rules resolving nested
+  `&`, rewrite `:hover`→`[data-tc-hover]`, and apply the matched rules' decls INLINE (survives
+  serialize → both getComputedStyle and rtdom's cascade see the reveal). Real case: the app's
+  UserMenu (overridden to open on hover) — logout lives in a `&:hover .user-menu` dropdown.
+- **Locator scoping** (`index.mjs` + `napi get_by` + `runtime.rs __tcGetBy/__tcResolveScoped`):
+  `card.getByTestId('x')` and `card.getByRole(...)` delegated to the page and matched the whole
+  document. Now scope to the parent's subtree (descendant matching). And `steps.nth(i).getBy*`
+  carries an nth-aware scope CHAIN of `{sel, idx}` resolved by `__tcResolveScoped` (walk picking
+  idx per level, then match the leaf) — a CSS-concat selector can't express "the i-th match's
+  subtree". Greened the payroll-approval-chain (2 steps configured independently) + the UserMenu
+  logout (desktop vs mobile twin).
+- **`is_visible` ignores aria-hidden** (`visible.rs`): Playwright's `isVisible()` is purely
+  CSS/layout — a decorative MUI SVG icon carrying a test-id (icons are aria-hidden) is still
+  visible. aria-hidden stays handled in `ax.rs` for role/name queries. → auth-logout green.
+- **Locale parity** (`index.mjs`): the shim no longer force-seeds `NEXT_LOCALE=en-US`; with no
+  cookie next-intl resolves the app default (es-MX), matching real Playwright (which sets none).
+
+### Method: resolve engine-vs-not by side-by-side (Playwright vs turbo-surf)
+Run each failing suite in BOTH real Chromium (Playwright, reusing the running dev servers) and
+turbo-surf, one suite at a time. **Playwright PASS + turbo-surf FAIL = engine bug** (fix it).
+**Both FAIL = not engine** (app/backend/data/test). Note: Playwright's `globalTeardown` deletes
+the seed entity, so RE-SEED for turbo-surf after a Playwright run; the turbo-surf runner now has
+a matching `globalTeardown` lifecycle for the same per-run isolation.
+
+### Confirmed NOT-engine (tickets filed) — fail in real Chrome too / data-only
+- **Knowledge-base 403s** (FLUX-1332): backend `@RequireAnyLocalRole(FLUX_*)` checks the
+  entity-context-FILTERED roles; a flux-admin with an auto-selected entity has FLUX_* stripped
+  from `roles` (the PLATFORM flags stay true) → 403. Backend should use `isFluxPlatformActor`.
+- **Pay/work-schedule create** (FLUX-1335): the app's `assign()` omits the backend-required
+  `effectiveFrom` → 400 → success banner never shows.
+- **settings language** (FLUX-1336): the engine renders es-MX on fresh data; the failure is the
+  data-seed leaking the `Person` + `language_preference` on user-delete, so a reused user keeps
+  a stale en-US. Not a product/engine defect.
+- **off-cycle**: `SKIP_ON_REMOTE` tests (CI skips via `E2E_USE_REMOTE_TARGETS=1`).
+- **auth-guards delegated-write**: passes 7/7 on a fresh seed; matrix reds were stale grants
+  from cross/intra-run pollution (data, not engine).
+
+Net: the engine is solid for authed journeys; remaining e2e reds are app PRs / backend / test
+data isolation, not the render or shim. Open engine-suspect still to side-by-side cleanly:
+**payroll-config** (turbo-surf hangs ~30s on an `about://blank` fetch; Playwright flaked at
+login so the feature step wasn't compared).
+
+### Update — additional shim fixes + ticket resolution
+
+More shim/parity fixes landed after the side-by-side (all in `surface.test.mjs`):
+- **`about:blank` navigation** → a no-fetch blank document (was a `builder error for url
+  (about:blank)` when a goto/reload hit the net layer; a login helper reloading a blank page
+  before navigating then threw).
+- **`waitForFunction`** returns the function's VALUE (not a boolean) and works on a static
+  snapshot — regression from the polling-handle rewrite.
+- **`test.extend` custom fixtures inject** — a test fn with its own extDefs opens its own
+  fixture set instead of reusing the base-only shared `_current` (custom fixtures / a `page`
+  override resolved to `undefined`).
+- **Test isolation:** an env-mapping test restored `TURBO_SHIM_*` with `= undefined` (coerces
+  to the STRING `"undefined"`), leaking `testIdAttribute`/`baseURL` into every later context →
+  cascaded failures across the serial run. Fixed with `delete`. Surface suite now 51/52 green
+  (1 intentional skip). KEY LESSON: a "fails only late in the full run, passes in isolation"
+  cascade was test-isolation env leakage, NOT an engine/isolate leak — reproduce in the real
+  multi-test run (the shim is robust to 60+ unclosed hydrated sessions in a raw loop).
+
+Ticket resolution (the confirmed not-engine reds — all merged to staging):
+- FLUX-1332 (KB platform-role RBAC) → payroll-app#254 (honor FLUX_* platform flags in role
+  guards when an entity is selected).
+- FLUX-1335 (pay/work-schedule assign missing `effectiveFrom`) → payroll-app#209.
+- FLUX-1336 (data-seed leaks Person + language_preference on user delete) → flux-apis#255.
+- FLUX-1337 (robust e2e PropelAuth cleanup: bulk + per-run + stale-local-run) → in progress.
+
+payroll-config: resolved as NOT engine — its `openConfig` calls `login()` without first
+navigating to the login page, so it fails at login in BOTH Playwright and turbo-surf (a spec
+issue); the `about:blank` console error during it is benign (the pending-fetch counter settles
+in a finally) and is now a no-fetch blank doc anyway.
+
+## Full re-triage on clean staging (2026-06-23, Cycle 21)
+
+Re-ran the whole suite through the shim against **clean staging** (payroll-app-tc +
+flux-apis-staging both at `origin/staging`, the merged FLUX-1332/1335/1336/1337 fixes in):
+**73 / 102 pass, 0 skip.** Triaged every red with the side-by-side method (each failing spec
+run BOTH through real Chromium and turbo-surf, with a fresh seed+teardown per run so data can't
+collide). Verdicts:
+
+| Suite | Verdict | Cause |
+| --- | --- | --- |
+| auth-guards delegated-write | pollution-only | green 7/7 in isolation; full-run reds were cross-suite grant pollution |
+| knowledge-base | NOT engine (locale) | app defaults es-MX, suite asserts English (`getByLabel('Title')`=Título); #255 removed the seed-leaked en-US that masked it |
+| company-settings/pay-schedule | **ENGINE** | filter scope dropped (below) |
+| off-cycle/termination | **ENGINE** | RSC soft-nav query dropped (below) |
+| settings/account | **ENGINE** (fixed) | `page.reload()` didn't re-hydrate (below) |
+| company-settings/tax-registrations | NOT engine | `waitForResponse('/tax-registrations')` never matches real `/entity-tax-registrations` → FLUX-1341 / payroll-app#212 |
+| payroll-configuration | NOT engine | `openConfig`→`login()` never navigates to `/login` → FLUX-1342 / payroll-app#213 |
+| payroll-wizard/vacation | NOT engine (backend) | `/leave-requests/bulk-upload` 400 "Failed to parse CSV" — `csv-parse` strict mode rejects benign shapes (stripped trailing col, BOM) → FLUX-1340 / flux-apis#260 |
+
+### Engine fixes (commit `fix(render+shim): two engine bugs found via payroll e2e side-by-side`)
+
+1. **RSC soft-nav dropped the query string.** `__rscNav` recorded only `u.pathname`, so
+   `router.push('/off-cycle/new/termination?employeeIds=42')` lost `?employeeIds=` and the
+   termination spec's `waitForURL(/…\/termination\?employeeIds=/)` never matched. Now records
+   `pathname + search + hash`, stripping Next's internal `_rsc` cache-buster (a hard reload
+   carrying `_rsc` returns a flight payload, not HTML). Guard:
+   `rsc_soft_nav_preserves_query_and_strips_rsc_param`. **e2e 2/2.**
+2. **`Locator.filter()` dropped the scope for child locators.** `.filter({hasNotText})` drops
+   `_selector` (a filtered set isn't one CSS selector), so
+   `cards.filter({hasNotText:x}).first().getByTestId('y')` resolved the child against the
+   UNFILTERED set → the pay-schedule delete-409 guard clicked the wrong card's edit-toggle and
+   the delete never revealed. Now a serializable filter spec (`hasText`/`hasNotText`) rides the
+   scope chain (`_scopeSel` survives filter); `__tcResolveScoped` applies it before indexing.
+   Guard: `scoped_resolve_applies_filter_before_indexing`. **e2e 2/2.**
+
+Both validated against the real app (rebuilt napi addon, merged the three not-engine PRs
+locally, reran). Render suite 56/56; shim surface no new regressions.
+
+### Engine fix 3 — settings `page.reload()` didn't re-hydrate (commit `fix(shim): reload(networkidle) re-hydrates`)
+The language-survives-reload step did `page.reload({waitUntil:'networkidle'})` then read the
+language select — which read `""`. Traced (url probes through the live session): before the
+reload `page.url()` was correct (`…/settings/personal-profile`), but **after** the reload the
+isolate's `location.href` was `about://blank`, cookies empty, the select absent. Root cause:
+the shim's `reload()` **ignored its `opts`** — unlike `goto`, a `networkidle` reload never
+re-opened a live session, so the reloaded doc stayed the raw un-hydrated shell (empty select →
+`""`). Fix: `reload(opts)` mirrors `goto` — `_navigate(this._url)` then, on
+`waitUntil:'networkidle'`, `_openLiveSession()` (re-hydrate). The whole settings journey
+(language → name → address → email) now passes **2/2**. Guard: surface test
+"Page.reload({waitUntil:'networkidle'}) re-hydrates the live SPA".
+
+### Still open (next layer — the original failures masked these)
+- **tax-registrations (residual):** with the predicate fixed the save now succeeds, but the
+  confirm dialog's `waitFor(state:'hidden')` times out — a MUI Dialog close not detected after
+  the mutation (engine modal-hide family) OR an app gate; needs a PW recheck with the fix.
+- **vacation (residual):** with the CSV parse fixed the upload now reaches date validation and
+  fails `Invalid date format for Start Date. Expected YYYY-MM-DD` — a next-layer test/backend
+  date issue, not the parser.
+
+Tickets this round: FLUX-1340 (leave CSV parse → flux-apis#260), FLUX-1341 (tax-reg predicate →
+payroll-app#212), FLUX-1342 (payroll-config login nav → payroll-app#213); FLUX-1338/1339 are
+unrelated product features filed the same day.

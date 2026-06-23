@@ -35,6 +35,15 @@ function site() {
       res.writeHead(200, { "content-type": "text/html" });
       return res.end(`<title>results</title><p>q=${url.searchParams.get("q")}</p>`);
     }
+    if (url.pathname === "/spa") {
+      // Client-rendered: #root is EMPTY in the shipped shell and only filled once the
+      // page's own JS runs (a live session). Distinguishes a re-hydrated reload from a
+      // raw shell re-fetch.
+      res.writeHead(200, { "content-type": "text/html" });
+      return res.end(
+        `<title>spa</title><div id="root"></div><script>document.getElementById('root').textContent='HYDRATED';</script>`,
+      );
+    }
     res.writeHead(200, { "content-type": "text/html" });
     res.end(`<title>${url.pathname}</title><main><h1>Page ${url.pathname}</h1></main>`);
   });
@@ -300,6 +309,21 @@ test("Page navigation: goto / reload / goBack / goForward", async () => {
   server.close();
 });
 
+test("Page.reload({waitUntil:'networkidle'}) re-hydrates the live SPA", async () => {
+  // The settings language-survives-reload spec did `page.reload({waitUntil:'networkidle'})`
+  // and read a client-rendered select; reload IGNORED the option and never re-opened a live
+  // session, so the reloaded doc stayed the raw shell (empty select → value ""). A networkidle
+  // reload must re-hydrate, like a networkidle goto.
+  const server = site();
+  const base = await listen(server);
+  const p = newPage();
+  await p.goto(`${base}/spa`, { waitUntil: "networkidle" });
+  assert.equal(await p.locator("#root").textContent(), "HYDRATED");
+  await p.reload({ waitUntil: "networkidle" });
+  assert.equal(await p.locator("#root").textContent(), "HYDRATED");
+  server.close();
+});
+
 test("Page baseURL: relative goto resolves against context baseURL", async () => {
   const server = site();
   const base = await listen(server);
@@ -539,8 +563,11 @@ test("BrowserContext reads baseURL/testIdAttribute from env (config use{} mappin
     assert.equal(ctx2._baseURL, "http://opt");
     assert.equal(ctx2._testIdAttribute, "data-x");
   } finally {
-    process.env.TURBO_SHIM_BASE_URL = undefined;
-    process.env.TURBO_SHIM_TESTID_ATTR = undefined;
+    // DELETE (not `= undefined`) — assigning undefined coerces to the STRING "undefined",
+    // which then leaks: later `new BrowserContext()` reads testIdAttribute="undefined" (breaks
+    // getByTestId) and baseURL="undefined" (makes `new URL(url,"undefined")` throw in goto).
+    delete process.env.TURBO_SHIM_BASE_URL;
+    delete process.env.TURBO_SHIM_TESTID_ATTR;
   }
 });
 
@@ -612,13 +639,89 @@ test("honest throws: pixel / input / network-interception", async () => {
   await assert.rejects(() => p.screenshot(), /unavailable/);
   await assert.rejects(() => p.pdf(), /unavailable/);
   await assert.rejects(() => p.locator("#go").screenshot(), /unavailable/);
-  await assert.rejects(() => p.locator("#go").boundingBox(), /unavailable/);
-  await assert.rejects(() => p.locator("#go").hover(), /input/);
+  // boundingBox returns null (no layout engine → unmeasurable), matching Playwright's null for
+  // a non-laid-out element — not a throw. hover()/keyboard.press are now real features. The rest
+  // (screenshot/pdf/dragTo/selectText/mouse/touchscreen/route/exposeFunction) stay honest throws.
+  assert.equal(await p.locator("#go").boundingBox(), null);
   await assert.rejects(() => p.locator("#go").dragTo(p.locator("h1")), /input/);
   await assert.rejects(() => p.locator("#name").selectText(), /input/);
   await assert.rejects(() => p.mouse.click(0, 0), /input/);
-  await assert.rejects(() => p.keyboard.press("a"), /input/);
+  // keyboard.press is implemented (key-event dispatch via the live session) — not a throw.
   await assert.rejects(() => p.touchscreen.tap(0, 0), /input/);
   await assert.rejects(() => p.route("**"), /interception/);
   await assert.rejects(() => p.exposeFunction("f", () => {}), /binding/);
+});
+
+// --- waitForResponse staleness (Playwright semantics) ---------------------
+// The live engine drains network in batches into a buffer. waitForResponse must NOT
+// return a response that drained in an EARLIER interaction — only one produced by the
+// current action (or later). Regression guard for the bulk-upload bug: a loose predicate
+// like url.includes('/bulk-upload') would otherwise grab the prior step's template GET
+// (.../bulk-upload/template) instead of waiting for this step's POST (.../bulk-upload).
+test("waitForResponse ignores a response that drained in an earlier step", async () => {
+  const p = newPage();
+  const mk = (url, status, seq) => ({ url: () => url, status: () => status, _seq: seq });
+  // Step 1 (action seq 1) drained the template GET. Step 2 is now current (seq 2).
+  p._recentResponses = [mk("https://x/leave-requests/bulk-upload/template", 200, 1)];
+  p._actionSeq = 2;
+  const matcher = (r) => r.url().includes("/leave-requests/bulk-upload");
+  // The stale template GET must be skipped; the fresh POST (seq 2) arrives via emit.
+  const fresh = mk("https://x/leave-requests/bulk-upload", 201, 2);
+  const pending = p.waitForResponse(matcher, { timeout: 2000 });
+  p._recentResponses.push(fresh);
+  p._emit("response", fresh);
+  const got = await pending;
+  assert.equal(got.status(), 201, "should resolve to the fresh POST, not the stale GET");
+});
+
+test("waitForResponse returns a buffered response from the current action", async () => {
+  const p = newPage();
+  const mk = (url, status, seq) => ({ url: () => url, status: () => status, _seq: seq });
+  p._actionSeq = 3;
+  p._recentResponses = [mk("https://x/api/details", 200, 3)]; // drained THIS action, pre-call
+  const got = await p.waitForResponse((r) => r.url().includes("/api/details"), { timeout: 1000 });
+  assert.equal(got.status(), 200);
+});
+
+// Locator.getByTestId must scope to the parent locator's subtree (like .locator()), not the
+// whole document — e.g. a UserMenu wrapper that also has a same-test-id twin in a mobile menu.
+// Regression guard: it used to delegate to page.getByTestId and return BOTH.
+test("Locator.getByTestId scopes to the parent locator subtree", async () => {
+  const p = newPage();
+  await p.setContent(
+    "<div data-testid='wrap'><button data-testid='go'>in</button></div>" +
+      "<button data-testid='go'>out</button>",
+  );
+  assert.equal(await p.getByTestId("go").count(), 2, "unscoped sees both");
+  const scoped = p.getByTestId("wrap").getByTestId("go");
+  assert.equal(await scoped.count(), 1, "scoped sees only the descendant");
+  assert.equal(await scoped.textContent(), "in", "scoped resolves the in-subtree match");
+});
+
+// Locator.getByRole/getByText/getByLabel scope to the parent locator's subtree (descendant
+// matching), not the whole document — e.g. `step.getByTestId('x').getByRole('combobox')`.
+test("Locator.getByRole scopes to the parent locator subtree", async () => {
+  const p = newPage();
+  await p.setContent("<div data-testid='a'><button>in</button></div><button>out</button>");
+  assert.equal(await p.getByRole("button").count(), 2, "unscoped sees both buttons");
+  const scoped = p.getByTestId("a").getByRole("button");
+  assert.equal(await scoped.count(), 1, "scoped sees only the in-subtree button");
+  assert.equal(await scoped.textContent(), "in", "scoped resolves the descendant");
+});
+
+// about:blank (and other about: URLs) are not network resources — a browser shows an empty
+// document with no request. The shim used to `fetchWithCookies('about:blank')`, which hit the
+// net layer and errored ("builder error for url (about://blank)"); a reload of a blank page
+// (e.g. login helper's waitForLoginForm reload before any navigation) then threw/hung. goto +
+// reload of about:blank must yield a clean empty document with no fetch.
+test("goto('about:blank') yields a blank document with no network fetch", async () => {
+  const p = newPage();
+  const resp = await p.goto("about:blank");
+  assert.equal(p.url(), "about:blank");
+  assert.equal(resp.status(), 200);
+  const html = await p.content();
+  assert.match(html, /<body>\s*<\/body>/, "blank body, no error markup");
+  // reload of the blank page must also be a no-fetch no-op (the failing real-world path)
+  await p.reload();
+  assert.equal(p.url(), "about:blank");
 });

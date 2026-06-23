@@ -224,6 +224,88 @@ async fn live_session_dispatches_events_into_running_app() {
     session.close();
 }
 
+// RSC soft-nav must preserve the target's QUERY STRING. Next App Router client
+// navigation (`router.push('/x?employeeIds=42')`) fetches the target's RSC flight with
+// an `RSC` header; we record the target on `__rscNav` and the live-session driver hard-
+// reloads it. Recording only `u.pathname` dropped the query, so the off-cycle termination
+// flow (which passes the selected employee as `?employeeIds=`) landed on the bare route and
+// `waitForURL(/…\/termination\?employeeIds=/)` never matched. The recorded target must keep
+// the app query but STRIP Next's internal `_rsc` cache-buster (a hard reload carrying `_rsc`
+// returns a flight payload, not HTML).
+#[tokio::test]
+async fn rsc_soft_nav_preserves_query_and_strips_rsc_param() {
+    let html = r#"<body><div id="app">people</div></body>"#;
+    let mut session = PageSession::open(
+        html,
+        "https://example.test/entity/x/admin/people/active",
+        "",
+        "",
+        DEFAULT_RENDER_BUDGET_MS,
+    )
+    .await
+    .expect("session opens");
+
+    let nav = session
+        .eval(
+            r#"globalThis.__rscNav = '';
+        globalThis.fetch('/entity/x/admin/payroll/off-cycle/new/termination?employeeIds=42&_rsc=abc123',
+            { headers: { RSC: '1' } }).catch(() => {});
+        globalThis.__RESULT = globalThis.__rscNav || '';"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        nav, "/entity/x/admin/payroll/off-cycle/new/termination?employeeIds=42",
+        "__rscNav must preserve the app query string (employeeIds) and drop Next's _rsc param"
+    );
+
+    session.close();
+}
+
+// __tcResolveScoped must apply a Locator.filter({hasNotText}) BEFORE indexing, so
+// `cards.filter({hasNotText: x}).first().getByTestId('y')` scopes the child to the SAME
+// element the static read path picks. The pay-schedule delete-409 guard does exactly this
+// (target a SEEDED card by filtering OUT the just-created one); without filter-in-scope the
+// child resolved against the unfiltered set → the toggle click landed on the wrong card and
+// its delete button never revealed.
+#[tokio::test]
+async fn scoped_resolve_applies_filter_before_indexing() {
+    let html = r#"<body>
+      <div class="card"><span>alpha cycle</span><button data-test-id="del">x</button></div>
+      <div class="card"><span>beta seeded</span><button data-test-id="del">x</button></div>
+    </body>"#;
+    let mut session = PageSession::open(
+        html,
+        "https://example.test/",
+        "",
+        "",
+        DEFAULT_RENDER_BUDGET_MS,
+    )
+    .await
+    .expect("session opens");
+
+    // Scope: `.card` filtered to NOT contain "alpha cycle", first → the beta card; leaf = its
+    // del button. The resolved element's parent card text must be the BETA card's.
+    let card_text = session
+        .eval(
+            r#"globalThis.__tcResolveScoped(
+            [{ sel: '.card', idx: 0, filter: { hasNotText: 'alpha cycle' } }],
+            { selector: '[data-test-id="del"]' });
+        const arr = JSON.parse(globalThis.__RESULT);
+        const all = document.querySelectorAll('*');
+        const el = arr.length ? all[arr[0].idx] : null;
+        globalThis.__RESULT = el ? el.parentNode.textContent : 'NONE';"#,
+        )
+        .await
+        .unwrap();
+    assert!(
+        card_text.contains("beta seeded") && !card_text.contains("alpha"),
+        "filtered scope must resolve the del button inside the BETA card, got: {card_text}"
+    );
+
+    session.close();
+}
+
 // Mirrors the payroll /login hydration crash: the page's client JS (Next.js +
 // the PropelAuth SDK) uses WHATWG `URL` / `URLSearchParams` while building the
 // login form. deno_core doesn't ship those globals, so hydration died with
@@ -1027,7 +1109,586 @@ fn iframe_content_window_exposes_builtins() {
     );
 }
 
+// Repro of the payroll wizard's partial hydration: a code-split bundle attaches its
+// interactivity from a DYNAMICALLY injected <script> (webpack's
+// `__webpack_require__.e`: appendChild a <script>, await its `onload`, then the chunk
+// runs and wires handlers). If the render tier doesn't run a runtime-injected script
+// AND fire its `load` so the awaiting promise resolves, the dependent code never runs
+// and the element stays "un-hydrated" (no click handler) — exactly the dead
+// "Add Manually" button. This must pass for the dynamic-import hydration path to work.
+#[tokio::test]
+async fn dynamically_injected_script_runs_and_fires_load() {
+    let html = r#"<body>
+      <div id="app">
+        <button id="btn">go</button>
+        <span data-test-id="status">cold</span>
+      </div>
+      <script>
+        // The "chunk": when it runs it wires the delegated click handler and marks ready.
+        function loadChunk() {
+          return new Promise((resolve, reject) => {
+            const s = document.createElement('script');
+            s.textContent = "globalThis.__wireHandlers();";
+            s.onload = () => resolve();
+            s.onerror = () => reject(new Error('chunk failed'));
+            document.head.appendChild(s);
+          });
+        }
+        globalThis.__wireHandlers = () => {
+          document.addEventListener('click', (e) => {
+            if (e.target && e.target.id === 'btn') {
+              document.querySelector('[data-test-id="status"]').textContent = 'hydrated';
+            }
+          });
+        };
+        // Like a lazy boundary: load the chunk, then mark the boundary resolved.
+        loadChunk().then(() => {
+          document.querySelector('[data-test-id="status"]').textContent = 'ready';
+        });
+      </script>
+    </body>"#;
+
+    let mut session = PageSession::open(
+        html,
+        "https://example.test/",
+        "",
+        "",
+        DEFAULT_RENDER_BUDGET_MS,
+    )
+    .await
+    .expect("session opens");
+
+    // After hydration the boundary's promise must have resolved (chunk ran + onload fired).
+    assert!(
+        session
+            .serialize()
+            .contains(r#"data-test-id="status">ready<"#),
+        "dynamic chunk must run and its load event resolve the awaiting promise: {}",
+        session.serialize()
+    );
+
+    // And the handler the chunk wired must be live.
+    session
+        .eval(r#"document.getElementById('btn').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));"#)
+        .await
+        .unwrap();
+    assert!(
+        session
+            .serialize()
+            .contains(r#"data-test-id="status">hydrated<"#),
+        "handler wired by the injected chunk must fire on click: {}",
+        session.serialize()
+    );
+
+    session.close();
+}
+
+// PERMANENT headless-hydration harness (general rule: every hydration issue we fix
+// gets a committable repro here). This fixture is REAL React 18 streaming SSR: a
+// <Suspense> boundary that suspended on the server (streams its content late + a
+// `$RC` completion script that walks the `<!--$?-->…<!--/$-->` comment markers and
+// calls the dehydrated boundary's `_reactRetry`). React/ReactDOM UMD are inlined and
+// `hydrateRoot` runs. The dehydrated boundary MUST hydrate in the render isolate —
+// proven by the button's onClick firing (sets `window.__clicked`). Regenerate with
+// tests/fixture-gen/gen-react-streaming.mjs. (Guards the comment-marker + `_reactRetry`
+// hydration path; the Next App Router RSC-flight variant is tracked in HEADLESS-HYDRATION.md.)
+#[tokio::test]
+async fn react18_streaming_suspense_boundary_hydrates() {
+    let html = include_str!("fixtures/react-streaming-hydration.html");
+    let mut session = PageSession::open(
+        html,
+        "https://example.test/",
+        "",
+        "",
+        DEFAULT_RENDER_BUDGET_MS,
+    )
+    .await
+    .expect("session opens");
+
+    // The $RC completion swapped the streamed content in (button replaces fallback).
+    let serialized = session.serialize();
+    assert!(
+        serialized.contains(r#"data-test-id="lazy-btn"#) && !serialized.contains(r#"id="fb""#),
+        "streamed boundary content must replace the fallback: {serialized}"
+    );
+
+    // The dehydrated boundary must HYDRATE: clicking the button runs its React onClick.
+    session
+        .eval(r#"document.getElementById('btn').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); globalThis.__RESULT = String(!!window.__clicked);"#)
+        .await
+        .unwrap();
+    let clicked = session
+        .eval(r#"globalThis.__RESULT = String(!!window.__clicked);"#)
+        .await
+        .unwrap();
+    assert_eq!(
+        clicked, "true",
+        "the streamed/dehydrated Suspense boundary must hydrate (onClick must fire)"
+    );
+
+    session.close();
+}
+
+// Document-rooted hydration: Next.js App Router hydrates the WHOLE document
+// (`ReactDOMClient.hydrateRoot(document, <App/>)`), not a div. This guards that a
+// document-level root reaches hydrateRoot without throwing, React marks `document` as a
+// root container, and the tree COMMITS + is interactive (the button's onClick fires).
+// Fixture: tests/fixture-gen/gen-react-document.mjs (React/ReactDOM UMD inlined).
+#[tokio::test]
+async fn react_document_root_hydrates_and_commits() {
+    let html = include_str!("fixtures/react-document-hydration.html");
+    let mut session = PageSession::open(
+        html,
+        "https://example.test/",
+        "",
+        "",
+        DEFAULT_RENDER_BUDGET_MS,
+    )
+    .await
+    .expect("session opens");
+
+    let err = session
+        .eval(r#"globalThis.__RESULT = String(window.__hydrateError || "");"#)
+        .await
+        .unwrap();
+    assert_eq!(err, "", "hydrateRoot(document) must not throw");
+    let called = session
+        .eval(r#"globalThis.__RESULT = String(!!window.__hydrateCalled);"#)
+        .await
+        .unwrap();
+    assert_eq!(called, "true", "hydrateRoot(document) must be reached");
+    // Clicking the button must fire its React onClick — proves the document root COMMITTED
+    // its fiber tree onto the SSR DOM and wired delegated listeners.
+    session
+        .eval(r#"document.querySelector('[data-test-id="doc-btn"]').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); globalThis.__RESULT = "";"#)
+        .await
+        .unwrap();
+    let clicked = session
+        .eval(r#"globalThis.__RESULT = String(!!window.__clicked);"#)
+        .await
+        .unwrap();
+    assert_eq!(
+        clicked, "true",
+        "document-rooted React app must hydrate + be interactive (onClick must fire)"
+    );
+
+    session.close();
+}
+
+// Client-side export capture: `URL.createObjectURL(blob)` → `<a download href=…>` →
+// `link.click()` must be recorded in `__downloads` (filename + bytes) so the shim's
+// page.waitForEvent('download') + download.path() work (CSV-template / file exports).
+#[tokio::test]
+async fn createobjecturl_anchor_download_is_captured() {
+    let html = r#"<body><a id="dl">x</a>
+      <script>
+        var blob = new Blob(["a,b,c\n1,2,3"], { type: "text/csv" });
+        var url = URL.createObjectURL(blob);
+        var a = document.getElementById('dl');
+        a.setAttribute('download', 'template.csv');
+        a.setAttribute('href', url);
+        a.click();
+        var d = (globalThis.__downloads || [])[0] || {};
+        document.body.setAttribute('data-fn', String(d.filename));
+        document.body.setAttribute('data-content', String(d.content));
+      </script></body>"#;
+    let out = render_hydrate(html, "https://example.test/").await.unwrap();
+    assert!(
+        out.contains(r#"data-fn="template.csv""#),
+        "download filename must be captured: {out}"
+    );
+    assert!(
+        out.contains("a,b,c"),
+        "download blob content must be captured: {out}"
+    );
+}
+
+// __tcGetBy resolves getByRole/getByText/getByLabel IN the live isolate, returning each
+// match's LIVE document-order index (querySelectorAll('*') position) so the shim dispatches
+// on the SAME node it matched (a re-serialized snapshot can reorder portal'd nodes → wrong
+// index). Guards role + accessible-name matching + that the returned idx maps to the right
+// live element.
+#[tokio::test]
+async fn live_getby_returns_live_indices() {
+    let html = r#"<body>
+      <div><span>x</span><button>Cancel</button></div>
+      <ul role="listbox"><li role="option">Alice</li><li role="option">Bob</li></ul>
+    </body>"#;
+    let mut session = PageSession::open(
+        html,
+        "https://example.test/",
+        "",
+        "",
+        DEFAULT_RENDER_BUDGET_MS,
+    )
+    .await
+    .expect("session opens");
+    // role=option → two matches; verify each idx points at an <li role=option> in the live tree.
+    let r = session
+        .eval(r#"globalThis.__tcGetBy('role','option',null);
+          var hits=JSON.parse(globalThis.__RESULT);
+          var all=Array.prototype.slice.call(document.querySelectorAll('*'));
+          globalThis.__RESULT = JSON.stringify(hits.map(function(h){ var e=all[h.idx]; return e.tagName+'/'+e.getAttribute('role')+'/'+e.textContent; }));"#)
+        .await
+        .unwrap();
+    assert_eq!(
+        r, r#"["LI/option/Alice","LI/option/Bob"]"#,
+        "role=option must resolve to the two <li> by their live indices"
+    );
+    // role=button with accessible-name filter → the Cancel button only.
+    let b = session
+        .eval(r#"globalThis.__tcGetBy('role','button','Cancel');
+          var hits=JSON.parse(globalThis.__RESULT);
+          var all=Array.prototype.slice.call(document.querySelectorAll('*'));
+          globalThis.__RESULT = JSON.stringify(hits.map(function(h){ return all[h.idx].tagName+':'+all[h.idx].textContent; }));"#)
+        .await
+        .unwrap();
+    assert_eq!(
+        b, r#"["BUTTON:Cancel"]"#,
+        "role=button + name must resolve the Cancel button"
+    );
+    session.close();
+}
+
+// A click on a React PORTAL'd element (createPortal, here under createRoot(document.body),
+// portal into body) must fire its onClick — the MUI Autocomplete/Dialog/Menu case (options
+// render in a Popper portal to <body>; their onClick drives selection). React attaches
+// delegated listeners per container (completeWork HostPortal → listenToAllSupportedEvents
+// (containerInfo)); this guards that a click dispatched on a deep leaf of the portal'd <li>
+// runs the <li>'s onClick (records its data-option-index). Fixture: gen-react-currenttarget.mjs.
+#[tokio::test]
+async fn portal_element_onclick_dispatches() {
+    let html = include_str!("fixtures/react-currenttarget.html");
+    let mut session = PageSession::open(
+        html,
+        "https://example.test/",
+        "",
+        "",
+        DEFAULT_RENDER_BUDGET_MS,
+    )
+    .await
+    .expect("session opens");
+    // Let the post-hydration effect mount the portal.
+    for _ in 0..5 {
+        session
+            .eval(r#"if(globalThis.__runTimers)__runTimers(2000); globalThis.__RESULT = String(!!document.getElementById('leaf'));"#)
+            .await
+            .unwrap();
+    }
+    session
+        .eval(r#"var l=document.getElementById('leaf'); if(l) l.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true})); globalThis.__RESULT="";"#)
+        .await
+        .unwrap();
+    let ct = session
+        .eval(r#"globalThis.__RESULT = String(window.__ct);"#)
+        .await
+        .unwrap();
+    session.close();
+    assert_eq!(
+        ct, "2",
+        "portal'd <li> onClick must fire (currentTarget's data-option-index)"
+    );
+}
+
+// `document.location` must mirror `window.location` (a browser invariant). Next's dev RSC
+// flight client reads `document.location.origin` (findSourceMapURL, replaying server
+// console entries); when `document.location` was undefined it threw "reading 'origin' of
+// undefined", which aborted the WHOLE flight stream → the App Router page silently never
+// hydrated. Guards the fix at its root.
+#[tokio::test]
+async fn document_location_mirrors_window_location() {
+    let html = r#"<body><div id="root"></div>
+      <script>
+        var r = document.getElementById('root');
+        r.setAttribute('data-has', String(!!document.location));
+        r.setAttribute('data-origin', String(document.location && document.location.origin));
+        r.setAttribute('data-href', String(document.location && document.location.href));
+      </script></body>"#;
+    let out = render_hydrate(html, "https://app.test/some/path")
+        .await
+        .unwrap();
+    assert!(
+        out.contains(r#"data-has="true""#),
+        "document.location must be defined: {out}"
+    );
+    assert!(
+        out.contains(r#"data-origin="https://app.test""#),
+        "document.location.origin must read the page origin: {out}"
+    );
+    assert!(
+        out.contains(r#"data-href="https://app.test/some/path""#),
+        "document.location.href must read the page URL: {out}"
+    );
+}
+
+// The REAL react-server-dom-turbopack flight client (createFromReadableStream) must
+// instantiate + parse a flight stream containing a client reference in our env, without
+// throwing. Guards that the bundled flight client runs headless (process polyfill, stream
+// reading, manifest resolution). Fixture: tests/fixture-gen/gen-flight-client.mjs.
+#[tokio::test]
+async fn flight_client_instantiates_and_parses() {
+    let html = include_str!("fixtures/flight-client.html");
+    let mut session = PageSession::open(
+        html,
+        "https://example.test/",
+        "",
+        "",
+        DEFAULT_RENDER_BUDGET_MS,
+    )
+    .await
+    .expect("session opens");
+    let started = session
+        .eval(r#"globalThis.__RESULT = String(!!window.__flightStarted);"#)
+        .await
+        .unwrap();
+    let flight_err = session
+        .eval(r#"globalThis.__RESULT = String(window.__flightError || "");"#)
+        .await
+        .unwrap();
+    session.close();
+    assert_eq!(
+        flight_err, "",
+        "flight client must instantiate without throwing"
+    );
+    assert_eq!(
+        started, "true",
+        "createFromReadableStream must run + begin parsing the flight stream"
+    );
+}
+
+// The exact App Router client-hydration SHAPE that wasn't committing in headless
+// turbopack: hydrateRoot(document, …) called INSIDE React.startTransition, with a Suspense
+// boundary whose child suspends on a thenable that resolves later (mimicking the RSC
+// flight client awaiting a client-reference chunk). Must commit + be interactive once the
+// thenable resolves. Fixture: tests/fixture-gen/gen-react-transition-suspense.mjs.
+#[tokio::test]
+async fn react_transition_document_suspense_commits() {
+    let html = include_str!("fixtures/react-transition-suspense.html");
+    let mut session = PageSession::open(
+        html,
+        "https://example.test/",
+        "",
+        "",
+        DEFAULT_RENDER_BUDGET_MS,
+    )
+    .await
+    .expect("session opens");
+
+    let err = session
+        .eval(r#"globalThis.__RESULT = String(window.__hydrateError || "");"#)
+        .await
+        .unwrap();
+    assert_eq!(
+        err, "",
+        "startTransition hydrateRoot(document) must not throw"
+    );
+
+    // The suspended child resolves (its thenable fires via the virtual timer); the tree
+    // must COMMIT — clicking the (now-real) button fires its onClick.
+    session
+        .eval(r#"var b=document.querySelector('[data-test-id="tx-btn"]'); if(b){b.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true}));} globalThis.__RESULT = b ? "present" : "absent";"#)
+        .await
+        .unwrap();
+    let clicked = session
+        .eval(r#"globalThis.__RESULT = String(!!window.__clicked);"#)
+        .await
+        .unwrap();
+    assert_eq!(
+        clicked, "true",
+        "transition+Suspense hydration on document must commit + be interactive after the thenable resolves"
+    );
+
+    session.close();
+}
+
+// Expando persistence: React stores its root + every fiber as an EXPANDO property on
+// the DOM node (`container.__reactContainer$<rand>`, `node.__reactFiber$<rand>`). App
+// Router hydrates the whole `document` (`hydrateRoot(document, …)`), so the container
+// expando lands on the `document` object itself, and fibers land on documentElement/
+// body/etc. If the DOM binding silently drops arbitrary JS properties on these special
+// nodes, React "hydrates" but nothing is reachable → 0 fibers, no error. Guard that a
+// plain JS property set+read round-trips on document, documentElement, head and body.
+#[tokio::test]
+async fn expando_properties_persist_on_document_and_root_nodes() {
+    let html = r#"<html><head></head><body><div id="root"></div>
+      <script>
+        document.__tcProbe = 'doc';
+        document.documentElement.__tcProbe = 'html';
+        document.head.__tcProbe = 'head';
+        document.body.__tcProbe = 'body';
+        var r = document.getElementById('root');
+        r.setAttribute('data-doc', String(document.__tcProbe));
+        r.setAttribute('data-html', String(document.documentElement.__tcProbe));
+        r.setAttribute('data-head', String(document.head.__tcProbe));
+        r.setAttribute('data-body', String(document.body.__tcProbe));
+      </script></body></html>"#;
+    let out = render_hydrate(html, "https://example.test/").await.unwrap();
+    for (attr, want) in [
+        ("data-doc", "doc"),
+        ("data-html", "html"),
+        ("data-head", "head"),
+        ("data-body", "body"),
+    ] {
+        assert!(
+            out.contains(&format!(r#"{attr}="{want}""#)),
+            "expando on {attr} node must persist (React root/fibers depend on it): {out}"
+        );
+    }
+}
+
+// Expandos on DYNAMICALLY-CREATED elements: React stores each fiber as `node.__reactFiber$
+// <rand>` on the node it creates during render. For PORTAL'd content (MUI Dialog/Popper/
+// Menu — createElement'd into a portal container, not hydrated from SSR), if a created
+// node can't hold a JS expando, React commits the DOM but no fiber is reachable → event
+// delegation can't find handlers → the portal renders but is DEAD (onClick never fires).
+// Guard that a createElement'd + appended node round-trips an expando, before and after
+// it's in the tree.
+#[tokio::test]
+async fn expando_properties_persist_on_created_elements() {
+    let html = r#"<html><head></head><body><div id="root"></div>
+      <script>
+        var made = document.createElement('li');
+        made.__tcFiber = 'before-append';
+        var r = document.getElementById('root');
+        r.setAttribute('data-before', String(made.__tcFiber));
+        document.body.appendChild(made);
+        made.__tcFiber2 = 'after-append';
+        // re-fetch the same node from the live tree and read the expando back
+        var again = document.body.lastElementChild;
+        r.setAttribute('data-after', String(again.__tcFiber));
+        r.setAttribute('data-after2', String(again.__tcFiber2));
+      </script></body></html>"#;
+    let out = render_hydrate(html, "https://example.test/").await.unwrap();
+    for (attr, want) in [
+        ("data-before", "before-append"),
+        ("data-after", "before-append"),
+        ("data-after2", "after-append"),
+    ] {
+        assert!(
+            out.contains(&format!(r#"{attr}="{want}""#)),
+            "expando on a created element must persist (React fibers on portal'd nodes depend on it): {out}"
+        );
+    }
+}
+
+// ESM support (foundation): a `<script type="module">` must EVALUATE, not be skipped.
+// Next dev / turbopack serve their app as ES modules; the classic render tier used to
+// skip any `import`/`export` script, so dev builds never hydrated. This guards the
+// minimal module-eval path (no imports → no loader needed).
+#[tokio::test]
+async fn esm_inline_module_script_evaluates() {
+    // A real ESM module (has `export`/`import` syntax) — the classic tier skipped these.
+    let html = r#"<body><div id="app">x</div>
+      <script type="module">export const tag = 'ok'; document.getElementById('app').setAttribute('data-esm', tag);</script>
+    </body>"#;
+    let out = render_hydrate(html, "https://example.test/").await.unwrap();
+    assert!(
+        out.contains(r#"data-esm="ok""#),
+        "inline ESM module script must evaluate: {out}"
+    );
+}
+
+// ESM loader: a `<script type="module">` that `import`s a sibling module must fetch +
+// link it over the host net (the `NetModuleLoader`). This is the real dev-build path —
+// the app entry module pulls its dependency graph by URL.
+#[tokio::test]
+async fn esm_module_import_graph_loads_over_net() {
+    let port = spawn_js_server("export const v = 'imported-ok';").await;
+    let html = r#"<body><div id="app">x</div>
+      <script type="module">import { v } from '/mod.mjs'; document.getElementById('app').setAttribute('data-v', v);</script>
+    </body>"#;
+    let out = render_hydrate(html, &base(port)).await.unwrap();
+    assert!(
+        out.contains(r#"data-v="imported-ok""#),
+        "ESM import graph must load over the net + evaluate: {out}"
+    );
+}
+
+// ESM dev-build path: turbopack/webpack serve app chunks as CLASSIC `<script src>`
+// (no `type=module`) whose BODY is an ES module (top-level import/export). The classic
+// tier used to skip any import/export script, so those chunks never ran. Now a src chunk
+// with an ESM body is handed to the module pump keyed by its src URL, so its import graph
+// resolves relative to that URL. Guards item (1): src-ESM chunks hydrate.
+#[tokio::test]
+async fn esm_src_chunk_with_module_body_loads_and_resolves_imports() {
+    // /chunk.mjs is an ESM that imports a sibling /dep.mjs and writes the result to DOM.
+    let port = spawn_paths_js_server(&[
+        (
+            "/chunk.mjs",
+            "import { v } from '/dep.mjs'; document.getElementById('app').setAttribute('data-chunk', v);",
+        ),
+        ("/dep.mjs", "export const v = 'chunk-ok';"),
+    ])
+    .await;
+    // CLASSIC script element (no type=module) — exactly how dev chunks are served.
+    let html = r#"<body><div id="app">x</div><script src="/chunk.mjs"></script></body>"#;
+    let out = render_hydrate(html, &base(port)).await.unwrap();
+    assert!(
+        out.contains(r#"data-chunk="chunk-ok""#),
+        "classic <script src> with an ESM body must route to the module pump + resolve its imports: {out}"
+    );
+}
+
 // --- helpers ----------------------------------------------------------------
+// Serves distinct JS bodies per request path (matched against the request line) —
+// for ESM import graphs where the chunk and its dependency differ.
+async fn spawn_paths_js_server(routes: &[(&'static str, &'static str)]) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    let routes: Vec<(String, String)> = routes
+        .iter()
+        .map(|(p, b)| ((*p).to_string(), (*b).to_string()))
+        .collect();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            let mut b = [0u8; 1024];
+            let n = s.read(&mut b).await.unwrap_or(0);
+            let req = String::from_utf8_lossy(&b[..n]).to_string();
+            let path = req
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("/")
+                .split('#')
+                .next()
+                .unwrap_or("/")
+                .to_string();
+            let body = routes
+                .iter()
+                .find(|(p, _)| *p == path)
+                .map(|(_, b)| b.as_str())
+                .unwrap_or("");
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\nConnection: close\r\n\r\n{body}"
+            );
+            let _ = s.write_all(resp.as_bytes()).await;
+            let _ = s.flush().await;
+        }
+    });
+    port
+}
+
+// Serves any path with the given JS body (application/javascript) — for ESM imports.
+async fn spawn_js_server(body: &'static str) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            let mut b = [0u8; 1024];
+            let _ = s.read(&mut b).await;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\nConnection: close\r\n\r\n{body}"
+            );
+            let _ = s.write_all(resp.as_bytes()).await;
+            let _ = s.flush().await;
+        }
+    });
+    port
+}
+
 async fn spawn_json_server(body: &'static str) -> u16 {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -1049,4 +1710,146 @@ async fn spawn_json_server(body: &'static str) -> u16 {
 
 fn base(port: u16) -> String {
     format!("http://127.0.0.1:{port}/")
+}
+
+// CSS :hover-revealed content (a hover dropdown / menu) must become visible when the shim
+// hovers the trigger. turbo-dom's cascade does not apply the :hover pseudo-class (no pointer
+// state), so a menu shown via `.trigger:hover .menu { display:block }` stays display:none and
+// waitFor(visible) hangs. __tcApplyHover marks the hovered chain with [data-tc-hover], rewrites
+// each stylesheet rule's `:hover` → `[data-tc-hover]`, and applies the matched rules' decls
+// INLINE so both the JS getComputedStyle and rtdom's native cascade (is_visible) see the reveal.
+// Real case: the app's UserMenu (overridden to open on hover) — the logout item lives in a
+// `&:hover .user-menu` dropdown; the auth-logout e2e hovers the menu then clicks logout.
+#[tokio::test]
+async fn hover_reveals_css_hover_menu() {
+    // Real shape: the dropdown is `visibility:hidden`, revealed by an emotion-style NESTED
+    // `&:hover .dd { visibility:visible }` under the trigger's class (`&` = the trigger). The
+    // flattener must resolve `&` to `.menu` and apply visibility inline on hover.
+    let html = r#"<style>.dd{visibility:hidden}.menu{color:red;&:hover .dd{visibility:visible}}</style>
+      <body><div class="menu" id="m"><span>trigger</span><div class="dd" id="d">logout</div></div></body>"#;
+    let mut session = PageSession::open(
+        html,
+        "https://example.test/",
+        "",
+        "",
+        DEFAULT_RENDER_BUDGET_MS,
+    )
+    .await
+    .expect("session opens");
+    // The `<style>` rule lives in rtdom's cascade (which is_visible reads); this env's
+    // getComputedStyle doesn't parse <style> text, so assert on the inline style
+    // __tcApplyHover applies — exactly what feeds the Rust cascade / is_visible.
+    let before = session
+        .eval(r#"globalThis.__RESULT = document.getElementById('d').style.visibility || '';"#)
+        .await
+        .unwrap();
+    assert_eq!(before, "", "no inline visibility before hover");
+    session
+        .eval(r#"globalThis.__tcApplyHover(document.getElementById('m')); globalThis.__RESULT = 'ok';"#)
+        .await
+        .unwrap();
+    let after = session
+        .eval(r#"globalThis.__RESULT = document.getElementById('d').style.visibility || '';"#)
+        .await
+        .unwrap();
+    assert_eq!(
+        after, "visible",
+        "hovering resolves the nested &:hover rule + applies visibility inline"
+    );
+    // is_visible reads the SERIALIZED snapshot, not the live DOM — the applied inline style
+    // must survive serialization or the shim's waitFor(state:'visible') never observes it.
+    let snap = session.serialize();
+    assert!(
+        snap.contains("visibility") && snap.contains("visible"),
+        "serialized snapshot must carry the applied inline visibility: {snap}"
+    );
+    session.close();
+}
+
+// __tcGetBy(kind,value,name,root) scopes role/text/label matching to within elements matching
+// `root` (descendant-or-self) — backs the shim's `parentLocator.getByRole/getByText/getByLabel`,
+// so `step.getByTestId('x').getByRole('combobox')` drives the combobox INSIDE that step, not the
+// first one in the document. idx stays the GLOBAL position so the shim dispatches on `*`[idx].
+#[tokio::test]
+async fn tcgetby_scopes_to_root() {
+    let html = r#"<body>
+      <div id="a"><div role="combobox">A</div></div>
+      <div id="b"><div role="combobox">B</div></div>
+    </body>"#;
+    let mut session = PageSession::open(
+        html,
+        "https://example.test/",
+        "",
+        "",
+        DEFAULT_RENDER_BUDGET_MS,
+    )
+    .await
+    .expect("session opens");
+    let unscoped = session
+        .eval(
+            r#"globalThis.__tcGetBy('role','combobox',null,null);
+               globalThis.__RESULT = String(JSON.parse(globalThis.__RESULT).length);"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(unscoped, "2", "unscoped sees both comboboxes");
+    let scoped = session
+        .eval(
+            r#"globalThis.__tcGetBy('role','combobox',null,'#a');
+               var h = JSON.parse(globalThis.__RESULT);
+               var all = Array.prototype.slice.call(document.querySelectorAll('*'));
+               globalThis.__RESULT = h.length + ':' + (h[0] ? all[h[0].idx].textContent : '');"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(scoped, "1:A", "root='#a' scopes to the combobox inside #a");
+    session.close();
+}
+
+// nth-scoped descendant resolution: `steps.nth(i).getByTestId('x').getByRole('combobox')` must
+// drive the combobox inside the i-th step, not the first in the document. A CSS-concat selector
+// can't express "the nth match's subtree", so the shim carries a scope CHAIN of {sel, idx} and
+// __tcResolveScoped walks it (picking idx at each level) before matching the leaf (a selector OR
+// a getBy). idx stays the GLOBAL position so the shim dispatches on `*`[idx]. Backs the
+// payroll-approval-chain flow (two steps, each configured independently).
+#[tokio::test]
+async fn tcresolvescoped_walks_nth_chain() {
+    let html = r#"<body>
+      <div class="s"><div data-testid="x"><div role="combobox">A</div></div></div>
+      <div class="s"><div data-testid="x"><div role="combobox">B</div></div></div>
+    </body>"#;
+    let mut session = PageSession::open(
+        html,
+        "https://example.test/",
+        "",
+        "",
+        DEFAULT_RENDER_BUDGET_MS,
+    )
+    .await
+    .expect("session opens");
+    // getBy leaf scoped to the 2nd step → combobox "B"
+    let b = session
+        .eval(
+            r#"globalThis.__tcResolveScoped(
+                 [{"sel":".s","idx":1},{"sel":"[data-testid=\"x\"]","idx":null}],
+                 {"getBy":{"kind":"role","value":"combobox","name":null}});
+               var h = JSON.parse(globalThis.__RESULT);
+               var all = Array.prototype.slice.call(document.querySelectorAll('*'));
+               globalThis.__RESULT = h.length + ':' + (h[0] ? all[h[0].idx].textContent : '');"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(b, "1:B", "scope chain picks the 2nd step's combobox");
+    // selector leaf scoped to the 1st step → its [data-testid=x]
+    let a = session
+        .eval(
+            r#"globalThis.__tcResolveScoped([{"sel":".s","idx":0}], {"selector":"[data-testid=\"x\"]"});
+               var h = JSON.parse(globalThis.__RESULT);
+               var all = Array.prototype.slice.call(document.querySelectorAll('*'));
+               globalThis.__RESULT = h.length + ':' + (h[0] ? all[h[0].idx].querySelector('[role=combobox]').textContent : '');"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(a, "1:A", "selector leaf scoped to the 1st step");
+    session.close();
 }

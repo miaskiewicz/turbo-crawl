@@ -13,12 +13,78 @@
 //! drops — otherwise a later drop on a dead isolate crashes. Every entry point
 //! resets on the way out.
 
-use deno_core::{op2, v8, JsRuntime, OpState, RuntimeOptions};
+use deno_core::{
+    op2, resolve_import, v8, JsRuntime, ModuleLoadOptions, ModuleLoadReferrer, ModuleLoadResponse,
+    ModuleLoader, ModuleResolveResponse, ModuleSource, ModuleSourceCode, ModuleSpecifier,
+    ModuleType, OpState, ResolutionKind, RuntimeOptions,
+};
+use deno_error::JsErrorBox;
 use std::cell::RefCell;
 use std::rc::Rc;
 use turbo_surf_core::cookies::CookieJar;
 use turbo_surf_core::net::{fetch_html, FetchOptions};
 use turbo_surf_core::url::resolve;
+
+/// Loads ES modules (a `<script type="module">`'s `import` graph) over the host net
+/// layer — the same path `op_fetch` uses — so a Next dev / turbopack build (served as
+/// ES modules) hydrates. Carries the page base + shared cookie jar so module fetches
+/// are same-origin + session-authenticated like page fetches.
+struct NetModuleLoader {
+    base: String,
+    jar: Jar,
+    ua: String,
+}
+
+impl ModuleLoader for NetModuleLoader {
+    fn resolve(
+        &self,
+        specifier: &str,
+        referrer: &str,
+        _kind: ResolutionKind,
+    ) -> ModuleResolveResponse {
+        // Resolve against the referrer; fall back to the page base for the entry module.
+        let referrer = if referrer.is_empty() || referrer == "." {
+            &self.base
+        } else {
+            referrer
+        };
+        resolve_import(specifier, referrer).map_err(|e| JsErrorBox::generic(e.to_string()))
+    }
+
+    fn load(
+        &self,
+        module_specifier: &ModuleSpecifier,
+        _maybe_referrer: Option<&ModuleLoadReferrer>,
+        _options: ModuleLoadOptions,
+    ) -> ModuleLoadResponse {
+        let url = module_specifier.clone();
+        let jar = self.jar.clone();
+        let ua = self.ua.clone();
+        ModuleLoadResponse::Async(Box::pin(async move {
+            let mut local = CookieJar::from_storage_state(&jar.borrow().storage_state());
+            let mut headers = std::collections::BTreeMap::new();
+            if !ua.is_empty() {
+                headers.insert("user-agent".to_string(), ua);
+            }
+            let opts = FetchOptions {
+                headers,
+                allow_non_html: true, // JS modules aren't HTML
+                jar: Some(&mut local),
+                ..Default::default()
+            };
+            let r = fetch_html(url.as_str(), opts)
+                .await
+                .map_err(|e| JsErrorBox::generic(format!("module fetch {url}: {e}")))?;
+            *jar.borrow_mut() = local;
+            Ok(ModuleSource::new(
+                ModuleType::JavaScript,
+                ModuleSourceCode::String(r.html.into()),
+                &url,
+                None,
+            ))
+        }))
+    }
+}
 
 /// Page base URL (the `location.href`): the base for relative `fetch` and the
 /// scope for the `document.cookie` bridge. Stored in op state.
@@ -181,6 +247,9 @@ globalThis.self = globalThis;
 globalThis.navigator = {
   userAgent: (Deno.core.ops.op_user_agent && Deno.core.ops.op_user_agent()) || "turbo-surf",
   language: "en-US", languages: ["en-US"], onLine: true,
+  // In-memory clipboard: an app that writeText()s a value (e.g. a copy-link button)
+  // and reads it back round-trips, with no OS clipboard.
+  clipboard: (() => { let v = ""; return { writeText: async (t) => { v = String(t == null ? "" : t); }, readText: async () => v }; })(),
 };
 globalThis.location = globalThis.location || { href: "about:blank", protocol: "about:", host: "", pathname: "blank" };
 globalThis.localStorage = (() => {
@@ -206,10 +275,17 @@ let __tid = 1;
 // work (microtasks / the React scheduler) still drains promptly (it never advances the
 // clock); only delayed polls are time-gated.
 let __now = 0;
-// Virtual-time ceiling: once the clock passes this, delayed timers stop firing so a
-// never-idle poll can't hold the render budget. Generous enough for real load-time
-// timeouts (debounces, retries, refresh backoffs) to run.
+// Virtual-time ceiling, RELATIVE to the start of the current pump/drain (`__budgetBase`).
+// Once the clock passes base+budget, delayed timers stop firing so a never-idle poll can't
+// hold a drain open. RELATIVE (not absolute) is essential: `__now` accumulates across a
+// long session (each modal transition / poll advances it), so an absolute ceiling would,
+// late in a flow, refuse to fire even a brand-new short timer — e.g. a closing MUI modal's
+// 195ms Fade-exit timer never fires, so the modal never unmounts and `waitFor(hidden)` /
+// subsequent `[role=dialog].first()` break. Resetting the base per drain gives every
+// interaction a fresh window so its transitions complete, while still capping runaway polls.
 const __VIRTUAL_BUDGET_MS = 15000;
+let __budgetBase = 0;
+globalThis.__resetTimerBudget = () => { __budgetBase = __now; };
 globalThis.setTimeout = (fn, delay = 0, ...args) => {
   __timers.push({ id: __tid, fn, due: __now + (+delay || 0), args });
   return __tid++;
@@ -236,9 +312,9 @@ globalThis.__runTimers = (max = 100000) => {
     let bi = 0;
     for (let i = 1; i < __timers.length; i++) if (__timers[i].due < __timers[bi].due) bi = i;
     const t = __timers[bi];
-    // A delayed timer past the virtual budget is a never-idle poll — stop firing it so
-    // the drain can quiesce. (Delay-0 work has due <= __now and always runs.)
-    if (t.due > __now && t.due > __VIRTUAL_BUDGET_MS) break;
+    // A delayed timer past the (relative) virtual budget is a never-idle poll — stop firing
+    // it so the drain can quiesce. (Delay-0 work has due <= __now and always runs.)
+    if (t.due > __now && t.due - __budgetBase > __VIRTUAL_BUDGET_MS) break;
     __timers.splice(bi, 1);
     if (t.due > __now) __now = t.due; // advance the virtual clock
     n++;
@@ -300,8 +376,50 @@ globalThis.fetch = async (url, init) => {
   if (body != null && typeof body !== "string") {
     try { body = String(body); } catch (_e) { body = ""; }
   }
+  // Next.js App Router CLIENT navigation (`router.push`/`replace`, e.g. the post-login
+  // redirect) fetches the target route's RSC flight with an `RSC` header — a PREFETCH
+  // adds `Next-Router-Prefetch`. We don't do in-place RSC soft-nav (it never completes
+  // headlessly, so `location`/`history` never advance and a `waitForURL` hangs). Record
+  // the navigation target on `__rscNav`; the live-session driver re-loads that route as
+  // a fresh page (the browser hard-nav equivalent), following the redirect chain hop by
+  // hop. Prefetches are ignored.
+  try {
+    const lc = {};
+    for (const k in (hdrs || {})) lc[k.toLowerCase()] = hdrs[k];
+    if (lc.rsc && !lc["next-router-prefetch"]) {
+      const u = new URL(String((url && url.url) || url), globalThis.location.href);
+      if (u.pathname !== globalThis.location.pathname) {
+        // Keep the app's own query (e.g. the off-cycle termination flow passes the selected
+        // employee as `?employeeIds=`) but drop Next's internal `_rsc` cache-buster — a hard
+        // reload carrying `_rsc` returns a flight payload, not HTML.
+        u.searchParams.delete("_rsc");
+        globalThis.__rscNav = u.pathname + u.search + u.hash;
+      }
+    }
+  } catch (_e) {}
   const initJson = JSON.stringify({ method: o.method, headers: hdrs || undefined, body });
-  const r = await ops.op_fetch(String((url && url.url) || url), initJson);
+  // Count in-flight fetches so the hydration/interaction drain doesn't quiesce while a
+  // request is outstanding — otherwise a save POST resolves AFTER the drain gives up
+  // (the DOM looks "stable" while waiting) and its success re-render (modal close,
+  // redirect) is lost.
+  globalThis.__pendingFetches = (globalThis.__pendingFetches || 0) + 1;
+  let r;
+  try {
+    r = await ops.op_fetch(String((url && url.url) || url), initJson);
+  } finally {
+    globalThis.__pendingFetches = Math.max(0, (globalThis.__pendingFetches || 1) - 1);
+  }
+  // Network log: the Playwright shim drains this to emit `page.on('response')`
+  // events (tests subscribe to capture API payloads — payroll period, employments).
+  try {
+    globalThis.__netLog = globalThis.__netLog || [];
+    globalThis.__netLog.push({
+      url: String((url && url.url) || url),
+      status: r.status, ok: r.ok, method: (o.method || "GET"),
+      contentType: r.content_type || "", body: r.body,
+    });
+    if (globalThis.__netLog.length > 1000) globalThis.__netLog.splice(0, globalThis.__netLog.length - 1000);
+  } catch (_e) {}
   const headers = new globalThis.Headers();
   if (r.content_type) headers.set("content-type", r.content_type);
   return {
@@ -350,6 +468,25 @@ class __NoopObserver {
 globalThis.MutationObserver = __NoopObserver;
 globalThis.IntersectionObserver = __NoopObserver;
 globalThis.ResizeObserver = __NoopObserver;
+// structuredClone — apps/SDKs use it (and probe `globalThis.structuredClone.prototype`);
+// absent, that probe throws. deno_core doesn't ship it. Structured-ish deep clone with a
+// few common types; falls back to JSON for the rest.
+if (typeof globalThis.structuredClone === "undefined") {
+  globalThis.structuredClone = (v) => {
+    const seen = new WeakMap();
+    const clone = (x) => {
+      if (x === null || typeof x !== "object") return x;
+      if (seen.has(x)) return seen.get(x);
+      if (x instanceof Date) return new Date(x.getTime());
+      if (x instanceof RegExp) return new RegExp(x.source, x.flags);
+      if (Array.isArray(x)) { const a = []; seen.set(x, a); for (const e of x) a.push(clone(e)); return a; }
+      if (x instanceof Map) { const m = new Map(); seen.set(x, m); for (const [k, val] of x) m.set(clone(k), clone(val)); return m; }
+      if (x instanceof Set) { const s = new Set(); seen.set(x, s); for (const e of x) s.add(clone(e)); return s; }
+      const o = {}; seen.set(x, o); for (const k of Object.keys(x)) o[k] = clone(x[k]); return o;
+    };
+    return clone(v);
+  };
+}
 // NOTE: getComputedStyle + matchMedia are provided by the vendored browser_env.js
 // (a jsdom-style getComputedStyle the Playwright shim's cssValue/visibility reads,
 // and a matchMedia stub). Do NOT redefine them here — ENV_BOOTSTRAP runs AFTER the
@@ -840,6 +977,66 @@ if (typeof globalThis.URL === "undefined") {
   globalThis.URL.revokeObjectURL = () => {};
 }
 
+// Object-URL registry + download capture. The common client-side export pattern is
+// `URL.createObjectURL(blob)` → set it on a `<a download href=…>` → `link.click()`. A real
+// createObjectURL (keyed store) lets us recover the blob bytes when the anchor is clicked,
+// and a wrapped HTMLAnchorElement.prototype.click records {filename, content} so the shim
+// can resolve `page.waitForEvent('download')` + `download.path()`. Runs after browser_env
+// installed the anchor prototype (ENV_BOOTSTRAP runs last).
+(() => {
+  const blobs = new Map();
+  let bid = 0;
+  globalThis.URL.createObjectURL = (obj) => {
+    const url = "blob:turbo-surf/" + bid++;
+    try { blobs.set(url, obj); } catch (_e) {}
+    return url;
+  };
+  globalThis.URL.revokeObjectURL = () => {}; // keep the blob for a later .path() read
+  globalThis.__readBlobUrl = (url) => {
+    const b = blobs.get(url);
+    if (b == null) return null;
+    return b._s != null ? String(b._s) : "";
+  };
+  globalThis.__downloads = globalThis.__downloads || [];
+  const record = (el) => {
+    try {
+      let n = el;
+      while (n && n.nodeType === 1) {
+        if (n.tagName === "A" && n.getAttribute) {
+          let dl = n.getAttribute("download");
+          if (dl == null && n.download) dl = n.download;
+          if (dl != null) {
+            const href = (n.getAttribute("href") || n.href || "");
+            const content = globalThis.__readBlobUrl(String(href));
+            // Dedupe: an attached anchor records via BOTH the document listener and the
+            // prototype wrap for one click — keep only one.
+            const last = globalThis.__downloads[globalThis.__downloads.length - 1];
+            if (last && last.url === String(href) && last.filename === (dl || "download")) return true;
+            globalThis.__downloads.push({ filename: dl || "download", url: String(href), content: content == null ? "" : content });
+            return true;
+          }
+        }
+        n = n.parentElement;
+      }
+    } catch (_e) {}
+    return false;
+  };
+  // Capture-phase listener for ATTACHED `<a download>` clicks (the event bubbles to the
+  // document). Plus a prototype wrap for DETACHED anchors (createElement + click without
+  // appendChild), whose dispatched event never reaches the document.
+  try {
+    globalThis.document.addEventListener("click", (e) => { record(e && e.target); }, true);
+  } catch (_e) {}
+  const proto = globalThis.HTMLAnchorElement && globalThis.HTMLAnchorElement.prototype;
+  if (proto && typeof proto.click === "function") {
+    const orig = proto.click;
+    proto.click = function () {
+      record(this);
+      return orig.call(this);
+    };
+  }
+})();
+
 // location — back it with a real URL so setting `location.href` (done at install time,
 // and by history.pushState/replaceState) UPDATES pathname/search/hash/host/origin too.
 // browser_env.js ships a plain static object whose href is just a string field, so
@@ -883,6 +1080,11 @@ if (typeof globalThis.URL === "undefined") {
     } catch (_e) {}
   };
   def("referrer", () => "");
+  // document.location === window.location in a browser. Next's dev flight client reads
+  // `document.location.origin` (in findSourceMapURL, replaying server console entries);
+  // without this it throws "reading 'origin' of undefined", which aborts the ENTIRE RSC
+  // flight stream processing → the App Router page never finishes hydrating, silently.
+  def("location", () => globalThis.location);
   def("URL", () => globalThis.location.href);
   def("documentURI", () => globalThis.location.href);
   def("baseURI", () => globalThis.location.href);
@@ -1027,6 +1229,16 @@ globalThis.__importMeta = {
   resolve(spec) { try { return new globalThis.URL(spec, globalThis.location.href).href; } catch (_e) { return String(spec); } },
 };
 
+// esbuild's `keepNames` helper: transpiled code calls `__name(fn, "fn")` to restore
+// Function.name after minification. esbuild emits a local `var __name = ...` per module,
+// but injected/eval'd snippets (e.g. a test harness's tsx-transpiled addInitScript, or a
+// bundle chunk that expects the helper hoisted) can reference it free. Provide a no-op
+// passthrough global so such code doesn't ReferenceError. A module's own local `__name`
+// shadows this; this only catches the free-reference case.
+if (typeof globalThis.__name === "undefined") {
+  globalThis.__name = function (fn) { return fn; };
+}
+
 // --- hydration pump: the browser's script-loading model -----------------------
 // Real SPAs (Next.js/webpack) don't ship their code inline — they BOOT a tiny
 // runtime that injects more <script src> chunks at runtime and waits for each
@@ -1041,27 +1253,17 @@ function __fireScriptEvent(el, kind, err) {
   try { const h = kind === "load" ? el.onload : el.onerror; if (typeof h === "function") h.call(el, ev); } catch (_e) {}
   try { if (typeof el.dispatchEvent === "function") el.dispatchEvent(ev); } catch (_e) {}
 }
-// Make an ESM-flavored injected script runnable as a CLASSIC script (or signal skip).
-// Returns rewritten code to eval, or `null` to skip the script gracefully.
-//   - `import.meta` → the `__importMeta` global (the dev HMR runtime reads `.url`/`.env`).
-//   - top-level `import`/`export` STATEMENTS → no module loader headless, so skip (the
-//     dev runtime ships these only in the rare static-ESM chunk; running a broken
-//     classic eval of them would abort, and we can't resolve the graph anyway).
-// A coarse source rewrite, not a parse: `import.meta` is unambiguous, and import/export
-// STATEMENTS are detected only at statement starts (line start / after `;`/`{`/`}`) so
-// `export`-as-property or `import(` dynamic-import calls aren't misfired on.
-globalThis.__rewriteEsmForClassic = function __rewriteEsmForClassic(code, label) {
+// Rewrite `import.meta` (a SyntaxError in a classic script) onto the `__importMeta` global
+// stub the dev HMR runtime reads (`.url`/`.env`). Whether a chunk is a REAL ES module is
+// NOT decided by a regex here — a regex matches `import`/`export` inside comments + strings
+// too (e.g. a vendored package's JSDoc `import {X} from 'y'`), which would wrongly route a
+// CLASSIC turbopack chunk through the deno_core module pump and load it in a SEPARATE
+// module graph → a DUPLICATE module instance (a second react-dom, whose event-system keys
+// don't match the DOM's → portal/delegated onClick never fires). Instead `__execScriptEl`
+// just classic-evals; only a genuine module-syntax SyntaxError (thrown at PARSE, before any
+// code runs) routes the chunk to the module pump. Let V8 be the parser, not a regex.
+globalThis.__rewriteEsmForClassic = function __rewriteEsmForClassic(code) {
   if (typeof code !== "string" || !code) return code;
-  // Real module-graph syntax we can't honor classically → skip with a log.
-  // `import x from`, `import {`, `import 'side-effect'`, `import * as`, `export …`,
-  // `export default`, `export {` — anchored at a statement boundary.
-  const MODULE_STMT = /(^|[;{}\n\r])\s*(import\s+[^(]|import\s*['"]|export\s+|export\s*\{|export\s*\*)/;
-  if (MODULE_STMT.test(code)) {
-    Deno.core.print("script skipped (" + label + "): ESM import/export not supported in the classic render tier\n");
-    return null;
-  }
-  // `import.meta` is safe to rewrite onto the global stub. Match the `import.meta`
-  // token (with optional whitespace before `.`) and leave everything else intact.
   if (/import\s*\.\s*meta/.test(code)) {
     code = code.replace(/import\s*\.\s*meta/g, "globalThis.__importMeta");
   }
@@ -1077,6 +1279,9 @@ globalThis.__execScriptEl = async function (el) {
   // overwrites native Promise/queueMicrotask with impls whose microtask scheduler
   // is inert in this env — promises never settle and the render never commits.
   if (get("nomodule") !== null || get("noModule") !== null) return;
+  // ES modules (`<script type="module">`) run through the Rust module pump (a real
+  // module graph + loader), NOT classic eval — leave them for `__takeModuleScript`.
+  if ((get("type") || "").toLowerCase() === "module") return;
   if (!__EXECUTABLE_TYPES.has((get("type") || "").toLowerCase())) return; // JSON/data blocks etc.
   const src = get("src");
   try {
@@ -1097,8 +1302,8 @@ globalThis.__execScriptEl = async function (el) {
     // works. Real `import`/`export` statements need a module loader + resolved graph we
     // don't have headless — those scripts are SKIPPED gracefully (logged) rather than
     // hung/aborted.
-    code = globalThis.__rewriteEsmForClassic(code, src || "inline");
-    if (code === null) { __fireScriptEvent(el, "load"); return; } // skipped (real module graph)
+    const __orig = code;
+    code = globalThis.__rewriteEsmForClassic(code);
     // Set document.currentScript to THIS element during execution, like a browser.
     // Turbopack/webpack chunk runtimes do `TURBOPACK.push([document.currentScript, …])`
     // to correlate each chunk with the element that loaded it — a single static
@@ -1108,9 +1313,26 @@ globalThis.__execScriptEl = async function (el) {
     try { __prevCs = globalThis.document.currentScript; globalThis.document.currentScript = el; } catch (_e) {}
     try {
       (0, eval)(code); // classic-script semantics: run in global scope
-    } finally {
+    } catch (e) {
       try { globalThis.document.currentScript = __prevCs; } catch (_e) {}
+      // A genuine ES module? Classic V8 throws a module-syntax SyntaxError at PARSE time —
+      // before ANY code runs — so it's safe to re-run through the module pump (a real module
+      // graph + loader). This is the ONLY signal we route on: text that merely LOOKS like
+      // import/export (in a comment/string of a classic turbopack chunk) parses + runs fine
+      // here, so it stays classic (avoids a duplicate module instance — see __rewriteEsmForClassic).
+      const msg = String((e && e.message) || e);
+      if (e instanceof SyntaxError && /\b(import|export)\b|module/i.test(msg)) {
+        // Keep the element: the module pump points document.currentScript at it during eval
+        // so turbopack TURBOPACK.push([document.currentScript, …]) derives the right path.
+        const abs = src ? new URL(src, globalThis.location.href).href : "";
+        el.__tcModule = true; // claim it so the __takeModuleScript DOM scan won't double-run it
+        (globalThis.__esmSrcQueue || (globalThis.__esmSrcQueue = [])).push({ src: abs, code: __orig, el: el });
+        __fireScriptEvent(el, "load");
+        return;
+      }
+      throw e; // real runtime error
     }
+    try { globalThis.document.currentScript = __prevCs; } catch (_e) {}
     __fireScriptEvent(el, "load");
   } catch (e) {
     __fireScriptEvent(el, "error", e);
@@ -1134,10 +1356,310 @@ globalThis.__hydrate = async function (maxRounds = 300, timerBudget = 200000) {
     if (!ranScript && fired === 0) break;
   }
 };
-// Pending-work signal for the Rust pump loop: "1" while timers are queued or a
-// <script> hasn't run (more to do after the next async drain), else "0".
+// Claim the next un-run ES-module script (`<script type=module>` or an inline script
+// with `import`/`export`) in DOM order → `__RESULT = {src, code}` JSON, or "" when
+// none. The Rust module pump evaluates each through deno_core's real module graph
+// (`__execScriptEl` deliberately skips them). `__tcModule` is the claim marker.
+globalThis.__moduleStmt = /(^|[;{}\n\r])\s*(import\s+[^(]|import\s*['"]|export\s+|export\s*\{|export\s*\*)/;
+globalThis.__takeModuleScript = function () {
+  // src chunks whose body was ESM, already fetched + queued by __execScriptEl. Both
+  // `src` (its URL identity, for import resolution) and `code` (the fetched body) set.
+  const q = globalThis.__esmSrcQueue;
+  if (q && q.length) {
+    const item = q.shift();
+    globalThis.__currentModuleEl = item.el || null; // for document.currentScript during eval
+    globalThis.__RESULT = JSON.stringify({ src: item.src, code: item.code });
+    return;
+  }
+  const scripts = Array.prototype.slice.call(document.querySelectorAll("script"));
+  for (let i = 0; i < scripts.length; i++) {
+    const el = scripts[i];
+    if (el.__tcModule) continue;
+    const type = ((el.getAttribute && el.getAttribute("type")) || "").toLowerCase();
+    const src = (el.getAttribute && el.getAttribute("src")) || "";
+    const code = src ? "" : (el.textContent || el.text || "");
+    const isModule = type === "module" || (!src && globalThis.__moduleStmt.test(code));
+    if (!isModule) continue;
+    el.__tcModule = true;
+    el.__tcDone = true;
+    globalThis.__currentModuleEl = el; // for document.currentScript during eval
+    globalThis.__RESULT = JSON.stringify({ src, code });
+    return;
+  }
+  globalThis.__currentModuleEl = null;
+  globalThis.__RESULT = "";
+};
+// getByRole/getByText/getByLabel resolved IN the LIVE isolate, returning each match's
+// document-order index (querySelectorAll('*') position) so the Playwright shim can dispatch
+// on `*`[idx] in the SAME context. The shim used to resolve these over a re-serialized
+// snapshot (turbo-surf-view's by_role/by_text/by_label) and dispatch the snapshot's idx onto
+// the live DOM — but serialize→reparse can reorder elements (e.g. portal'd MUI Autocomplete
+// options / dialogs), so the idx pointed at the WRONG live node (a wrapper, not the option),
+// and the click never reached the option's onClick. Resolving here over the live DOM keeps
+// the idx and the dispatch in one context. Mirrors the Rust matchers (aria.rs/locator.rs).
+globalThis.__tcGetBy = function (kind, value, name, root) {
+  // `idx` is always the GLOBAL document-order position (so the shim dispatches on `*`[idx]).
+  // `root` scopes matching to within elements matching that selector (descendant-or-self) —
+  // backs `parentLocator.getByRole/getByText/getByLabel(...)`.
+  const all = Array.prototype.slice.call(document.querySelectorAll("*"));
+  let inScope = null;
+  if (root) {
+    inScope = new Set();
+    const roots = Array.prototype.slice.call(document.querySelectorAll(root));
+    for (let ri = 0; ri < roots.length; ri++) {
+      inScope.add(roots[ri]);
+      const sub = roots[ri].querySelectorAll("*");
+      for (let si = 0; si < sub.length; si++) inScope.add(sub[si]);
+    }
+  }
+  const attr = (el, n) => (el && el.getAttribute ? el.getAttribute(n) : null) || "";
+  const roleOf = (el) => {
+    const r = attr(el, "role");
+    if (r) return r;
+    const tag = (el.tagName || "").toLowerCase();
+    if (tag === "input") {
+      const t = attr(el, "type").toLowerCase();
+      return t === "checkbox" ? "checkbox" : t === "radio" ? "radio"
+        : (t === "button" || t === "submit" || t === "reset") ? "button" : "textbox";
+    }
+    return ({ a: "link", button: "button", select: "combobox", textarea: "textbox" })[tag] || "generic";
+  };
+  const accName = (el) => {
+    const cands = [attr(el, "aria-label").trim(), (el.textContent || "").trim(),
+      attr(el, "placeholder").trim(), attr(el, "value").trim(), attr(el, "title").trim()];
+    for (const c of cands) if (c) return c;
+    return "";
+  };
+  // Substring match, or a `/pattern/flags` regex literal (mirrors turbo-surf-view).
+  const tmatch = (v, want) => {
+    if (want == null) return true;
+    const m = /^\/(.*)\/([a-z]*)$/.exec(want);
+    if (m) { try { return new RegExp(m[1], m[2]).test(v); } catch (_e) { return false; } }
+    return String(v).indexOf(want) >= 0;
+  };
+  const idxOf = (el) => all.indexOf(el);
+  let hits = [];
+  if (kind === "role") {
+    for (const el of all) if (roleOf(el) === value && tmatch(accName(el), name)) hits.push(el);
+  } else if (kind === "label") {
+    const seen = new Set();
+    const push = (el) => { if (el && !seen.has(el)) { seen.add(el); hits.push(el); } };
+    for (const lab of document.querySelectorAll("label")) {
+      if (!tmatch((lab.textContent || "").trim(), value)) continue;
+      const forId = attr(lab, "for");
+      if (forId) push(document.getElementById(forId));
+      const id = attr(lab, "id");
+      if (id) for (const t of document.querySelectorAll('[aria-labelledby~="' + id + '"]')) push(t);
+      push(lab.querySelector("input,select,textarea"));
+    }
+    for (const el of document.querySelectorAll("[aria-label]")) if (tmatch(attr(el, "aria-label"), value)) push(el);
+  } else if (kind === "text") {
+    // Leaf-text match: the element's text matches AND no descendant element also matches
+    // (so we target the tightest node, like turbo-surf-view's by_text).
+    for (const el of all) {
+      if (!tmatch((el.textContent || "").trim(), value)) continue;
+      let childMatch = false;
+      for (const c of el.querySelectorAll("*")) { if (tmatch((c.textContent || "").trim(), value)) { childMatch = true; break; } }
+      if (!childMatch) hits.push(el);
+    }
+  }
+  if (inScope) hits = hits.filter((el) => inScope.has(el));
+  globalThis.__RESULT = JSON.stringify(hits.map((el) => ({ idx: idxOf(el) })));
+};
+
+// Resolve a locator through an nth-aware scope CHAIN, then match its leaf. `scope` is an
+// ordered list of {sel, idx}: at each level, querySelectorAll(sel) within the current set,
+// and when idx != null keep only that one (the `.nth(i)` of a parent locator). The leaf is
+// either {selector} (getByTestId/locator) or {getBy:{kind,value,name}} (getByRole/Text/Label).
+// idx in the output is the GLOBAL document-order position so the shim dispatches on `*`[idx].
+// Needed because a CSS-concat selector can't express "the nth match's subtree".
+globalThis.__tcResolveScoped = function (scope, leaf) {
+  let cur = [document];
+  for (let si = 0; si < (scope || []).length; si++) {
+    const s = scope[si];
+    let next = [];
+    for (let ci = 0; ci < cur.length; ci++) {
+      let m;
+      try {
+        m = cur[ci].querySelectorAll(s.sel);
+      } catch (e) {
+        m = [];
+      }
+      for (let mi = 0; mi < m.length; mi++) next.push(m[mi]);
+    }
+    // Apply a Locator.filter({hasText|hasNotText}) at this level BEFORE indexing, so a
+    // `parent.filter(...).first()/nth()` scopes children to the same element the static
+    // read path picks (a CSS-concat selector can't express the text filter).
+    if (s.filter) {
+      next = next.filter((el) => {
+        const txt = (el.textContent || "");
+        if (s.filter.hasText != null && txt.indexOf(s.filter.hasText) === -1) return false;
+        if (s.filter.hasNotText != null && txt.indexOf(s.filter.hasNotText) !== -1) return false;
+        return true;
+      });
+    }
+    if (s.idx != null) {
+      const i = s.idx < 0 ? next.length + s.idx : s.idx;
+      next = next[i] ? [next[i]] : [];
+    }
+    cur = next;
+  }
+  const all = Array.prototype.slice.call(document.querySelectorAll("*"));
+  if (leaf && leaf.selector) {
+    let res = [];
+    for (let ci = 0; ci < cur.length; ci++) {
+      let m;
+      try {
+        m = cur[ci].querySelectorAll(leaf.selector);
+      } catch (e) {
+        m = [];
+      }
+      for (let mi = 0; mi < m.length; mi++) res.push(m[mi]);
+    }
+    globalThis.__RESULT = JSON.stringify(res.map((el) => ({ idx: all.indexOf(el) })));
+    return;
+  }
+  if (leaf && leaf.getBy) {
+    // Reuse __tcGetBy's role/text/label matcher by marking the resolved roots and scoping to
+    // them (descendant-or-self via the [data-tc-scope] root selector).
+    for (let ci = 0; ci < cur.length; ci++) if (cur[ci].setAttribute) cur[ci].setAttribute("data-tc-scope", "");
+    globalThis.__tcGetBy(leaf.getBy.kind, leaf.getBy.value, leaf.getBy.name, "[data-tc-scope]");
+    const out = globalThis.__RESULT;
+    for (let ci = 0; ci < cur.length; ci++) if (cur[ci].removeAttribute) cur[ci].removeAttribute("data-tc-scope");
+    globalThis.__RESULT = out;
+    return;
+  }
+  globalThis.__RESULT = "[]";
+};
+
+// Apply CSS `:hover` styles for a hovered element. turbo-dom's cascade has no pointer state,
+// so content revealed only by `.trigger:hover .menu { display:block }` (hover dropdowns/menus
+// — e.g. the app's UserMenu, overridden to open on hover) stays display:none and waitFor
+// (state:'visible') hangs. We simulate hover: mark the hovered chain (the element, its
+// ancestors, and its deepest-first-child descendant path — the nodes a pointer over the
+// element is "on") with [data-tc-hover], then for every `:hover` style rule (from <style>
+// text AND any constructable/inserted sheets), rewrite `:hover` → `[data-tc-hover]`, match it
+// live, and apply the rule's declarations INLINE on the matched elements — inline style feeds
+// both this env's getComputedStyle and rtdom's native cascade (is_visible), so the reveal is
+// observable. Best-effort + flat-rule only (skips nested @media); enough for hover menus.
+globalThis.__tcApplyHover = function (el) {
+  if (!el || !el.setAttribute) return;
+  const mark = (n) => {
+    if (n && n.setAttribute) n.setAttribute("data-tc-hover", "");
+  };
+  // A pointer over `el` is "on" el, all its ancestors, and (since we have no layout to know
+  // which leaf the cursor lands on) any of its descendants — mark all three so a `:hover`
+  // rule anchored on a nested trigger (e.g. MUI's `&:hover` on the menu root inside the
+  // hovered wrapper) still matches.
+  mark(el);
+  for (let a = el.parentElement; a; a = a.parentElement) mark(a);
+  try {
+    const desc = el.querySelectorAll("*");
+    for (let i = 0; i < desc.length; i++) mark(desc[i]);
+  } catch (e) {}
+  const cssTexts = [];
+  try {
+    const styles = document.querySelectorAll("style");
+    for (let i = 0; i < styles.length; i++) cssTexts.push(styles[i].textContent || "");
+  } catch (e) {}
+  try {
+    const sheets = document.styleSheets || [];
+    for (let si = 0; si < sheets.length; si++) {
+      let rules;
+      try {
+        rules = sheets[si].cssRules || [];
+      } catch (e) {
+        rules = [];
+      }
+      for (let ri = 0; ri < rules.length; ri++) cssTexts.push(String(rules[ri].cssText || ""));
+    }
+  } catch (e) {}
+  // Flatten nested CSS (emotion serializes `.css-x{ base; &:hover .menu{ … } }`) into flat
+  // (selector, decls) rules, resolving `&` to the parent selector. A flat-regex parse can't
+  // do this — the reveal rule is nested under the trigger's class, with `&` standing in for it.
+  const flat = [];
+  const resolveSel = (parent, sel) =>
+    sel
+      .split(",")
+      .map((p) => {
+        p = p.trim();
+        if (!parent) return p;
+        return p.indexOf("&") >= 0 ? p.replace(/&/g, parent) : parent + " " + p;
+      })
+      .join(",");
+  const flatten = (css) => {
+    let pos = 0;
+    const parse = (parentSel) => {
+      let buf = "";
+      let declBuf = "";
+      while (pos < css.length) {
+        const ch = css[pos++];
+        if (ch === "}") {
+          if (buf.indexOf(":") >= 0) declBuf += buf;
+          if (declBuf.trim() && parentSel) flat.push({ sel: parentSel, decls: declBuf.trim() });
+          return;
+        }
+        if (ch === ";") {
+          declBuf += buf + ";";
+          buf = "";
+          continue;
+        }
+        if (ch === "{") {
+          parse(resolveSel(parentSel, buf.trim()));
+          buf = "";
+          continue;
+        }
+        buf += ch;
+      }
+      if (declBuf.trim() && parentSel) flat.push({ sel: parentSel, decls: declBuf.trim() });
+    };
+    parse("");
+  };
+  for (let ci = 0; ci < cssTexts.length; ci++) flatten(cssTexts[ci]);
+  for (let fi = 0; fi < flat.length; fi++) {
+    const sel = flat[fi].sel;
+    if (sel.indexOf(":hover") < 0) continue;
+    const parts = sel.split(",");
+    for (let pi = 0; pi < parts.length; pi++) {
+      const s = parts[pi].trim();
+      if (s.indexOf(":hover") < 0) continue;
+      const rw = s.replace(/:hover/g, "[data-tc-hover]");
+      let targets;
+      try {
+        targets = document.querySelectorAll(rw);
+      } catch (e) {
+        continue;
+      }
+      for (let ti = 0; ti < targets.length; ti++) {
+        const t = targets[ti];
+        const decls = flat[fi].decls.split(";");
+        for (let di = 0; di < decls.length; di++) {
+          const c = decls[di].indexOf(":");
+          if (c < 0) continue;
+          const prop = decls[di].slice(0, c).trim();
+          const val = decls[di].slice(c + 1).trim();
+          if (!prop) continue;
+          try {
+            t.style.setProperty(prop, val);
+          } catch (e) {
+            try {
+              t.style[prop] = val;
+            } catch (e2) {}
+          }
+        }
+      }
+    }
+  }
+};
+
+// Pending-work signal for the Rust pump loop: "1" while timers are queued, a
+// <script> hasn't run, an ES module is unclaimed, or a fetch is in-flight (more to do
+// after the next async drain), else "0".
 globalThis.__pendingWork = () =>
-  __timers.length > 0 || Array.prototype.some.call(document.querySelectorAll("script"), (s) => !s.__tcDone) ? "1" : "0";
+  (globalThis.__pendingFetches || 0) > 0 || __timers.length > 0 || ((globalThis.__esmSrcQueue || []).length) > 0 || Array.prototype.some.call(document.querySelectorAll("script"), (s) => !s.__tcDone || (((s.getAttribute && s.getAttribute("type")) || "").toLowerCase() === "module" && !s.__tcModule)) ? "1" : "0";
+// In-flight fetch count — the interaction drain must keep pumping while > 0 even if
+// the visible tree looks stable (the response's re-render hasn't happened yet).
+globalThis.__pendingFetchCount = () => String(globalThis.__pendingFetches || 0);
 
 // A cheap "has the DOM changed?" signal for the interaction drain: element count + the
 // total length of input values (so a controlled-input edit registers). Lets the drain
@@ -1237,19 +1759,26 @@ globalThis.__domSig = () => {
 })();"##;
 
 fn make_runtime(base: &str, cookies: &str, ua: &str) -> JsRuntime {
-    let rt = JsRuntime::new(RuntimeOptions {
-        extensions: vec![turbo_dom::init()],
-        ..Default::default()
-    });
-    let jar = if cookies.is_empty() {
+    // Build the shared cookie jar first so it backs BOTH page `fetch` (op_state) and the
+    // ES-module loader (`<script type=module>` import graphs) — same session, one jar.
+    let jar: Jar = Rc::new(RefCell::new(if cookies.is_empty() {
         CookieJar::new()
     } else {
         CookieJar::from_storage_state(cookies)
-    };
+    }));
+    let rt = JsRuntime::new(RuntimeOptions {
+        extensions: vec![turbo_dom::init()],
+        module_loader: Some(Rc::new(NetModuleLoader {
+            base: base.to_string(),
+            jar: jar.clone(),
+            ua: ua.to_string(),
+        })),
+        ..Default::default()
+    });
     let state = rt.op_state();
     let mut state = state.borrow_mut();
     state.put::<Base>(Base(base.to_string()));
-    state.put::<Jar>(Rc::new(RefCell::new(jar)));
+    state.put::<Jar>(jar);
     state.put::<Ua>(Ua(ua.to_string()));
     drop(state);
     rt
@@ -1561,6 +2090,8 @@ async fn run_hydrate(rt: &mut JsRuntime, html: &str, base: &str) -> Result<Strin
         rt.execute_script("<hydrate>", "globalThis.__tcHydrate = __hydrate();")
             .map_err(|e| e.to_string())?;
         drain_event_loop(rt).await?;
+        drain_module_scripts(rt, base).await?;
+        drain_event_loop(rt).await?;
         let pending = rt
             .execute_script("<pending>", "__pendingWork()")
             .map_err(|e| e.to_string())?;
@@ -1569,6 +2100,77 @@ async fn run_hydrate(rt: &mut JsRuntime, html: &str, base: &str) -> Result<Strin
         }
     }
     Ok(crate::browser_env::document_html())
+}
+
+// Evaluate every un-run ES-module `<script>` (claimed via `__takeModuleScript`) through
+// deno_core's real module graph: inline modules load from their own code, `src` modules
+// load by URL (the `NetModuleLoader` fetches them + their imports over the host net).
+// This is the path a Next dev / turbopack build (served as ES modules) needs to hydrate.
+async fn drain_module_scripts(rt: &mut JsRuntime, base: &str) -> Result<(), String> {
+    for n in 0..1000usize {
+        rt.execute_script("<take-mod>", "globalThis.__takeModuleScript();")
+            .map_err(|e| e.to_string())?;
+        let g = rt
+            .execute_script(
+                "<take-mod-r>",
+                "String(globalThis.__RESULT == null ? '' : globalThis.__RESULT)",
+            )
+            .map_err(|e| e.to_string())?;
+        let desc = read_string(rt, g)?;
+        if desc.is_empty() {
+            break;
+        }
+        let v: deno_core::serde_json::Value =
+            deno_core::serde_json::from_str(&desc).unwrap_or(deno_core::serde_json::Value::Null);
+        let src = v.get("src").and_then(|s| s.as_str()).unwrap_or("");
+        let code = v
+            .get("code")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_string();
+        let spec_str = if src.is_empty() {
+            format!("{}#tcmod-{n}", base.split('#').next().unwrap_or(base))
+        } else {
+            resolve(base, src).unwrap_or_else(|| src.to_string())
+        };
+        let Ok(spec) = ModuleSpecifier::parse(&spec_str) else {
+            continue;
+        };
+        // Code in hand (inline module, OR a `<script src>` chunk whose fetched body was
+        // ESM — `__execScriptEl` already fetched it and queued it) → evaluate from that
+        // code with `spec` as its identity so the import graph still resolves relative to
+        // the src URL. Only a bare `src` with no body re-fetches through the loader.
+        let loaded = if code.is_empty() {
+            rt.load_side_es_module(&spec).await
+        } else {
+            rt.load_side_es_module_from_code(&spec, code).await
+        };
+        match loaded {
+            Ok(id) => {
+                // Point document.currentScript at the chunk's element for the duration of
+                // evaluation: turbopack chunks self-register via TURBOPACK.push([document
+                // .currentScript, …]) and key the chunk by currentScript.src. Without this
+                // an ESM chunk registers under a stale path and the entry's chunk-load
+                // Promise.all never resolves (→ the app never hydrates, no error).
+                rt.execute_script(
+                    "<mod-cs>",
+                    "try{document.currentScript = globalThis.__currentModuleEl || null;}catch(_e){}",
+                )
+                .map_err(|e| e.to_string())?;
+                let ev = rt.mod_evaluate(id).await;
+                rt.execute_script(
+                    "<mod-cs0>",
+                    "try{document.currentScript = null;}catch(_e){}",
+                )
+                .map_err(|e| e.to_string())?;
+                if let Err(e) = ev {
+                    eprintln!("module eval error ({spec_str}): {e}");
+                }
+            }
+            Err(e) => eprintln!("module load error ({spec_str}): {e}"),
+        }
+    }
+    Ok(())
 }
 
 // RAII runaway-execution watchdog: terminates the isolate if an op runs past the
@@ -1613,6 +2215,13 @@ impl Drop for Watchdog {
 // nothing is pending. Used after an interaction event re-enters the running app (the
 // handler may setState → schedule a re-render → fetch → schedule more).
 async fn drain_to_quiescence(rt: &mut JsRuntime) -> Result<(), String> {
+    // Fresh virtual-time window for this interaction so its transitions (e.g. a closing
+    // MUI modal's Fade-exit timer) fire + complete even when the clock is already large.
+    rt.execute_script(
+        "<reset-budget>",
+        "globalThis.__resetTimerBudget && globalThis.__resetTimerBudget();",
+    )
+    .map_err(|e| e.to_string())?;
     const MAX_ROUNDS: usize = 500;
     // Stop early once the visible tree has been STABLE for this many rounds even though
     // timers keep firing: a real app's analytics/idle-scheduler never stops posting
@@ -1621,6 +2230,13 @@ async fn drain_to_quiescence(rt: &mut JsRuntime) -> Result<(), String> {
     let mut stable = 0usize;
     let mut last_sig = String::new();
     for _ in 0..MAX_ROUNDS {
+        // RUN any newly-injected <script>s, then drain. An interaction can pull a chunk at
+        // runtime — Next's `dynamic(() => import('…'))` (lazy modals: AddVacationTimeModal,
+        // etc.) appends a <script src> when the component first renders. Without running it
+        // the chunk never executes, the import() promise never resolves, and the modal never
+        // appears. __hydrate is idempotent (skips already-run scripts via __tcDone).
+        rt.execute_script("<hydrate>", "globalThis.__tcHydrate = __hydrate();")
+            .map_err(|e| e.to_string())?;
         drain_event_loop(rt).await?;
         let fired = rt
             .execute_script("<timers>", "__runTimers(2000)")
@@ -1632,10 +2248,20 @@ async fn drain_to_quiescence(rt: &mut JsRuntime) -> Result<(), String> {
         let sig_v = rt
             .execute_script("<domsig>", "__domSig()")
             .map_err(|e| e.to_string())?;
+        let fetches = rt
+            .execute_script("<fetches>", "__pendingFetchCount()")
+            .map_err(|e| e.to_string())?;
         let still = read_string(rt, pending)? == "1";
         let fired_any = read_string(rt, fired)? != "0";
+        let awaiting_fetch = read_string(rt, fetches)? != "0";
         if !still && !fired_any {
             break; // genuinely idle
+        }
+        // A request is outstanding: keep pumping (don't let the stable-DOM early-out
+        // fire) so the response's re-render — a modal close, a redirect — lands.
+        if awaiting_fetch {
+            stable = 0;
+            continue;
         }
         let sig = read_string(rt, sig_v)?;
         if sig == last_sig {
