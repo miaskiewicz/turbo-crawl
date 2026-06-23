@@ -35,6 +35,15 @@ function site() {
       res.writeHead(200, { "content-type": "text/html" });
       return res.end(`<title>results</title><p>q=${url.searchParams.get("q")}</p>`);
     }
+    if (url.pathname === "/spa") {
+      // Client-rendered: #root is EMPTY in the shipped shell and only filled once the
+      // page's own JS runs (a live session). Distinguishes a re-hydrated reload from a
+      // raw shell re-fetch.
+      res.writeHead(200, { "content-type": "text/html" });
+      return res.end(
+        `<title>spa</title><div id="root"></div><script>document.getElementById('root').textContent='HYDRATED';</script>`,
+      );
+    }
     res.writeHead(200, { "content-type": "text/html" });
     res.end(`<title>${url.pathname}</title><main><h1>Page ${url.pathname}</h1></main>`);
   });
@@ -297,6 +306,21 @@ test("Page navigation: goto / reload / goBack / goForward", async () => {
   assert.equal(await p.title(), "/a");
   await p.goForward();
   assert.equal(await p.title(), "/b");
+  server.close();
+});
+
+test("Page.reload({waitUntil:'networkidle'}) re-hydrates the live SPA", async () => {
+  // The settings language-survives-reload spec did `page.reload({waitUntil:'networkidle'})`
+  // and read a client-rendered select; reload IGNORED the option and never re-opened a live
+  // session, so the reloaded doc stayed the raw shell (empty select → value ""). A networkidle
+  // reload must re-hydrate, like a networkidle goto.
+  const server = site();
+  const base = await listen(server);
+  const p = newPage();
+  await p.goto(`${base}/spa`, { waitUntil: "networkidle" });
+  assert.equal(await p.locator("#root").textContent(), "HYDRATED");
+  await p.reload({ waitUntil: "networkidle" });
+  assert.equal(await p.locator("#root").textContent(), "HYDRATED");
   server.close();
 });
 

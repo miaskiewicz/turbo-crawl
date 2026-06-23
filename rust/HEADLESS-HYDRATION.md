@@ -720,3 +720,65 @@ payroll-config: resolved as NOT engine — its `openConfig` calls `login()` with
 navigating to the login page, so it fails at login in BOTH Playwright and turbo-surf (a spec
 issue); the `about:blank` console error during it is benign (the pending-fetch counter settles
 in a finally) and is now a no-fetch blank doc anyway.
+
+## Full re-triage on clean staging (2026-06-23, Cycle 21)
+
+Re-ran the whole suite through the shim against **clean staging** (payroll-app-tc +
+flux-apis-staging both at `origin/staging`, the merged FLUX-1332/1335/1336/1337 fixes in):
+**73 / 102 pass, 0 skip.** Triaged every red with the side-by-side method (each failing spec
+run BOTH through real Chromium and turbo-surf, with a fresh seed+teardown per run so data can't
+collide). Verdicts:
+
+| Suite | Verdict | Cause |
+| --- | --- | --- |
+| auth-guards delegated-write | pollution-only | green 7/7 in isolation; full-run reds were cross-suite grant pollution |
+| knowledge-base | NOT engine (locale) | app defaults es-MX, suite asserts English (`getByLabel('Title')`=Título); #255 removed the seed-leaked en-US that masked it |
+| company-settings/pay-schedule | **ENGINE** | filter scope dropped (below) |
+| off-cycle/termination | **ENGINE** | RSC soft-nav query dropped (below) |
+| settings/account | **ENGINE** (fixed) | `page.reload()` didn't re-hydrate (below) |
+| company-settings/tax-registrations | NOT engine | `waitForResponse('/tax-registrations')` never matches real `/entity-tax-registrations` → FLUX-1341 / payroll-app#212 |
+| payroll-configuration | NOT engine | `openConfig`→`login()` never navigates to `/login` → FLUX-1342 / payroll-app#213 |
+| payroll-wizard/vacation | NOT engine (backend) | `/leave-requests/bulk-upload` 400 "Failed to parse CSV" — `csv-parse` strict mode rejects benign shapes (stripped trailing col, BOM) → FLUX-1340 / flux-apis#260 |
+
+### Engine fixes (commit `fix(render+shim): two engine bugs found via payroll e2e side-by-side`)
+
+1. **RSC soft-nav dropped the query string.** `__rscNav` recorded only `u.pathname`, so
+   `router.push('/off-cycle/new/termination?employeeIds=42')` lost `?employeeIds=` and the
+   termination spec's `waitForURL(/…\/termination\?employeeIds=/)` never matched. Now records
+   `pathname + search + hash`, stripping Next's internal `_rsc` cache-buster (a hard reload
+   carrying `_rsc` returns a flight payload, not HTML). Guard:
+   `rsc_soft_nav_preserves_query_and_strips_rsc_param`. **e2e 2/2.**
+2. **`Locator.filter()` dropped the scope for child locators.** `.filter({hasNotText})` drops
+   `_selector` (a filtered set isn't one CSS selector), so
+   `cards.filter({hasNotText:x}).first().getByTestId('y')` resolved the child against the
+   UNFILTERED set → the pay-schedule delete-409 guard clicked the wrong card's edit-toggle and
+   the delete never revealed. Now a serializable filter spec (`hasText`/`hasNotText`) rides the
+   scope chain (`_scopeSel` survives filter); `__tcResolveScoped` applies it before indexing.
+   Guard: `scoped_resolve_applies_filter_before_indexing`. **e2e 2/2.**
+
+Both validated against the real app (rebuilt napi addon, merged the three not-engine PRs
+locally, reran). Render suite 56/56; shim surface no new regressions.
+
+### Engine fix 3 — settings `page.reload()` didn't re-hydrate (commit `fix(shim): reload(networkidle) re-hydrates`)
+The language-survives-reload step did `page.reload({waitUntil:'networkidle'})` then read the
+language select — which read `""`. Traced (url probes through the live session): before the
+reload `page.url()` was correct (`…/settings/personal-profile`), but **after** the reload the
+isolate's `location.href` was `about://blank`, cookies empty, the select absent. Root cause:
+the shim's `reload()` **ignored its `opts`** — unlike `goto`, a `networkidle` reload never
+re-opened a live session, so the reloaded doc stayed the raw un-hydrated shell (empty select →
+`""`). Fix: `reload(opts)` mirrors `goto` — `_navigate(this._url)` then, on
+`waitUntil:'networkidle'`, `_openLiveSession()` (re-hydrate). The whole settings journey
+(language → name → address → email) now passes **2/2**. Guard: surface test
+"Page.reload({waitUntil:'networkidle'}) re-hydrates the live SPA".
+
+### Still open (next layer — the original failures masked these)
+- **tax-registrations (residual):** with the predicate fixed the save now succeeds, but the
+  confirm dialog's `waitFor(state:'hidden')` times out — a MUI Dialog close not detected after
+  the mutation (engine modal-hide family) OR an app gate; needs a PW recheck with the fix.
+- **vacation (residual):** with the CSV parse fixed the upload now reaches date validation and
+  fails `Invalid date format for Start Date. Expected YYYY-MM-DD` — a next-layer test/backend
+  date issue, not the parser.
+
+Tickets this round: FLUX-1340 (leave CSV parse → flux-apis#260), FLUX-1341 (tax-reg predicate →
+payroll-app#212), FLUX-1342 (payroll-config login nav → payroll-app#213); FLUX-1338/1339 are
+unrelated product features filed the same day.

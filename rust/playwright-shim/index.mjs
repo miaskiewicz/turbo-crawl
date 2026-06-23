@@ -988,8 +988,15 @@ class Page {
     if (opts?.waitUntil === "networkidle") await this._openLiveSession();
     return resp;
   }
-  async reload() {
-    return this._navigate(this._url); // re-fetch in place — no history entry
+  async reload(opts) {
+    // Re-fetch in place — no history entry. Like goto, a `waitUntil:'networkidle'` reload
+    // re-opens a LIVE session so a client-rendered SPA re-hydrates (its forms/dashboards
+    // re-appear); without this the reloaded doc stays the raw un-hydrated shell and reads
+    // (e.g. a settings select's value) see an empty DOM.
+    this._autoHydrate = opts?.waitUntil !== "commit";
+    const resp = await this._navigate(this._url);
+    if (opts?.waitUntil === "networkidle") await this._openLiveSession();
+    return resp;
   }
   async goBack() {
     const prev = this._history.pop();
