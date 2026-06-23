@@ -3,6 +3,70 @@
 All notable changes to turbo-surf are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer.
 
+## [0.2.2]
+The headless **Playwright-shim parity** push: the payroll-app Playwright e2e suite
+now runs through the browserless shim (over the napi addon, **no Chromium**), driving
+a real authenticated Next.js App Router SPA. Side-by-siding every failure against real
+Chromium (reseeded per suite) drove the engine to parity — the suite's remaining reds
+all reproduce in Chromium too (app/backend/test data, not the engine). See
+`HEADLESS-HYDRATION.md` for the full record.
+
+### Added
+- **ES module support in the render tier** — `<script type=module>` + `import` graphs
+  fetched/linked over the host net (shared cookie jar, same-origin), wired into the
+  hydration pump. Turbopack-dev entry execution (`document.currentScript` in the module
+  pump, `__name` helper); classic `<script src>` chunks with ESM bodies route to the
+  module pump.
+- **Live-isolate interaction drive** — `getByRole/getByText/getByLabel` resolve and
+  dispatch IN the running isolate (live `querySelectorAll('*')` index), so fills/clicks
+  reach the real app, not just the static snapshot. Web-first assertion retry
+  (re-pumps the live app between tries); `page.on('response')` / `waitForResponse`
+  backed by a real network log; fetch-aware drain (`__pendingFetches`) keeps pumping
+  until a mutation's success re-render lands.
+- **Nth-aware scope chain for nested locators** — `parent.nth(i).getBy*()` walks the
+  chain via `__tcResolveScoped` (a CSS-concat selector can't express "the i-th match's
+  subtree"); `getByRole/Text/Label`/`getByTestId` scope to the parent's subtree.
+- **CSS `:hover` simulation** — hover-revealed menus (incl. emotion's nested `&:hover`)
+  become visible by flattening the matched rules inline.
+- **Download capture + `ElementHandle` + polling `waitForFunction`**; keyboard events +
+  `navigator.clipboard`; `structuredClone`; `addInitScript`; `setInputFiles`;
+  per-test fixture sharing; `test.extend` custom fixtures.
+
+### Fixed
+- **App Router RSC hydration unblocked** — defined `document.location` (a browser
+  invariant the dev RSC flight client reads via `findSourceMapURL`); its absence threw
+  inside the flight-stream parse and the React root suspended forever. 0 → 488 fibers on
+  the live payroll route.
+- **RSC soft-nav follow + query preservation** — Next client navigation
+  (`router.push/replace`) fetches the target's RSC flight and never advances
+  `location` headlessly; the target is recorded on `__rscNav` and re-loaded hop-by-hop
+  (login redirect chain completes). It now records `pathname + search + hash` (was
+  `pathname` only — dropped `?employeeIds=` etc.) and strips Next's `_rsc` cache-buster.
+  Guard: `rsc_soft_nav_preserves_query_and_strips_rsc_param`.
+- **`reload({waitUntil:'networkidle'})` re-hydrates the live SPA** — `reload` ignored its
+  options (unlike `goto`), leaving the reloaded doc as the raw un-hydrated shell (a
+  settings select read `""`). Guard: surface "reload re-hydrates the live SPA".
+- **`Locator.filter()` scopes child locators** — `cards.filter({hasNotText: x}).first()
+  .getByTestId('y')` resolved against the UNFILTERED set; a serializable
+  `hasText`/`hasNotText` spec now rides the scope chain. Guard:
+  `scoped_resolve_applies_filter_before_indexing`.
+- **Browser-accurate click** — pointerdown→mousedown→focus(only if mousedown not
+  preventDefault'd + focusable)→pointerup→mouseup→click, pointer events first (MUI
+  v7/Radix gate on them); honors `preventDefault` so an `<a href="#">` whose onClick
+  toggles state doesn't also navigate.
+- **Playwright `isVisible` semantics** — `is_visible` ignores `aria-hidden` (pure
+  CSS/layout, like Playwright) and treats effective `opacity:0` / `display:none` /
+  `visibility:hidden` ancestors as hidden (closing MUI modals resolve
+  `waitFor(state:'hidden')`).
+- **Drain/timer correctness** — runtime-injected `<script>`s run during interaction
+  drains (`next/dynamic` lazy modals); the virtual-timer budget is RELATIVE per drain so
+  a closing MUI Fade's short exit timer isn't killed.
+- **Shim parity** — `waitFor` polls the requested state (visible/hidden/attached);
+  `page.evaluate` awaits a returned Promise; `waitForResponse` won't match a response
+  from an earlier step; `about:blank` is a no-fetch blank doc; `waitForFunction` returns
+  the function's value; RegExp locator names; `boundingBox` → null. Locale: the shim no
+  longer force-seeds `NEXT_LOCALE=en-US` (matches Playwright's es-MX default).
+
 ## [0.2.1]
 
 ### Fixed
