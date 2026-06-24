@@ -1951,6 +1951,89 @@ pub async fn render_page_with_budget(
     out
 }
 
+thread_local! {
+    /// Persistent render runtime, reused across `render_page_pooled` calls on a thread
+    /// so the V8-isolate boot + extension wiring is paid ONCE per worker thread instead
+    /// of per page — the dominant per-page cost on a JS-mode crawl (each page builds a
+    /// fresh isolate otherwise). Reuse is SAFE for the render contract the same way
+    /// [`EVAL_RT`] is: every call reinstalls a fresh DOM + re-runs the (idempotent)
+    /// `ENV_BOOTSTRAP` (which re-seeds the timer queue + env globals), and the binding's
+    /// V8 globals are cleared (`browser_env::reset`) after every call. Page-JS isolation
+    /// ACROSS pages is intentionally relaxed (a crawl doesn't need it); WITHIN a page the
+    /// isolate is still a true isolate. A poisoned runtime (budget-terminated, or any
+    /// error) is dropped instead of returned to the slot, so the next page starts clean.
+    static RENDER_RT: RefCell<Option<JsRuntime>> = const { RefCell::new(None) };
+}
+
+/// Repoint a reused runtime's per-page session (base URL / cookie jar / UA) in op
+/// state. The page `fetch`/`document.cookie` ops read these, so they must reflect the
+/// CURRENT page, not the one the runtime was first built for.
+fn reset_session(rt: &JsRuntime, base: &str, cookies: &str, ua: &str) {
+    let jar: Jar = Rc::new(RefCell::new(if cookies.is_empty() {
+        CookieJar::new()
+    } else {
+        CookieJar::from_storage_state(cookies)
+    }));
+    let state = rt.op_state();
+    let mut state = state.borrow_mut();
+    state.put::<Base>(Base(base.to_string()));
+    state.put::<Jar>(jar);
+    state.put::<Ua>(Ua(ua.to_string()));
+}
+
+/// Like [`render_page_with_budget`] but reuses a thread-local isolate across calls (see
+/// [`RENDER_RT`]) — the JS-crawl fast path. Only the classic-script render is pooled
+/// (module `import` graphs need a per-page module-loader base, which a reused runtime
+/// can't repoint), so this drives `render_page`, not the hydrate tier.
+pub async fn render_page_pooled(
+    html: &str,
+    base: &str,
+    script: &str,
+    budget_ms: u64,
+) -> Result<String, String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    // Take the pooled runtime (or build one on first use on this thread), repointing
+    // its session to this page.
+    let mut rt = match RENDER_RT.with(|c| c.borrow_mut().take()) {
+        Some(rt) => {
+            reset_session(&rt, base, "", "");
+            rt
+        }
+        None => make_runtime(base, "", ""),
+    };
+
+    let handle = rt.v8_isolate().thread_safe_handle();
+    let done = Arc::new(AtomicBool::new(false));
+    let watch = done.clone();
+    let watchdog = std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        while !watch.load(Ordering::Relaxed) {
+            if start.elapsed() >= std::time::Duration::from_millis(budget_ms) {
+                handle.terminate_execution();
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    });
+
+    let result = run_async_pooled(&mut rt, html, base, script).await;
+    done.store(true, Ordering::Relaxed);
+    let _ = watchdog.join();
+    crate::browser_env::reset(); // clear the binding while the isolate is still alive
+
+    match result {
+        Ok(html) => {
+            RENDER_RT.with(|c| *c.borrow_mut() = Some(rt)); // healthy → return to pool
+            Ok(html)
+        }
+        // Poisoned (budget terminate leaves the isolate in a terminated state, etc.) —
+        // drop the runtime so the next page rebuilds a clean one.
+        Err(e) => Err(budget_msg(&e, budget_ms)),
+    }
+}
+
 async fn run_async(
     rt: &mut JsRuntime,
     html: &str,
@@ -1964,6 +2047,48 @@ async fn run_async(
     rt.execute_script("<timers>", "__runTimers()")
         .map_err(|e| e.to_string())?;
     drain_event_loop(rt).await?; // promises queued by timer callbacks
+    Ok(crate::browser_env::document_html())
+}
+
+// Cross-page global scrub for the POOLED render path. A browser gives every navigation
+// a fresh global; a reused isolate does not, so a page that assigns `window.X = …` would
+// leak `X` into the next page. On the first pooled render this records the clean global
+// key set (env globals from `ENV_BOOTSTRAP` + V8 builtins); on every later render it
+// deletes any own-key NOT in that baseline, restoring fresh-navigation semantics for the
+// common "page sets window globals" case. (Builtins MUTATED in place aren't reverted —
+// `ENV_BOOTSTRAP` re-runs each page and re-seeds the env, covering the usual polyfills.)
+const SCRUB_GLOBALS: &str = r#"(() => {
+  if (!globalThis.__TS_BASELINE) {
+    const b = new Set(Object.getOwnPropertyNames(globalThis));
+    b.add("__TS_BASELINE");
+    globalThis.__TS_BASELINE = b;
+    return;
+  }
+  for (const k of Object.getOwnPropertyNames(globalThis)) {
+    if (!globalThis.__TS_BASELINE.has(k)) {
+      try { delete globalThis[k]; } catch (_e) { /* non-configurable: leave it */ }
+    }
+  }
+})()"#;
+
+// Pooled-path render: like [`run_async`] but scrubs page-added globals (see
+// [`SCRUB_GLOBALS`]) right after the env is (re)installed and before the page's own
+// script runs, so a reused isolate behaves like a fresh navigation.
+async fn run_async_pooled(
+    rt: &mut JsRuntime,
+    html: &str,
+    base: &str,
+    script: &str,
+) -> Result<String, String> {
+    install_dom(rt, html, base)?;
+    rt.execute_script("<scrub>", SCRUB_GLOBALS)
+        .map_err(|e| e.to_string())?;
+    rt.execute_script("<page>", script.to_string())
+        .map_err(|e| e.to_string())?;
+    drain_event_loop(rt).await?;
+    rt.execute_script("<timers>", "__runTimers()")
+        .map_err(|e| e.to_string())?;
+    drain_event_loop(rt).await?;
     Ok(crate::browser_env::document_html())
 }
 

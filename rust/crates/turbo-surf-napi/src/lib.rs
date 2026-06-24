@@ -249,6 +249,68 @@ pub fn render(html: String, base_url: String, script: String) -> Result<String> 
     .map_err(Error::from_reason)
 }
 
+/// A persistent render worker: one long-lived OS thread owning ONE reused tokio
+/// current-thread runtime, fed render jobs over a channel. Two wins over `render`'s
+/// per-call `thread::spawn` + fresh runtime: (1) the OS thread + tokio runtime are
+/// built once, not per page; (2) the render tier's thread-local isolate pool
+/// (`render_page_pooled`) lives on this one thread, so the V8 isolate boot is paid
+/// once per process instead of once per page. Renders serialize through it — a JS
+/// crawl drives pages sequentially, so that's the real access pattern.
+type RenderJob = (
+    String,
+    String,
+    String,
+    std::sync::mpsc::Sender<Result<String>>,
+);
+
+fn render_worker() -> &'static std::sync::Mutex<std::sync::mpsc::Sender<RenderJob>> {
+    static WORKER: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<RenderJob>>> =
+        std::sync::OnceLock::new();
+    WORKER.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<RenderJob>();
+        std::thread::Builder::new()
+            .name("turbo-render".into())
+            .spawn(move || {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(_) => return,
+                };
+                while let Ok((html, base, script, reply)) = rx.recv() {
+                    let out = rt
+                        .block_on(turbo_surf_render::render_page_pooled(
+                            &html,
+                            &base,
+                            &script,
+                            turbo_surf_render::DEFAULT_RENDER_BUDGET_MS,
+                        ))
+                        .map_err(Error::from_reason);
+                    let _ = reply.send(out);
+                }
+            })
+            .expect("spawn render worker");
+        std::sync::Mutex::new(tx)
+    })
+}
+
+/// Like [`render`] but routed to the persistent render worker (reused thread + tokio
+/// runtime + pooled V8 isolate). Same string-in/string-out contract; the isolate is a
+/// true isolate per page, with cross-page page-JS isolation relaxed for crawl speed.
+#[napi]
+pub fn render_pooled(html: String, base_url: String, script: String) -> Result<String> {
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    render_worker()
+        .lock()
+        .map_err(|_| Error::from_reason("render worker poisoned"))?
+        .send((html, base_url, script, reply_tx))
+        .map_err(|_| Error::from_reason("render worker gone"))?;
+    reply_rx
+        .recv()
+        .map_err(|_| Error::from_reason("render worker dropped reply"))?
+}
+
 /// Hydrate a page by running ITS OWN scripts (inline + dynamically-injected chunks)
 /// the way a browser does — backs a JS-mode `goto` that drives a real SPA bundle to
 /// mount, with no caller-side script concatenation.

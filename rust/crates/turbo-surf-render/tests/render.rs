@@ -5,8 +5,42 @@
 
 use turbo_surf_render::{
     render_html, render_html_async, render_hydrate, render_hydrate_with_budget, render_page,
-    render_page_with_budget, run_with_dom, PageSession, DEFAULT_RENDER_BUDGET_MS,
+    render_page_pooled, render_page_with_budget, run_with_dom, PageSession,
+    DEFAULT_RENDER_BUDGET_MS,
 };
+
+// --- pooled render (reused isolate) keeps fresh-navigation isolation --------
+// `render_page_pooled` reuses one V8 isolate across pages for speed; the cross-page
+// global scrub must make a reused isolate behave like a fresh navigation. Run a page
+// that leaks `window` globals, then a page that reads them — interleaved with the
+// fresh `render_page` to prove byte parity and no A→B contamination.
+#[tokio::test]
+async fn pooled_render_scrubs_cross_page_globals() {
+    let base = "http://localhost/";
+    let leak = ("<body><div id='o'></div></body>",
+        r#"window.LEAK = "A"; document.getElementById('o').textContent = "A:" + (window.SEEN || "none"); window.SEEN = "fromA";"#);
+    let reader = ("<body><div id='o'></div></body>",
+        r#"document.getElementById('o').textContent = "B:" + (window.LEAK || "clean") + ":" + (window.SEEN || "none");"#);
+
+    let fresh_leak = render_page(leak.0, base, leak.1).await.unwrap();
+    let fresh_reader = render_page(reader.0, base, reader.1).await.unwrap();
+    assert!(
+        fresh_reader.contains("B:clean:none"),
+        "fresh reader sees no leaked globals: {fresh_reader}"
+    );
+
+    // Interleave through the pooled path; each page must match its fresh render.
+    for i in 0..3 {
+        let a = render_page_pooled(leak.0, base, leak.1, DEFAULT_RENDER_BUDGET_MS)
+            .await
+            .unwrap();
+        let b = render_page_pooled(reader.0, base, reader.1, DEFAULT_RENDER_BUDGET_MS)
+            .await
+            .unwrap();
+        assert_eq!(a, fresh_leak, "pooled leak page parity, iter {i}");
+        assert_eq!(b, fresh_reader, "pooled reader saw A's globals, iter {i}");
+    }
+}
 
 // --- reads over a real parsed DOM -------------------------------------------
 #[test]
