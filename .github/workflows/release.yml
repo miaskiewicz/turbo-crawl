@@ -22,7 +22,10 @@ jobs:
       matrix:
         include:
           - { host: macos-14, target: aarch64-apple-darwin, node: darwin-arm64 }
-          - { host: macos-13, target: x86_64-apple-darwin, node: darwin-x64 }
+          # darwin-x64 (Intel Mac) dropped: GitHub's macos-13 runners are scarce/slow
+          # and stall releases. Matches the sibling repos (turbo-dom/turbo-html2pdf).
+          # Apple-Silicon (darwin-arm64) covers modern Macs; Intel falls back to a clear
+          # "no prebuilt binary" error (build from source).
           - { host: ubuntu-24.04, target: x86_64-unknown-linux-gnu, node: linux-x64 }
           - { host: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, node: linux-arm64 }
           - { host: windows-latest, target: x86_64-pc-windows-msvc, node: win32-x64, ext: .exe }

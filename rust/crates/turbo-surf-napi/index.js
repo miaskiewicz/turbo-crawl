@@ -12,7 +12,8 @@ const { execFileSync } = require("node:child_process");
 // node platform/arch → napi-rs binary suffix
 const SUFFIX = {
   "darwin-arm64": "darwin-arm64",
-  "darwin-x64": "darwin-x64",
+  // darwin-x64 (Intel Mac) is no longer prebuilt — see release.yml. Unsupported
+  // platforms throw a clear error; a local cargo build still backs dev use.
   "linux-x64": "linux-x64-gnu",
   "linux-arm64": "linux-arm64-gnu",
   "win32-x64": "win32-x64-msvc",
