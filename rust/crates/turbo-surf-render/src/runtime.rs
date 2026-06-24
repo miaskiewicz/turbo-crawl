@@ -1758,6 +1758,22 @@ globalThis.__domSig = () => {
 })();
 })();"##;
 
+/// Initialize the V8 platform ONCE, on the calling thread. Since V8 11.6 every
+/// `JsRuntime` in a process must share the thread that first initialized the platform
+/// (deno_core does it lazily on whichever thread creates the first runtime). This engine
+/// creates isolates on several threads — the main-thread `evaluate` pool, `render`'s
+/// per-call thread, the pooled render worker, and each live session's thread — and
+/// `render` SPAWNS-then-JOINS its thread, so if that transient thread parents the
+/// platform and then exits, a runtime later created on another thread faults (SIGBUS on
+/// Linux; macOS tolerates it). Callers invoke this from a stable, long-lived thread (the
+/// napi addon's Node main thread) before any worker isolate is created, so the platform
+/// is parented somewhere that outlives every runtime.
+pub fn ensure_platform() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| JsRuntime::init_platform(None));
+}
+
 fn make_runtime(base: &str, cookies: &str, ua: &str) -> JsRuntime {
     // Build the shared cookie jar first so it backs BOTH page `fetch` (op_state) and the
     // ES-module loader (`<script type=module>` import graphs) — same session, one jar.

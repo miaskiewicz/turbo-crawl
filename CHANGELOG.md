@@ -3,6 +3,19 @@
 All notable changes to turbo-surf are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer.
 
+## [0.2.4]
+A **stability** fix for the multi-isolate process.
+
+### Fixed
+- **SIGBUS on Linux when isolates are created across threads** (#6) — since V8 11.6
+  every `JsRuntime` must share the thread that first initialized the V8 platform.
+  deno_core did this lazily on whichever thread created the first runtime; `render`
+  spawns-then-joins a per-call thread, so if that transient thread parented the platform
+  and exited, a later isolate on another thread faulted (SIGBUS on Linux; macOS
+  tolerated it). New `ensure_platform()` initializes the V8 platform once, eagerly, on
+  the napi addon's long-lived Node main thread before any worker isolate is created —
+  called from `evaluate`, `render`, `render_pooled`, `hydrate`, and `live_open`.
+
 ## [0.2.3]
 A **JS-render speed** pass on the crawl path: the render tier built a fresh V8 isolate
 per page (boot + the ~90 KB env bootstrap + parse dominate), so a JS-mode crawl paid
