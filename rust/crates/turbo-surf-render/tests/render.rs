@@ -17,10 +17,14 @@ use turbo_surf_render::{
 #[tokio::test]
 async fn pooled_render_scrubs_cross_page_globals() {
     let base = "http://localhost/";
-    let leak = ("<body><div id='o'></div></body>",
-        r#"window.LEAK = "A"; document.getElementById('o').textContent = "A:" + (window.SEEN || "none"); window.SEEN = "fromA";"#);
-    let reader = ("<body><div id='o'></div></body>",
-        r#"document.getElementById('o').textContent = "B:" + (window.LEAK || "clean") + ":" + (window.SEEN || "none");"#);
+    let leak = (
+        "<body><div id='o'></div></body>",
+        r#"window.LEAK = "A"; document.getElementById('o').textContent = "A:" + (window.SEEN || "none"); window.SEEN = "fromA";"#,
+    );
+    let reader = (
+        "<body><div id='o'></div></body>",
+        r#"document.getElementById('o').textContent = "B:" + (window.LEAK || "clean") + ":" + (window.SEEN || "none");"#,
+    );
 
     let fresh_leak = render_page(leak.0, base, leak.1).await.unwrap();
     let fresh_reader = render_page(reader.0, base, reader.1).await.unwrap();

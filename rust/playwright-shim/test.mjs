@@ -167,7 +167,9 @@ test("honest-throws for pixel APIs (G5)", async () => {
   await assert.rejects(() => page.screenshot(), /unavailable/);
   await assert.rejects(() => page.pdf(), /unavailable/);
   await assert.rejects(() => page.locator("button").screenshot(), /unavailable/);
-  await assert.rejects(() => page.locator("button").boundingBox(), /unavailable/);
+  // boundingBox returns null (no layout engine → unmeasurable), matching Playwright's
+  // null for a non-laid-out element — not a throw.
+  assert.equal(await page.locator("button").boundingBox(), null);
 });
 
 test("mock SPA hydrates through the shim (G15)", async () => {
@@ -328,9 +330,10 @@ test("honest throws for network/input/pixel", async () => {
   const page = newPage();
   await page.setContent("<a>x</a>");
   await assert.rejects(() => page.route("**"), /interception/);
+  // No synthetic pointer device → raw mouse coords stay an honest throw. (hover() and
+  // keyboard.press are real features now — key-event dispatch via the live session —
+  // covered in surface.test.mjs, so they're NOT asserted to throw here.)
   await assert.rejects(() => page.mouse.click(0, 0), /input/);
-  await assert.rejects(() => page.keyboard.press("a"), /input/);
-  await assert.rejects(() => page.locator("a").hover(), /input/);
 });
 
 pwTest("@playwright/test fixture: { page } is injected", async ({ page }) => {
