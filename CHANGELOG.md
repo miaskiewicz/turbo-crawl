@@ -3,6 +3,20 @@
 All notable changes to turbo-surf are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer.
 
+## [Unreleased]
+A **pooled-render latency** fix on the JS-crawl fast path.
+
+### Fixed
+- **Watchdog join latency in `render_page_pooled`** — the per-page execution-budget
+  watchdog polled completion on a 2 ms sleep loop, so `watchdog.join()` after a healthy
+  render blocked until the watchdog woke from its current sleep, adding up to 2 ms of
+  latency to *every* pooled render. The watchdog now `park_timeout`s on the budget
+  deadline and is `unpark`ed the instant the render completes, so a healthy render's join
+  returns in µs (an elapsed-guard loop survives spurious wakeups; the deadline still
+  terminates a runaway script). Measured on `quotes.toscrape.com/js` (warm pool):
+  **renderPooled 2.6 ms → 1.3 ms (−50%)**, output byte-identical. The politeness/network-
+  bound crawl wall is unchanged; CPU/parallel render throughput ~doubles.
+
 ## [0.2.4]
 A **Linux SIGBUS** fix in the Playwright-shim test harness, plus a new **Python
 (PyPI) binding**.
