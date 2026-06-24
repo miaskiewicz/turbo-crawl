@@ -1758,20 +1758,41 @@ globalThis.__domSig = () => {
 })();
 })();"##;
 
-/// Initialize the V8 platform ONCE, on the calling thread. Since V8 11.6 every
-/// `JsRuntime` in a process must share the thread that first initialized the platform
-/// (deno_core does it lazily on whichever thread creates the first runtime). This engine
-/// creates isolates on several threads — the main-thread `evaluate` pool, `render`'s
-/// per-call thread, the pooled render worker, and each live session's thread — and
-/// `render` SPAWNS-then-JOINS its thread, so if that transient thread parents the
-/// platform and then exits, a runtime later created on another thread faults (SIGBUS on
-/// Linux; macOS tolerates it). Callers invoke this from a stable, long-lived thread (the
-/// napi addon's Node main thread) before any worker isolate is created, so the platform
-/// is parented somewhere that outlives every runtime.
+/// Initialize the V8 platform ONCE, on a dedicated thread that lives for the whole
+/// process. Since V8 11.6 every `JsRuntime` must share the thread that first initialized
+/// the platform; deno_core does this lazily on whichever thread creates the FIRST runtime
+/// (jsruntime.rs: "all runtimes must have a common parent thread that initialized the V8
+/// platform"). This engine creates isolates on many threads — the `evaluate` pool,
+/// `render`'s per-call thread, the pooled render worker, each live session's thread — and
+/// `render` SPAWNS-then-JOINS its thread, so if that transient thread parents the platform
+/// and then exits, a runtime later created on another thread faults (SIGBUS on Linux;
+/// macOS tolerates it).
+///
+/// The parent must be both STABLE (outlives every runtime) and NOT the napi addon's Node
+/// main thread (which already runs Node's own V8 — initializing deno_core's V8 platform
+/// there interferes). So spawn a dedicated "v8-platform" keeper thread that calls
+/// `init_platform` and then parks forever; the platform is parented on a thread that
+/// never dies and never touches Node's V8. Blocks until init is done so the first runtime
+/// can't race ahead of it.
 pub fn ensure_platform() {
-    use std::sync::Once;
-    static INIT: Once = Once::new();
-    INIT.call_once(|| JsRuntime::init_platform(None));
+    use std::sync::mpsc::channel;
+    use std::sync::OnceLock;
+    static KEEPER: OnceLock<()> = OnceLock::new();
+    KEEPER.get_or_init(|| {
+        let (ready_tx, ready_rx) = channel::<()>();
+        std::thread::Builder::new()
+            .name("v8-platform".into())
+            .spawn(move || {
+                JsRuntime::init_platform(None);
+                let _ = ready_tx.send(());
+                // Park forever: the platform's parent thread must outlive every runtime.
+                loop {
+                    std::thread::park();
+                }
+            })
+            .expect("spawn v8 platform keeper");
+        let _ = ready_rx.recv(); // platform initialized before any runtime is built
+    });
 }
 
 fn make_runtime(base: &str, cookies: &str, ua: &str) -> JsRuntime {
