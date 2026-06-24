@@ -33,15 +33,18 @@ jobs:
   #    Matrix mirrors release.yml MINUS musl (manylinux covers the common case).
   # ---------------------------------------------------------------------------
   build:
-    name: build wheel ${{ matrix.target }}
+    name: build wheel ${{ matrix.os }} ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
+      # Hosts mirror release.yml: build linux-aarch64 NATIVELY on an arm runner,
+      # not manylinux+QEMU emulation — emulated builds of the V8-heavy crate stall
+      # / OOM. darwin-x64 (Intel) is dropped, matching the npm release matrix.
       matrix:
         include:
-          - { os: ubuntu-latest, target: x86_64, manylinux: auto }
-          - { os: ubuntu-latest, target: aarch64, manylinux: auto }
-          - { os: macos-latest, target: aarch64 }
+          - { os: macos-14, target: aarch64 }
+          - { os: ubuntu-24.04, target: x86_64, manylinux: auto }
+          - { os: ubuntu-24.04-arm, target: aarch64, manylinux: auto }
           - { os: windows-latest, target: x64 }
     steps:
       - uses: actions/checkout@v4
