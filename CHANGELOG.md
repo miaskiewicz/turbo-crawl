@@ -3,6 +3,32 @@
 All notable changes to turbo-surf are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer.
 
+## [0.2.3]
+A **JS-render speed** pass on the crawl path: the render tier built a fresh V8 isolate
+per page (boot + the ~90 KB env bootstrap + parse dominate), so a JS-mode crawl paid
+the full isolate boot on every page. A pooled fast path reuses one isolate across pages
+— boot is paid once per worker thread — with a cross-page global scrub so a reused
+isolate still renders like a fresh navigation. **11.5 ms → 3.2 ms per page** on
+`quotes.toscrape.com/js` (3.6×), output byte-identical to the fresh render.
+
+### Added
+- **Pooled render fast path** — `render_page_pooled` (Rust) / `renderPooled` (napi)
+  reuses a thread-local V8 isolate across pages, on a persistent render worker (one
+  long-lived thread + one reused tokio runtime). Per-page session repoint
+  (base/cookies/UA) + a global scrub (`SCRUB_GLOBALS`) restore fresh-navigation
+  semantics; a budget-terminated/errored runtime is dropped instead of repooled. The
+  competitive JS adapter drives it; `render` (fully isolated, fresh-per-page) is
+  unchanged for correctness-sensitive callers.
+- **`harness/hotpath/render-bench.mjs`** — reusable offline profiler for `native.render`
+  / `renderPooled` (faithful script extraction, cached sample, A/B + parity check).
+
+### Notes
+- Cross-page isolation is intentionally relaxed for crawl speed (matching the existing
+  `EVAL_RT` stance): the scrub reverts page-ADDED globals, not builtins mutated in place.
+- A V8 code cache for the bootstrap + page bundle was tried and reverted — with a fresh
+  isolate per page, `ConsumeCodeCache` costs more than a re-parse. Isolate reuse is the
+  real lever.
+
 ## [0.2.2]
 The headless **Playwright-shim parity** push: the payroll-app Playwright e2e suite
 now runs through the browserless shim (over the napi addon, **no Chromium**), driving
