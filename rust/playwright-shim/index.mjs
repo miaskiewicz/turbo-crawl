@@ -2161,7 +2161,14 @@ expect.extend = () => {};
 // ---------------------------------------------------------------------------
 // @playwright/test surface (drop-in over node:test) — fixtures, hooks, steps.
 // ---------------------------------------------------------------------------
-import { test as nodeTest, before, after, beforeEach, afterEach } from "node:test";
+import {
+  test as nodeTest,
+  describe as nodeDescribe,
+  before,
+  after,
+  beforeEach,
+  afterEach,
+} from "node:test";
 
 // A fixture set: each value is either a plain default or [fn, opts] / async fn
 // of ({ ...fixtures }, use). We resolve them lazily and tear down after `use`.
@@ -2322,16 +2329,24 @@ async function runWith(open, name, fn) {
 function makeDescribe() {
   // Push a skip frame around the describe body so a top-of-describe conditional
   // `test.skip(cond, …)` marks exactly the tests registered within it.
+  //
+  // Register a node:test SUITE (`describe`), not a `test`. A describe must be a
+  // suite so the nested `test(...)` calls in its body register as awaited suite
+  // members. Wrapping it in `nodeTest(...)` made the nested tests fire on the
+  // global runner WHILE the parent test was still running, so node cancelled them
+  // ("test did not finish before its parent and was cancelled") — and the dangling
+  // async test (holding a live-session V8 isolate) was torn down at process exit,
+  // which faulted (SIGBUS) on Linux. The Playwright describe body takes no args.
   const d = (name, fn) =>
-    nodeTest(name, async (t) => {
+    nodeDescribe(name, async () => {
       _skipStack.push({ skip: false });
       try {
-        return await fn(t);
+        return await fn();
       } finally {
         _skipStack.pop();
       }
     });
-  d.skip = (name, fn) => nodeTest.skip(name, fn ?? (() => {}));
+  d.skip = (name, fn) => nodeDescribe.skip(name, fn ?? (() => {}));
   d.only = (name, fn) => d(name, fn);
   d.serial = d;
   d.parallel = d;

@@ -6,9 +6,16 @@
 // Every `import … from "@playwright/test"` then resolves to the turbo-surf shim.
 // Toggle off without dropping the flag: TURBO_PLAYWRIGHT_SHIM=0.
 
-import { registerHooks } from "node:module";
+import * as nodeModule from "node:module";
 import { resolveHook } from "./loader-hooks.mjs";
 
 if (process.env.TURBO_PLAYWRIGHT_SHIM !== "0") {
-  registerHooks({ resolve: resolveHook });
+  // `registerHooks` (synchronous, in-thread) lands in node 22; on node 20 fall
+  // back to the off-thread `module.register()` loader (node >=20.6) so the
+  // drop-in resolves `@playwright/test` → the shim on both. Same redirect either way.
+  if (typeof nodeModule.registerHooks === "function") {
+    nodeModule.registerHooks({ resolve: resolveHook });
+  } else {
+    nodeModule.register("./loader.mjs", import.meta.url);
+  }
 }

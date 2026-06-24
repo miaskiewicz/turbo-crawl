@@ -25,6 +25,12 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
 
+      # `cargo test --workspace` (via `npm test`) builds the turbo-surf-py PyO3
+      # crate, which links libpython. Provide a Python so pyo3 resolves it.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Install
         run: npm ci
 

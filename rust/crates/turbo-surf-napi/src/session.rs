@@ -321,6 +321,9 @@ pub fn live_open(
     cookies: Option<String>,
     user_agent: Option<String>,
 ) -> AsyncTask<LiveOpenTask> {
+    // Parent the V8 platform on the main thread before the live session's worker thread
+    // creates the isolate — see `turbo_surf_render::ensure_platform`.
+    turbo_surf_render::ensure_platform();
     AsyncTask::new(LiveOpenTask {
         html,
         base_url,

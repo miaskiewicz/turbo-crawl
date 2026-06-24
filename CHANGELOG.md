@@ -3,6 +3,34 @@
 All notable changes to turbo-surf are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer.
 
+## [0.2.4]
+A **Linux SIGBUS** fix in the Playwright-shim test harness, plus a new **Python
+(PyPI) binding**.
+
+### Fixed
+- **SIGBUS on Linux running the shim suite** (#6) — root cause was a bug in the shim's
+  fake `@playwright/test` harness: `test.describe(...)` was registered as a node:test
+  *test* instead of a *suite*, so the nested `test(...)` calls in a describe body fired
+  on the global runner while the parent test was still running. node:test cancelled them
+  ("test did not finish before its parent and was cancelled"), and the dangling async
+  test — still holding a live-session V8 isolate — was torn down at process exit, which
+  faulted with SIGBUS on Linux (macOS tolerated it). Latent until v0.2.3 wired a real
+  `npm test`, so the multi-file shim run never executed on CI before. `makeDescribe` now
+  registers a real node:test suite, so nested tests are awaited and torn down cleanly.
+- **V8 platform init hardening** (defense-in-depth) — `ensure_platform()` initializes the
+  V8 platform once on a dedicated, parked keeper thread (deno_core otherwise inits it
+  lazily on whichever thread builds the first runtime; a transient one that then exits
+  orphans the platform). Called before any worker isolate is created from `evaluate`,
+  `render`, `render_pooled`, `hydrate`, and `live_open`.
+
+### Added
+- **Python binding (`turbo-surf` on PyPI)** — a PyO3 abi3 wheel (CPython 3.8+) exposing
+  the stateless parse → view/extract → JS-render surface (`markdown`, `text`, `links`,
+  `query`, `extract`, `evaluate`, `render`, `transform`, …), mirroring the Node N-API
+  functions. New crate `rust/crates/turbo-surf-py`; `release-py.yml` builds + publishes
+  wheels on a `pyv*` tag (gated on a `PYPI_TOKEN` secret). A real `test` npm script + the
+  stale shim-assertion fixes from v0.2.3's CI work are included.
+
 ## [0.2.3]
 A **JS-render speed** pass on the crawl path: the render tier built a fresh V8 isolate
 per page (boot + the ~90 KB env bootstrap + parse dominate), so a JS-mode crawl paid

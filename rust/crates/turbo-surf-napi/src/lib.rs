@@ -25,7 +25,7 @@ use view::{Field, FieldType, QueryType, TextMode};
 
 #[napi]
 pub fn version() -> String {
-    "0.2.3".to_string()
+    "0.2.4".to_string()
 }
 
 fn to_json_string<T: serde::Serialize>(v: &T) -> String {
@@ -228,6 +228,7 @@ fn parse_field(spec: &Value) -> Field {
 /// (Playwright `page.evaluate`-ish; synchronous, no event loop).
 #[napi]
 pub fn evaluate(html: String, script: String) -> Result<String> {
+    turbo_surf_render::ensure_platform();
     turbo_surf_render::run_with_dom(&html, &script).map_err(Error::from_reason)
 }
 
@@ -237,6 +238,9 @@ pub fn evaluate(html: String, script: String) -> Result<String> {
 /// dedicated thread with its own current-thread runtime (only strings cross).
 #[napi]
 pub fn render(html: String, base_url: String, script: String) -> Result<String> {
+    // Init the V8 platform on THIS (Node main) thread before the per-call worker spawns,
+    // so the platform parent is the long-lived main thread, not a transient one.
+    turbo_surf_render::ensure_platform();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -300,6 +304,8 @@ fn render_worker() -> &'static std::sync::Mutex<std::sync::mpsc::Sender<RenderJo
 /// true isolate per page, with cross-page page-JS isolation relaxed for crawl speed.
 #[napi]
 pub fn render_pooled(html: String, base_url: String, script: String) -> Result<String> {
+    // Parent the V8 platform on the main thread before the persistent worker spins up.
+    turbo_surf_render::ensure_platform();
     let (reply_tx, reply_rx) = std::sync::mpsc::channel();
     render_worker()
         .lock()
@@ -359,6 +365,8 @@ pub fn hydrate(
     cookies: Option<String>,
     user_agent: Option<String>,
 ) -> AsyncTask<HydrateTask> {
+    // Parent the V8 platform on the main thread before the libuv worker runs compute().
+    turbo_surf_render::ensure_platform();
     AsyncTask::new(HydrateTask {
         html,
         base_url,

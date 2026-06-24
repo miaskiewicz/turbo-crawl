@@ -7,7 +7,7 @@ repository.workspace = true
 description = "turbo-surf tier 2: Page over the turbo-dom Rust parser + Navigator impl"
 
 [dependencies]
-turbo-surf-core = { path = "../turbo-surf-core", version = "0.2.3" }
+turbo-surf-core = { path = "../turbo-surf-core", version = "0.2.4" }
 turbo-dom-parser = { package = "turbo-dom", version = "0.3.5" }
 async-trait = "0.1"
 futures-util = "0.3"
