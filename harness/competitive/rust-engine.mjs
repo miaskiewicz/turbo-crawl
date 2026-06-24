@@ -95,7 +95,13 @@ class RustPage {
 
   async _render() {
     const code = await pageScript(this._native, this._html, this._url);
-    if (code.trim()) this._html = this._native.render(this._html, this._url, code);
+    // renderPooled reuses one V8 isolate across pages (the boot is paid once, not per
+    // page) with a cross-page global scrub so each page still renders like a fresh
+    // navigation — the JS-crawl fast path. Falls back to `render` on older addons.
+    if (code.trim()) {
+      const run = this._native.renderPooled ?? this._native.render;
+      this._html = run(this._html, this._url, code);
+    }
   }
 
   async _navigate(r, track) {

@@ -126,7 +126,11 @@ class Locator {
   }
   filter(opts = {}) {
     const pred = buildFilter(this._page, opts);
-    return this._derive({ index: this._index, filter: pred, filterSpec: serializableFilterSpec(opts) });
+    return this._derive({
+      index: this._index,
+      filter: pred,
+      filterSpec: serializableFilterSpec(opts),
+    });
   }
   and(other) {
     const keep = new Set();

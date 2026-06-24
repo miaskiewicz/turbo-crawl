@@ -1,6 +1,6 @@
 {
   "name": "turbo-surf",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Native-speed, browserless web crawler + MCP server for AI agents. A standalone Rust engine (turbo-dom + a V8 JS-render tier) — fetch + parse + extract + run page JS with no headless browser. This npm package is a thin launcher that spawns the native binary.",
   "license": "MIT",
   "main": "index.js",
@@ -20,11 +20,13 @@
     "test:shim": "node --test rust/playwright-shim/test.mjs rust/playwright-shim/surface.test.mjs",
     "test:e2e": "node --import ./rust/playwright-shim/register.mjs --test rust/playwright-shim/dropin.spec.mjs rust/playwright-shim/e2e/*.spec.mjs",
     "test:playwright": "npm run build:addon && npm run test:shim && npm run test:e2e",
-    "check": "npm run lint && npm run format:check && (cd rust && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check) && npm run test:playwright",
+    "test": "(cd rust && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check) && npm run test:playwright",
+    "check": "npm run lint && npm run format:check && npm test",
     "prepare": "git config core.hooksPath .githooks || true",
     "harness": "node harness/competitive/run.mjs",
     "harness:js": "node harness/competitive/run.mjs js-quotes",
     "hotpath": "node harness/hotpath/rust-hotpath.mjs",
+    "hotpath:render": "node harness/hotpath/render-bench.mjs",
     "crawl-bench": "node harness/crawlers/run.mjs",
     "crawl-bench:js": "node harness/crawlers/run.mjs --set=js"
   },
