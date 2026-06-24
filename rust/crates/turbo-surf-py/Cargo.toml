@@ -1,0 +1,34 @@
+[package]
+name = "turbo-surf-py"
+description = "PyO3 binding: the turbo-surf browserless crawl/extract engine exposed to Python (PyPI: turbo-surf)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# cdylib for the Python extension module (maturin packages it); rlib so the
+# binding still type-checks and links on the host for clippy/fmt without the
+# Python interpreter. Mirrors the proven turbo-surf-napi crate layout.
+[lib]
+name = "turbo_surf_py"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+turbo-surf-view = { path = "../turbo-surf-view", version = "0.2.4" }
+turbo-surf-render = { path = "../turbo-surf-render", version = "0.2.4" }
+turbo-surf-transform = { path = "../turbo-surf-transform", version = "0.2.4" }
+turbo-dom-parser = { package = "turbo-dom", version = "0.3.5" }
+serde = "1"
+serde_json = "1"
+# A current-thread tokio runtime drives the async render tier from a sync Python
+# call (matches how turbo-surf-napi's `render` blocks on a per-call runtime).
+tokio = { version = "1", features = ["rt"] }
+# PyO3 0.23: `abi3-py38` yields a single stable-ABI wheel that loads on
+# CPython 3.8+. `extension-module` (drops the libpython link for a portable
+# wheel) is NOT a default feature: it would break `cargo test/clippy
+# --workspace` (the test binary needs libpython symbols extension-module hides).
+# maturin adds it at wheel-build time via the pyproject `[tool.maturin] features`.
+pyo3 = { version = "0.23", default-features = false, features = [
+    "abi3-py38",
+    "macros",
+] }

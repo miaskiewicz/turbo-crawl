@@ -1,0 +1,36 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "turbo-surf"
+version = "0.2.4"
+description = "Browserless, native-speed web crawler + extractor with a V8 JS-render tier (PyO3 binding over the turbo-surf Rust engine)."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "turbo-surf contributors" }]
+keywords = ["crawler", "scraper", "html", "extract", "markdown", "rust", "browserless"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
+    "Topic :: Text Processing :: Markup :: HTML",
+    "License :: OSI Approved :: MIT License",
+]
+
+[project.urls]
+Repository = "https://github.com/miaskiewicz/turbo-surf"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.maturin]
+# Mixed Rust/Python layout: the compiled extension lands at
+# `turbo_surf._turbo_surf` next to the pure-Python `__init__.py` shim.
+manifest-path = "Cargo.toml"
+python-source = "python"
+module-name = "turbo_surf._turbo_surf"
+# Build the stable-ABI (abi3) wheel matching the crate's pyo3 features.
+features = ["pyo3/extension-module"]

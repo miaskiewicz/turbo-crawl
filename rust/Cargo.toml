@@ -5,6 +5,7 @@ members = [
     "crates/turbo-surf-napi",
     "crates/turbo-surf-mcp",
     "crates/turbo-surf-page",
+    "crates/turbo-surf-py",
     "crates/turbo-surf-render",
     "crates/turbo-surf-transform",
     "crates/turbo-surf-view",
