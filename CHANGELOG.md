@@ -3,7 +3,7 @@
 All notable changes to turbo-surf are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer.
 
-## [Unreleased]
+## [0.2.5]
 A **pooled-render latency** fix on the JS-crawl fast path.
 
 ### Fixed

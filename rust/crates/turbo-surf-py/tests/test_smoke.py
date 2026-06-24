@@ -15,7 +15,7 @@ HTML = """<!doctype html>
 
 
 def test_version():
-    assert ts.version() == "0.2.4"
+    assert ts.version() == "0.2.5"
 
 
 def test_title_trimmed():
