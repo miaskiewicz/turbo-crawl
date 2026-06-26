@@ -45,6 +45,9 @@ pub struct Session {
     /// Optional challenge solver (Hyper/Scrapfly), configured from env / `.env`.
     /// `None` (the default) leaves the solve path inert.
     solver: Option<Box<dyn ChallengeSolver>>,
+    /// Render-tier navigator fingerprint overrides (JSON object), applied via
+    /// `set_fingerprint`. Empty = Chrome 149 defaults.
+    fingerprint: String,
 }
 
 impl Session {
@@ -349,6 +352,20 @@ impl Session {
         serde_json::to_value(report).map_err(|e| e.to_string())
     }
 
+    // Override render-tier navigator fingerprint fields (JSON object merged over
+    // the Chrome 149 defaults; every field is individually overridable). Persisted
+    // on the session and pushed to the render isolate. `{}` resets to defaults.
+    fn set_fingerprint(&mut self, overrides: &Value) -> Result<Value, String> {
+        let json = if overrides.is_null() {
+            "{}".to_string()
+        } else {
+            overrides.to_string()
+        };
+        turbo_surf_render::set_fingerprint(&json);
+        self.fingerprint = json.clone();
+        Ok(json!({ "ok": true, "fingerprint": overrides.clone() }))
+    }
+
     // Report the active stealth posture: the per-host fingerprint profile this
     // session would send, whether a challenge solver is wired, and the pool size.
     fn stealth_status(&self) -> Value {
@@ -367,6 +384,11 @@ impl Session {
             },
             "solver": self.solver.as_ref().map(|s| s.name()),
             "poolSize": fingerprint::pool_size(),
+            "renderFingerprintOverrides": if self.fingerprint.is_empty() {
+                json!({})
+            } else {
+                serde_json::from_str(&self.fingerprint).unwrap_or(json!({}))
+            },
         })
     }
 
@@ -614,6 +636,12 @@ pub fn tools() -> Value {
             "Report the active fingerprint profile + whether a challenge solver is \
              wired + pool size",
         ),
+        (
+            "set_fingerprint",
+            "Override render-tier navigator fields (JSON: userAgent, platform, \
+             vendor, languages, hardwareConcurrency, deviceMemory, chromeMajor, \
+             connection, userAgentData, screen, devicePixelRatio). {} resets.",
+        ),
         ("set_mode", "Set JS render mode (no-js | fast | secure)"),
         (
             "render",
@@ -725,6 +753,7 @@ pub async fn call_tool(session: &mut Session, name: &str, args: &Value) -> Resul
         },
         "probe" => session.probe().await,
         "stealth_status" => Ok(session.stealth_status()),
+        "set_fingerprint" => session.set_fingerprint(args.get("overrides").unwrap_or(args)),
         "latest_dom" => Ok(json!(session.dom_history.last())),
         "dom_history" => Ok(json!(session.dom_history)),
         "run_playwright" => tool_run_playwright(session, args).await,
@@ -1210,6 +1239,26 @@ mod tests {
         assert!(handle(&mut s, &json!({"jsonrpc":"2.0","method":"x"}))
             .await
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn set_fingerprint_overrides_render_navigator() {
+        let mut s = Session::new();
+        let r = call(
+            &mut s,
+            "set_fingerprint",
+            json!({ "overrides": { "platform": "Win32", "hardwareConcurrency": 16 } }),
+        )
+        .await;
+        assert_eq!(r["ok"], true);
+        // Persisted on the session + reflected by stealth_status. (The JS
+        // application of the override is covered in the render crate; eval_js here
+        // would hit the per-thread cached isolate and race.)
+        let st = call(&mut s, "stealth_status", json!({})).await;
+        assert_eq!(st["renderFingerprintOverrides"]["platform"], "Win32");
+        assert_eq!(st["renderFingerprintOverrides"]["hardwareConcurrency"], 16);
+        // Reset the process-global for other tests.
+        turbo_surf_render::set_fingerprint("{}");
     }
 
     #[tokio::test]

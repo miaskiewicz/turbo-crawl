@@ -9,6 +9,10 @@ use turbo_surf_render::{
     DEFAULT_RENDER_BUDGET_MS,
 };
 
+// set_fingerprint is a PROCESS-global override; serialize the tests that read or
+// mutate it so a parallel override can't leak into a default-assuming test.
+static FP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 // --- pooled render (reused isolate) keeps fresh-navigation isolation --------
 // `render_page_pooled` reuses one V8 isolate across pages for speed; the cross-page
 // global scrub must make a reused isolate behave like a fresh navigation. Run a page
@@ -133,34 +137,52 @@ fn window_and_navigator_present() {
 // gets past consistency-only anti-bot gates (see ENV_BOOTSTRAP in runtime.rs).
 #[test]
 fn navigator_looks_like_chrome() {
-    let ua = run_with_dom("<body></body>", "navigator.userAgent").unwrap();
+    let _g = FP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    turbo_surf_render::set_fingerprint("{}"); // defaults (render_html = fresh isolate)
+                                              // Dump the identity surface into a DOM attribute so one fresh render asserts
+                                              // it all deterministically (run_with_dom caches its isolate, so it can't
+                                              // observe the current override).
+    let probe = "document.body.setAttribute('data-n', [\
+        navigator.userAgent.includes('Chrome/') && navigator.userAgent.includes('Macintosh'),\
+        navigator.platform, navigator.vendor, navigator.webdriver,\
+        navigator.plugins.length > 0, typeof window.chrome,\
+        navigator.connection.effectiveType, navigator.userAgentData.platform,\
+        typeof fetch.toString].join('|'))";
+    let out = turbo_surf_render::render_html("<body></body>", probe).unwrap();
     assert!(
-        ua.contains("Chrome/") && ua.contains("Macintosh"),
-        "UA: {ua}"
+        out.contains("data-n=\"true|MacIntel|Google Inc.|false|true|object|4g|macOS|function\""),
+        "navigator not coherent Chrome: {out}"
     );
-    // Identity fields a fingerprinter cross-checks against the UA.
-    assert_eq!(
-        run_with_dom("<body></body>", "navigator.platform").unwrap(),
-        "MacIntel"
+}
+
+// Runtime fingerprint override: every navigator field has a default and is
+// controllable via set_fingerprint (the MCP `set_fingerprint` tool). Uses
+// render_html (a fresh isolate per call, so ENV_BOOTSTRAP re-reads the override),
+// writing the values into the DOM to assert on the hydrated output.
+#[test]
+fn fingerprint_override_applies_and_resets() {
+    let _g = FP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let probe = "document.body.setAttribute('data-fp', \
+        navigator.platform + '|' + navigator.hardwareConcurrency + '|' + \
+        navigator.languages.join(',') + '|' + screen.width + '|' + \
+        navigator.userAgentData.brands[0].version)";
+
+    turbo_surf_render::set_fingerprint(
+        r#"{"platform":"Win32","hardwareConcurrency":16,"languages":["en-GB","en"],
+            "screen":{"width":2560,"height":1440},"chromeMajor":150}"#,
     );
-    assert_eq!(
-        run_with_dom("<body></body>", "navigator.vendor").unwrap(),
-        "Google Inc."
+    let out = turbo_surf_render::render_html("<body></body>", probe).unwrap();
+    assert!(
+        out.contains("data-fp=\"Win32|16|en-GB,en|2560|150\""),
+        "override not applied: {out}"
     );
-    // Automation tell: must be the boolean false, not undefined/true.
-    assert_eq!(
-        run_with_dom("<body></body>", "String(navigator.webdriver)").unwrap(),
-        "false"
-    );
-    // A non-empty plugin set + `window.chrome` are both presence checks headless
-    // clients classically fail.
-    assert_eq!(
-        run_with_dom("<body></body>", "String(navigator.plugins.length > 0)").unwrap(),
-        "true"
-    );
-    assert_eq!(
-        run_with_dom("<body></body>", "typeof window.chrome").unwrap(),
-        "object"
+
+    // Reset → Chrome 149 macOS defaults return.
+    turbo_surf_render::set_fingerprint("{}");
+    let out = turbo_surf_render::render_html("<body></body>", probe).unwrap();
+    assert!(
+        out.contains("data-fp=\"MacIntel|8|en-US,en|1920|149\""),
+        "reset to defaults failed: {out}"
     );
 }
 

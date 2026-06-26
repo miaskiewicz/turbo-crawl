@@ -122,6 +122,34 @@ fn op_user_agent(state: &mut OpState) -> String {
     state.borrow::<Ua>().0.clone()
 }
 
+// Process-global fingerprint overrides (a JSON object). Read by ENV_BOOTSTRAP to
+// override the default Chrome navigator fields at runtime. Empty `{}` = all
+// defaults. Process-global (like the napi shared client) — one render process is
+// effectively one session; set it before rendering.
+static FINGERPRINT_OVERRIDES: std::sync::RwLock<String> = std::sync::RwLock::new(String::new());
+
+/// Override the render-tier navigator fields at runtime with a JSON object, e.g.
+/// `{"platform":"Win32","hardwareConcurrency":16,"languages":["en-GB","en"],
+/// "screen":{"width":2560,"height":1440},"userAgent":"…"}`. Unset keys keep their
+/// Chrome 149 defaults. Pass `"{}"` (or `""`) to reset to defaults.
+pub fn set_fingerprint(overrides_json: &str) {
+    if let Ok(mut g) = FINGERPRINT_OVERRIDES.write() {
+        *g = overrides_json.to_string();
+    }
+}
+
+// The fingerprint-override JSON (or "{}" when unset) — ENV_BOOTSTRAP merges it.
+#[op2]
+#[string]
+fn op_fingerprint() -> String {
+    FINGERPRINT_OVERRIDES
+        .read()
+        .ok()
+        .map(|g| g.clone())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "{}".to_string())
+}
+
 // `document.cookie` setter: ingest a `name=value; attrs` line against the base.
 #[op2(fast)]
 fn op_cookie_set(state: &mut OpState, #[string] line: &str) {
@@ -223,7 +251,13 @@ fn page_origin(base: &str) -> Option<String> {
 
 deno_core::extension!(
     turbo_dom,
-    ops = [op_cookie_get, op_cookie_set, op_fetch, op_user_agent],
+    ops = [
+        op_cookie_get,
+        op_cookie_set,
+        op_fetch,
+        op_user_agent,
+        op_fingerprint
+    ],
 );
 
 // Non-DOM browser globals, layered over the ops AFTER the native DOM binding is
@@ -250,27 +284,66 @@ globalThis.self = globalThis;
 // `onLine: true` matters: auth SDKs (PropelAuth) only auto-refresh the session from the
 // cookie when the browser reports online — an undefined/falsy onLine made a cold load of
 // an authed page skip the refresh and render nothing.
-const __ua = (Deno.core.ops.op_user_agent && Deno.core.ops.op_user_agent()) ||
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
+// Runtime fingerprint overrides (JSON object from op_fingerprint). Every navigator
+// field below has a Chrome 149 default and is overridable by the matching key —
+// settable per process via `set_fingerprint` (MCP `set_fingerprint` tool).
+const __fp = (() => { try { return JSON.parse(Deno.core.ops.op_fingerprint()); } catch (e) { return {}; } })();
+const __pick = (k, d) => (__fp[k] !== undefined ? __fp[k] : d);
+const __ua = __pick("userAgent",
+  (Deno.core.ops.op_user_agent && Deno.core.ops.op_user_agent()) ||
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36");
+const __major = String(__pick("chromeMajor", 149));
 // Chrome ships exactly these five PDF-viewer plugins, all aliased to the internal
 // viewer; `navigator.plugins.length === 0` is a classic headless giveaway.
 const __plugin = (name) => ({ name, filename: "internal-pdf-viewer", description: "Portable Document Format", length: 1 });
 const __plugins = ["PDF Viewer", "Chrome PDF Viewer", "Chromium PDF Viewer", "Microsoft Edge PDF Viewer", "WebKit built-in PDF"].map(__plugin);
+const __langs = __pick("languages", ["en-US", "en"]);
+const __platform = __pick("platform", "MacIntel");
+const __uaPlatform = __pick("uaPlatform", "macOS");
 globalThis.navigator = {
   userAgent: __ua,
   appVersion: __ua.replace(/^Mozilla\//, ""),
   appName: "Netscape", appCodeName: "Mozilla", product: "Gecko", productSub: "20030107",
-  platform: "MacIntel", vendor: "Google Inc.", vendorSub: "",
-  language: "en-US", languages: ["en-US", "en"], onLine: true,
+  platform: __platform, vendor: __pick("vendor", "Google Inc."), vendorSub: "",
+  language: __langs[0] || "en-US", languages: __langs, onLine: true,
   // Automation tell: real Chrome exposes this as `false`, never `true`/undefined.
   webdriver: false,
-  hardwareConcurrency: 8, deviceMemory: 8, maxTouchPoints: 0,
+  hardwareConcurrency: __pick("hardwareConcurrency", 8),
+  deviceMemory: __pick("deviceMemory", 8),
+  maxTouchPoints: __pick("maxTouchPoints", 0),
   cookieEnabled: true, doNotTrack: null,
   plugins: __plugins, mimeTypes: [],
+  // NetworkInformation — real Chrome exposes it; anti-bot scripts (found via the
+  // `probe` example on a real Akamai sensor) read it, and its absence is a tell.
+  connection: __pick("connection", { effectiveType: "4g", rtt: 50, downlink: 10, saveData: false }),
+  // UA-Client-Hints high-entropy surface, consistent with the UA above.
+  userAgentData: __pick("userAgentData", {
+    brands: [
+      { brand: "Google Chrome", version: __major },
+      { brand: "Chromium", version: __major },
+      { brand: "Not)A;Brand", version: "24" },
+    ],
+    mobile: false,
+    platform: __uaPlatform,
+    getHighEntropyValues: async () => ({
+      architecture: "arm", bitness: "64", model: "",
+      platform: __uaPlatform, platformVersion: "15.0.0", uaFullVersion: __major + ".0.0.0",
+    }),
+  }),
   // In-memory clipboard: an app that writeText()s a value (e.g. a copy-link button)
   // and reads it back round-trips, with no OS clipboard.
   clipboard: (() => { let v = ""; return { writeText: async (t) => { v = String(t == null ? "" : t); }, readText: async () => v }; })(),
 };
+// `screen` — overridable as a unit; defaults to a common 1080p desktop.
+{
+  const __scr = __pick("screen", { width: 1920, height: 1080 });
+  const __w = __scr.width || 1920, __h = __scr.height || 1080;
+  globalThis.screen = {
+    width: __w, height: __h, availWidth: __w, availHeight: __h,
+    colorDepth: 24, pixelDepth: 24,
+  };
+  globalThis.devicePixelRatio = __pick("devicePixelRatio", 2);
+}
 // `window.chrome` presence (with loadTimes/csi/app, but no extension `runtime`) is
 // what a plain Chrome page exposes; its absence flags a non-Chrome/headless client.
 globalThis.chrome = globalThis.chrome || {

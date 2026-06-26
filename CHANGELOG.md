@@ -59,6 +59,16 @@ fingerprint — an instant tell for WAFs.
   challenge-platform endpoint, harvest `cf_clearance`. Structure + flow green; real
   per-version PoW math keyed off a live challenge. Turnstile-interactive stays on
   the browser sidecar.
+- **`probe-script` example** (`cargo run -p turbo-surf-render --example probe-script
+  -- script.js`) — run the `probe` instrumentation over a real captured anti-bot
+  script and print what it touched + the shim gaps. Run against a real Akamai
+  sensor it surfaced two missing `navigator` props (`connection`,
+  `userAgentData`), now added to the render-tier navigator (coherent with the UA).
+- **Runtime-controllable render fingerprint** — every render-tier `navigator` field
+  (UA, platform, vendor, languages, hardwareConcurrency, deviceMemory, chromeMajor,
+  connection, userAgentData, screen, devicePixelRatio) now has a Chrome 149 default
+  and is overridable via `turbo_surf_render::set_fingerprint(json)` / the MCP
+  `set_fingerprint` tool. `stealth_status` reports the active overrides.
 - **Fingerprint debug/probe mode** (`turbo-surf-render::probe_globals`, MCP `probe`
   tool) — run a page's JS with `navigator`/`screen`/`window.chrome`/canvas wrapped
   in logging proxies and report every property it touched + which reads returned

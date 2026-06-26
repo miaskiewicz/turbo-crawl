@@ -105,6 +105,7 @@ npx turbo-surf-mcp          # stdio MCP server (60 tools), e.g.:
 # bulk:        crawl, batch
 # render/JS:   render, set_mode, eval_js, inject_js, latest_dom, dom_history,
 #              evaluate, detect_js, run_playwright, probe
+# stealth:     stealth_status, set_fingerprint
 # session:     get_cookies, set_cookie, set_extra_headers, robots_check
 # direct:      fetch_json, fetch_raw
 ```
@@ -192,7 +193,49 @@ platform there's no prebuilt binary (build from a checkout as above).
 By default every request carries a real **Chrome 149** identity — full UA + client
 hints (`sec-ch-ua`, `sec-fetch-*`, …) on the wire, and a matching Chrome
 `navigator` (`platform`, `vendor`, `webdriver: false`, plugins, `window.chrome`,
-native-`toString`) inside the JS render tier. No config needed.
+native-`toString`) inside the JS render tier. **Nothing to configure for the
+common case** — it just looks like Chrome.
+
+### Quick start (anti-bot)
+
+```bash
+# 1. (optional) real TLS/JA3 + HTTP-2 fingerprint — needs cmake + nasm
+cargo build --release -p turbo-surf-mcp --features impersonate
+
+# 2. (optional) enable a challenge solver — copy the template and fill ONE
+cp .env.example .env
+#    then edit .env:  TURBO_SURF_SOLVER=akamai      # in-house, no key
+#                or:  TURBO_SURF_SOLVER=cloudflare  # in-house, no key
+#                or:  TURBO_SURF_SOLVER=hyper        + HYPER_API_KEY=...
+#                or:  TURBO_SURF_SOLVER=browser      + TURBO_SURF_BROWSER_CMD=...
+
+# 3. run — the MCP server / crawler auto-detects walls and solves them
+npx turbo-surf-mcp
+```
+
+That's it. With no `.env` you get the Chrome fingerprint (clears most sites);
+set one `TURBO_SURF_SOLVER` to also clear challenge walls.
+
+### Configuration reference
+
+All optional. Set in `.env` (auto-loaded) or the process env.
+
+| Variable | Values | What it does |
+|---|---|---|
+| `TURBO_SURF_SOLVER` | `akamai` · `cloudflare` · `hyper` · `scrapfly` · `browser` | Pick the challenge solver. Unset = no solving (fingerprint only). `akamai`/`cloudflare` are in-house (no key). |
+| `HYPER_API_KEY` | key | Hyper Solutions token API (Akamai/DataDome/Kasada). Used when solver=`hyper`. |
+| `SCRAPFLY_API_KEY` | key | Scrapfly ASP API (Cloudflare + fallback). Used when solver=`scrapfly`. |
+| `TURBO_SURF_BROWSER_CMD` | shell command | The hardened-headless sidecar to run for solver=`browser` (e.g. `node harness/browser-solver/solve.mjs`). |
+| `TURBO_SURF_PROXY` | `http://user:pass@host:port` | Egress proxy. **Required for real solves** — tokens bind to the IP/JA3 that minted them; replay must use the same egress. |
+
+Build feature (not env): **`--features impersonate`** swaps rustls → BoringSSL
+(`wreq`) for a real Chrome TLS/JA3/JA4 + HTTP-2 fingerprint. Needs `cmake`+`nasm`.
+
+MCP tools for stealth: **`set_fingerprint`** (override navigator fields),
+**`stealth_status`** (inspect active profile/solver/overrides), **`probe`** (see
+what a page's anti-bot JS reads). Detailed below.
+
+---
 
 **TLS/HTTP-2 fingerprint (`impersonate`).** rustls can't forge Chrome's
 JA3/JA4 + Akamai HTTP-2 fingerprint. Build with the opt-in feature to swap in a
@@ -238,11 +281,32 @@ Inert until configured. Copy `.env.example` → `.env` and pick one:
 Set `TURBO_SURF_PROXY` so the token's IP/JA3 matches your egress (and build with
 `--features impersonate` so the replay JA3 matches the Chrome that minted it).
 
+**Controllable render fingerprint.** Every render-tier `navigator` field has a
+Chrome 149 default and is overridable at runtime via the MCP `set_fingerprint`
+tool (or `turbo_surf_render::set_fingerprint(json)`):
+
+```jsonc
+// MCP: set_fingerprint
+{ "overrides": {
+    "userAgent": "...", "platform": "Win32", "vendor": "Google Inc.",
+    "languages": ["en-GB", "en"], "hardwareConcurrency": 16, "deviceMemory": 8,
+    "chromeMajor": 150, "screen": { "width": 2560, "height": 1440 },
+    "devicePixelRatio": 2,
+    "connection": { "effectiveType": "4g", "rtt": 50, "downlink": 10 },
+    "userAgentData": { "platform": "Windows", "brands": [ /* … */ ] }
+} }   // {} resets to Chrome 149 macOS defaults
+```
+
+`stealth_status` reports the active profile, the wired solver, the pool size, and
+any render fingerprint overrides.
+
 **Debug mode (`probe`).** To see *what* a page's anti-bot JS reads — and what's
 still missing — run the `probe` MCP tool (or `turbo-surf-render::probe_globals`):
 it runs the page's scripts with `navigator`/`screen`/`window.chrome`/canvas
 instrumented and reports every property touched plus the reads that returned
-`undefined` (your shim to-do list).
+`undefined` (your shim to-do list). The runnable example
+`cargo run -p turbo-surf-render --example probe-script -- script.js` does this on
+any real captured challenge script.
 
 ## Playwright drop-in (run your e2e specs with no browser)
 
