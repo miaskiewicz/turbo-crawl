@@ -41,7 +41,13 @@ fingerprint — an instant tell for WAFs.
   side solver (`ScrapflySolver`/`HyperSolver`) that returns tokens/cookies to
   replay. Configured via env / `.env` (`HYPER_API_KEY`, `SCRAPFLY_API_KEY`,
   `TURBO_SURF_SOLVER`, `TURBO_SURF_PROXY`); inert until a real key is set. See
-  `.env.example`.
+  `.env.example`. Wired into the MCP session (per-host profile + auto solve/replay
+  on a detected wall) and `TurboNavigator` (the crawl seam).
+- **Fingerprint debug/probe mode** (`turbo-surf-render::probe_globals`, MCP `probe`
+  tool) — run a page's JS with `navigator`/`screen`/`window.chrome`/canvas wrapped
+  in logging proxies and report every property it touched + which reads returned
+  `undefined` (the shim to-do list). Recon for what an anti-bot check probes and
+  what's left to emulate.
 
 ## [0.2.4]
 A **Linux SIGBUS** fix in the Playwright-shim test harness, plus a new **Python

@@ -6,8 +6,10 @@
 //! loop + hydration pump + execution budget.
 
 mod browser_env;
+mod probe;
 mod runtime;
 
+pub use probe::{probe_globals, ProbeAccess, ProbeReport};
 pub use runtime::{
     ensure_platform, eval_async, render_html, render_html_async, render_hydrate,
     render_hydrate_with_budget, render_page, render_page_pooled, render_page_with_budget,

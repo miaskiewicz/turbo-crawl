@@ -329,6 +329,17 @@ impl Session {
         Ok(json!({ "ok": true }))
     }
 
+    // Debug/probe mode: run the current page's own scripts with the fingerprint
+    // globals (navigator/screen/chrome/canvas) instrumented, and report what they
+    // touched + which reads came back undefined — i.e. what an anti-bot check read
+    // and what we still need to shim. Recon, not a render (the page isn't mutated).
+    async fn probe(&self) -> Result<Value, String> {
+        let html = serialize_doc(self.tree()?);
+        let script = self.page_script().await;
+        let report = turbo_surf_render::probe_globals(&html, &script)?;
+        serde_json::to_value(report).map_err(|e| e.to_string())
+    }
+
     async fn fetch_body(&mut self, url: &str) -> Result<String, String> {
         self.requests.push(url.to_string());
         let profile = self.profile_for(url);
@@ -563,6 +574,11 @@ pub fn tools() -> Value {
             "Accessible description of the first match",
         ),
         // render / JS tier
+        (
+            "probe",
+            "Debug: run page JS with navigator/canvas instrumented; report what \
+             fingerprinting code touched + what to shim",
+        ),
         ("set_mode", "Set JS render mode (no-js | fast | secure)"),
         (
             "render",
@@ -672,6 +688,7 @@ pub async fn call_tool(session: &mut Session, name: &str, args: &Value) -> Resul
                 .await
                 .map(|()| json!({ "ok": true })),
         },
+        "probe" => session.probe().await,
         "latest_dom" => Ok(json!(session.dom_history.last())),
         "dom_history" => Ok(json!(session.dom_history)),
         "run_playwright" => tool_run_playwright(session, args).await,
