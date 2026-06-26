@@ -12,8 +12,10 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use turbo_dom_parser::rtdom::serialize::serialize_inner;
 use turbo_dom_parser::rtdom::Tree;
+use turbo_surf_core::challenge::{self, ChallengeSolver, SolveContext};
 use turbo_surf_core::cookies::CookieJar;
 use turbo_surf_core::crawl::{crawl as run_crawl, CrawlOptions};
+use turbo_surf_core::fingerprint;
 use turbo_surf_core::net::{fetch_html, FetchOptions};
 use turbo_surf_core::robots::{RobotsCache, RobotsFetcher};
 use turbo_surf_page::{batch as batch_urls, TurboNavigator};
@@ -40,11 +42,26 @@ pub struct Session {
     dom_history: Vec<String>,
     /// Every URL fetched this session (navigations + direct fetches).
     requests: Vec<String>,
+    /// Optional challenge solver (Hyper/Scrapfly), configured from env / `.env`.
+    /// `None` (the default) leaves the solve path inert.
+    solver: Option<Box<dyn ChallengeSolver>>,
 }
 
 impl Session {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            // Pick up a solver from env/`.env` if one is configured (else inert).
+            solver: challenge::solver_from_env(),
+            ..Self::default()
+        }
+    }
+
+    // Stable per-host Chrome identity from the seed pool: same host → same
+    // profile (so any solver token stays consistent with the fingerprint),
+    // distinct hosts spread across the pool.
+    fn profile_for(&self, url: &str) -> fingerprint::Profile {
+        let key = turbo_surf_core::url::host_of(url).unwrap_or_else(|| url.to_string());
+        fingerprint::select(&key)
     }
 
     /// Inject a parsed tree (test seam, bypasses the network).
@@ -83,20 +100,88 @@ impl Session {
         body: Option<String>,
     ) -> Result<Value, String> {
         self.requests.push(url.to_string());
+        let profile = self.profile_for(url);
         let opts = FetchOptions {
             method,
             body,
             allow_non_html: true,
             headers: self.request_headers(),
             jar: Some(&mut self.jar),
+            profile: Some(&profile),
             ..Default::default()
         };
         let res = fetch_html_with(url, opts).await?;
         self.load(&res.0, &res.1);
+        let mut status = res.2;
+        // If the response is a JS-challenge / PoW wall and a solver is configured,
+        // solve it, inject the cleared cookies, and re-fetch on the fast path.
+        if let Some(new_status) = self.try_solve_challenge(&res.0, status, &res.1).await? {
+            status = new_status;
+        }
         if self.render_mode() {
             self.render_current().await?;
         }
-        Ok(json!({ "url": res.0, "status": res.2, "title": title_of(self.tree.as_ref().unwrap()) }))
+        Ok(
+            json!({ "url": res.0, "status": status, "title": title_of(self.tree.as_ref().unwrap()) }),
+        )
+    }
+
+    // Detect an anti-bot wall on a just-fetched response and, if a solver is set,
+    // solve → inject token cookies/headers → re-fetch once. Returns the re-fetch
+    // status when it solved, else `None` (no solver / not a challenge / solve
+    // failed — the original page stands). Uses the session jar's cookies as the
+    // header signal (set-cookie was already ingested into the jar).
+    async fn try_solve_challenge(
+        &mut self,
+        url: &str,
+        status: u16,
+        body: &str,
+    ) -> Result<Option<u16>, String> {
+        if self.solver.is_none() {
+            return Ok(None);
+        }
+        let cookie_line = self.jar.cookie_header(url, 0.0);
+        let signal: Vec<(String, String)> = cookie_line
+            .split("; ")
+            .filter(|s| !s.is_empty())
+            .map(|c| ("set-cookie".to_string(), c.to_string()))
+            .collect();
+        let Some(ch) = challenge::detect(url, status, &signal, body) else {
+            return Ok(None);
+        };
+        let ctx = SolveContext {
+            user_agent: self.ua.clone().unwrap_or_default(),
+            proxy: std::env::var("TURBO_SURF_PROXY")
+                .ok()
+                .filter(|s| !s.is_empty()),
+        };
+        // Borrow the solver out so we can mutate the jar/headers while it runs.
+        let solver = self.solver.take().unwrap();
+        let solved = solver.solve(&ch, &ctx).await;
+        self.solver = Some(solver);
+        let token = match solved {
+            Ok(t) => t,
+            Err(_) => return Ok(None), // leave the challenge page in place
+        };
+        for (k, v) in &token.cookies {
+            self.jar
+                .set_from_response(url, &[format!("{k}={v}; Path=/")], 0.0);
+        }
+        for (k, v) in &token.headers {
+            self.headers.insert(k.to_ascii_lowercase(), v.clone());
+        }
+        // Re-fetch with the cleared cookies (same profile/headers/jar).
+        let profile = self.profile_for(url);
+        let opts = FetchOptions {
+            allow_non_html: true,
+            headers: self.request_headers(),
+            jar: Some(&mut self.jar),
+            profile: Some(&profile),
+            ..Default::default()
+        };
+        let res = fetch_html_with(url, opts).await?;
+        self.load(&res.0, &res.1);
+        Ok(Some(res.2))
     }
 
     fn render_mode(&self) -> bool {
@@ -246,10 +331,12 @@ impl Session {
 
     async fn fetch_body(&mut self, url: &str) -> Result<String, String> {
         self.requests.push(url.to_string());
+        let profile = self.profile_for(url);
         let opts = FetchOptions {
             allow_non_html: true,
             headers: self.request_headers(),
             jar: Some(&mut self.jar),
+            profile: Some(&profile),
             ..Default::default()
         };
         Ok(fetch_html_with(url, opts).await?.1)
