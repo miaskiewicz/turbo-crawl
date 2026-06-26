@@ -2178,19 +2178,28 @@ pub async fn render_page_pooled(
     let handle = rt.v8_isolate().thread_safe_handle();
     let done = Arc::new(AtomicBool::new(false));
     let watch = done.clone();
+    let budget = std::time::Duration::from_millis(budget_ms);
     let watchdog = std::thread::spawn(move || {
         let start = std::time::Instant::now();
-        while !watch.load(Ordering::Relaxed) {
-            if start.elapsed() >= std::time::Duration::from_millis(budget_ms) {
+        loop {
+            if watch.load(Ordering::Relaxed) {
+                break; // render completed → unparked us; no terminate
+            }
+            let elapsed = start.elapsed();
+            if elapsed >= budget {
                 handle.terminate_execution();
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            // Park until completion unparks us or the budget deadline lapses — no fixed
+            // poll granularity, so a healthy render's join() returns in µs (the old 2ms
+            // sleep added up to 2ms of join latency to EVERY pooled render).
+            std::thread::park_timeout(budget - elapsed);
         }
     });
 
     let result = run_async_pooled(&mut rt, html, base, script).await;
     done.store(true, Ordering::Relaxed);
+    watchdog.thread().unpark();
     let _ = watchdog.join();
     crate::browser_env::reset(); // clear the binding while the isolate is still alive
 

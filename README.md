@@ -52,7 +52,7 @@ happy-dom). turbo-surf is unusual on four axes at once:
 See [CHANGELOG.md](./CHANGELOG.md) for what shipped and
 [rust/README.md](./rust/README.md) for the engine internals.
 
-Status: **v0.2.4 — working** ([npm](https://www.npmjs.com/package/turbo-surf)).
+Status: **v0.2.5 — working** ([npm](https://www.npmjs.com/package/turbo-surf)).
 A native Rust engine (7-crate workspace on the `turbo-dom` crate): hardened
 networking (cookies / `document.cookie` bridge / robots + crawl-delay / charset /
 size + redirect caps, HTTP/2 + a pooled client, 304 conditional cache), crawl
@@ -83,6 +83,7 @@ turbo-surf publishes from **one `v*` git tag** to two registries (see
 | Artifact | Registry | What it is | For |
 |---|---|---|---|
 | [`turbo-surf`](https://www.npmjs.com/package/turbo-surf) | **npm** | A thin launcher (`cli.js`/`index.js`) **+ prebuilt `turbo-surf-mcp` binaries** for each platform in `bin/` (darwin x64/arm64, linux x64/arm64-gnu, win x64). `npx` resolves the right one and spawns it. | Running the **MCP server** / CLI. No Rust toolchain, no Chromium, no Node hosting Rust. |
+| [`turbo-surf`](https://pypi.org/project/turbo-surf/) | **PyPI** | A PyO3 binding, shipped as prebuilt abi3 wheels (CPython 3.8+) for Linux (x86_64/aarch64), macOS (arm64), Windows (x64). | Calling the engine **from Python** — `markdown`/`text`/`links`/`extract`/`render`/…. No Rust toolchain, no Chromium. |
 | `turbo-surf-core`, `-view`, `-page`, `-render`, `-mcp` | **crates.io** | The Rust crates, in dependency order. | **Embedding** the engine in a Rust program. |
 
 The `turbo-surf-napi` cdylib and `turbo-surf-transform` crate are **not**
@@ -344,6 +345,39 @@ Full per-method coverage map: [`rust/playwright-shim/LIMITATIONS.md`](./rust/pla
 Best fit: **server-rendered and hydration-on-navigation** apps. A client-only SPA
 that paints entirely from JS after load (and never re-fetches) needs a real browser.
 
+## Python
+
+The engine is also a **PyO3 binding** on [PyPI](https://pypi.org/project/turbo-surf/) —
+prebuilt abi3 wheels (CPython 3.8+) for Linux (x86_64/aarch64), macOS (arm64), and
+Windows (x64), **no Rust toolchain, no Chromium**. It's fetch-free: you pass a
+page's HTML in and get a view out (Markdown, visible text, links, a typed
+extraction, an a11y tree); for JS-gated pages it runs the page's **own scripts** in
+the same V8 isolate over a native DOM.
+
+```sh
+pip install turbo-surf
+```
+
+```python
+import turbo_surf as ts
+
+html = open("page.html").read()
+ts.markdown(html, base_url="https://example.com/")   # -> Markdown str
+ts.text(html)                                        # -> visible text
+ts.links(html, base_url="https://example.com/")      # -> list[str]
+
+# Typed extraction: a JSON schema maps field names to selector specs.
+schema = '{"title": {"selector": "h1"}, "prices": {"selector": ".price", "list": true}}'
+ts.extract(html, schema, base_url="https://example.com/")   # -> JSON str
+
+# JS-gated page: run its own scripts, read the hydrated DOM.
+hydrated = ts.render(html, script, base_url="https://example.com/")
+```
+
+Fatal faults (malformed schema JSON, a render-tier failure) raise
+`turbo_surf.TurboSurfError`; the non-JS views never raise. Full function table:
+[`rust/crates/turbo-surf-py/README.md`](./rust/crates/turbo-surf-py/README.md).
+
 ## Competitive benchmark
 
 `harness/competitive/` runs the **same Playwright script** on turbo-surf and a
@@ -440,19 +474,19 @@ every engine in this table, the *same* turbo-surf also runs Playwright scripts
 The other set targets `quotes.toscrape.com/js`, where quotes are built
 client-side (a non-JS crawler sees ~0). turbo-surf runs the page's own scripts in
 a true V8 isolate over its native DOM, while every competitor drives a **real
-headless Chromium** (`npm run crawl-bench:js`, 10 pages, median of 3):
+headless Chromium** (`npm run crawl-bench:js`, 11 pages, median of 3):
 
 | crawler | JS engine | items | median ms | pages/s |
 |---|---|---|---|---|
-| **turbo-surf (JS)** | **V8 isolate, no browser** | 100 | **2989** | **3.35** |
-| crawlee `PuppeteerCrawler` | headless Chromium | 100 | 5074 | 2.0 |
-| crawlee `PlaywrightCrawler` | headless Chromium | 100 | 6173 | 1.6 |
-| puppeteer-cluster | headless Chromium | 100 | 17062 | 0.6 |
+| **turbo-surf (JS)** | **V8 isolate, no browser** | 110 | **3031** | **3.63** |
+| crawlee `PuppeteerCrawler` | headless Chromium | 110 | 4330 | 2.54 |
+| crawlee `PlaywrightCrawler` | headless Chromium | 110 | 5569 | 1.98 |
+| puppeteer-cluster | headless Chromium | 110 | 20024 | 0.55 |
 
 turbo-surf runs each page's own scripts in a **true V8 isolate** over the native
 rtdom DOM (the same path that renders `quotes.toscrape.com/js`, external scripts
-cached across pages) — the **fastest engine here**, extracting the same 100 quotes
-a real browser does **~2–6× faster than the browser-driving crawlers**, with no
+cached across pages) — the **fastest engine here**, extracting the same 110 quotes
+a real browser does **~1.4–6.6× faster than the browser-driving crawlers**, with no
 Chromium process and honoring the 150 ms politeness delay. Running page JS in a
 true isolate against a lightweight DOM is rare — most crawlers either drive a full
 browser (this table) or use an in-process fake DOM with no real isolation. See
