@@ -47,6 +47,12 @@ fingerprint — an instant tell for WAFs.
   that shells to a hardened-headless sidecar over a JSON contract — Chromium stays
   out of the engine; reference sidecar in `harness/browser-solver/`. MCP
   `stealth_status` tool reports the active profile + wired solver.
+- **In-house Akamai solver** (`turbo-surf-core::akamai`, `TURBO_SURF_SOLVER=akamai`,
+  no key) — the first hand-written `ChallengeSolver`: `generate_sensor` builds a
+  deterministic Akamai-shaped `sensor_data` payload, `AkamaiSolver` POSTs it to the
+  sensor endpoint and parses the cleared `_abck`. Structure + POST/parse flow are
+  tested + green; the dynamic field encoding a live edge validates still needs
+  keying off a real `_abck` script (use the `probe` mode).
 - **Fingerprint debug/probe mode** (`turbo-surf-render::probe_globals`, MCP `probe`
   tool) — run a page's JS with `navigator`/`screen`/`window.chrome`/canvas wrapped
   in logging proxies and report every property it touched + which reads returned

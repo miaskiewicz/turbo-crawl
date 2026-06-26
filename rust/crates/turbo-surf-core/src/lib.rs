@@ -12,6 +12,7 @@
 //! tiers; the page fetch+parse seam is the [`crawl::Navigator`] trait, which the
 //! tier-2 `Page` (on the turbo-dom Rust crate) will implement.
 
+pub mod akamai;
 pub mod cache;
 pub mod challenge;
 pub mod cookies;

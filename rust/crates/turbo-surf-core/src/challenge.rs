@@ -496,6 +496,8 @@ pub fn solver_from_env() -> Option<Box<dyn ChallengeSolver>> {
             .ok()
             .filter(|c| !c.trim().is_empty())
             .map(|cmd| Box::new(BrowserSolver::new(cmd)) as Box<dyn ChallengeSolver>),
+        // In-house Akamai sensor solver — no API key needed.
+        "akamai" => Some(Box::new(crate::akamai::AkamaiSolver::new()) as Box<dyn ChallengeSolver>),
         _ => hyper
             .map(|k| Box::new(HyperSolver::new(k)) as Box<dyn ChallengeSolver>)
             .or_else(|| {
