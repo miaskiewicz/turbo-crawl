@@ -11,44 +11,6 @@ use bytes::BytesMut;
 use futures_util::StreamExt;
 use std::collections::BTreeMap;
 
-// A current stable Chrome (macOS) UA. Looking like a real browser lets WAFs
-// keyed on the UA string serve the page instead of a bot wall; the bare
-// `turbo-surf/0.1` token was an instant tell. Still overridable per-fetch /
-// per-crawl (see `build_headers`). Only the default (rustls) path sets these by
-// hand; under `impersonate` wreq's emulation owns a coherent UA + nav headers
-// that match its TLS fingerprint, so these would be dead code (and wrong).
-#[cfg(not(feature = "impersonate"))]
-const DEFAULT_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
-AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
-
-// Chrome's default top-level navigation header set, minus the ones reqwest owns:
-// `accept-encoding` (reqwest advertises only the codings it can auto-decompress,
-// so overriding it would hand back undecodable bytes), `host`, and `cookie`.
-// Stored in a `BTreeMap`, so the wire order is reqwest's, not this list's — this
-// tier fixes the *content* tell (bare UA + thin `accept`), not header ordering or
-// the TLS/HTTP-2 fingerprint. Keep the Chrome major in `sec-ch-ua` in sync with
-// `DEFAULT_UA`.
-#[cfg(not(feature = "impersonate"))]
-const CHROME_HEADERS: &[(&str, &str)] = &[
-    (
-        "accept",
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,\
-image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-    ),
-    ("accept-language", "en-US,en;q=0.9"),
-    (
-        "sec-ch-ua",
-        "\"Google Chrome\";v=\"149\", \"Chromium\";v=\"149\", \"Not)A;Brand\";v=\"24\"",
-    ),
-    ("sec-ch-ua-mobile", "?0"),
-    ("sec-ch-ua-platform", "\"macOS\""),
-    ("sec-fetch-dest", "document"),
-    ("sec-fetch-mode", "navigate"),
-    ("sec-fetch-site", "none"),
-    ("sec-fetch-user", "?1"),
-    ("upgrade-insecure-requests", "1"),
-];
-
 const DEFAULT_MAX_BYTES: usize = 8 * 1024 * 1024; // 8 MiB
 const HTML_TYPES: &[&str] = &[
     "text/html",
@@ -108,6 +70,11 @@ pub struct FetchOptions<'a> {
     /// Shared client for connection reuse (see [`build_client`]); built per-call
     /// when `None`.
     pub client: Option<&'a http::Client>,
+    /// Fingerprint identity for the default (rustls) header set. `None` uses
+    /// [`crate::fingerprint::default_profile`] (the fixed Chrome 149 / macOS set);
+    /// pass [`crate::fingerprint::select`]`(key)` to rotate per client. Ignored on
+    /// the `impersonate` path, where wreq's emulation owns the headers.
+    pub profile: Option<&'a crate::fingerprint::Profile>,
     pub now: f64,
 }
 
@@ -185,9 +152,16 @@ fn build_headers(url: &str, opts: &FetchOptions) -> BTreeMap<String, String> {
     // them (caller overrides + cookies/cache below still apply on both paths).
     #[cfg(not(feature = "impersonate"))]
     {
-        h.insert("user-agent".into(), DEFAULT_UA.into());
-        for (k, v) in CHROME_HEADERS {
-            h.insert((*k).into(), (*v).into());
+        let owned;
+        let profile = match opts.profile {
+            Some(p) => p,
+            None => {
+                owned = crate::fingerprint::default_profile();
+                &owned
+            }
+        };
+        for (k, v) in profile.nav_headers() {
+            h.insert(k.to_string(), v);
         }
     }
     for (k, v) in &opts.headers {
@@ -213,7 +187,7 @@ fn build_headers(url: &str, opts: &FetchOptions) -> BTreeMap<String, String> {
 fn emulate(builder: http::ClientBuilder) -> http::ClientBuilder {
     #[cfg(feature = "impersonate")]
     let builder = builder.emulation(
-        // Chrome 149 on macOS — matched to the tier-1 HTTP UA (DEFAULT_UA) and the
+        // Chrome 149 on macOS — matched to fingerprint::default_profile and the
         // render-tier navigator so the TLS/HTTP-2 fingerprint, the request headers,
         // and `navigator.*` all report the same browser+OS (a cross-layer mismatch
         // is itself a bot signal).

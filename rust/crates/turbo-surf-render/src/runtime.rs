@@ -243,7 +243,7 @@ globalThis.self = globalThis;
 // Present a real Chrome (macOS) navigator so page JS that profiles the browser
 // (consistency-only anti-bot gates, feature detection) sees Chrome, not the old
 // `turbo-surf`/`turbo-test` tell. Kept in sync with the tier-1 HTTP UA in
-// turbo-surf-core (net.rs DEFAULT_UA): same Chrome major + macOS, so navigator
+// turbo-surf-core (fingerprint::default_profile): same Chrome major + macOS, so navigator
 // and the request headers agree (a UA/platform mismatch is itself a bot signal).
 // This is no-Chromium env emulation — it satisfies passive/consistency probes,
 // not active canvas/WebGL/audio draw-and-hash or PoW challenges.

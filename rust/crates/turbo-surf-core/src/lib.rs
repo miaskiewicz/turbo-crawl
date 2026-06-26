@@ -15,6 +15,7 @@
 pub mod cache;
 pub mod cookies;
 pub mod crawl;
+pub mod fingerprint;
 pub mod frontier;
 pub mod measure;
 pub mod net;
