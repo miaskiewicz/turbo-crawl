@@ -123,12 +123,44 @@ fn element_api_surface() {
 #[test]
 fn window_and_navigator_present() {
     assert_eq!(
-        run_with_dom("<body></body>", "navigator.userAgent").unwrap(),
-        "turbo-surf"
-    );
-    assert_eq!(
         run_with_dom("<body></body>", "String(window === globalThis)").unwrap(),
         "true"
+    );
+}
+
+// Page JS that profiles the browser must see a coherent real-Chrome navigator,
+// not the old `turbo-surf`/`turbo-test` tell — the no-Chromium env emulation that
+// gets past consistency-only anti-bot gates (see ENV_BOOTSTRAP in runtime.rs).
+#[test]
+fn navigator_looks_like_chrome() {
+    let ua = run_with_dom("<body></body>", "navigator.userAgent").unwrap();
+    assert!(
+        ua.contains("Chrome/") && ua.contains("Macintosh"),
+        "UA: {ua}"
+    );
+    // Identity fields a fingerprinter cross-checks against the UA.
+    assert_eq!(
+        run_with_dom("<body></body>", "navigator.platform").unwrap(),
+        "MacIntel"
+    );
+    assert_eq!(
+        run_with_dom("<body></body>", "navigator.vendor").unwrap(),
+        "Google Inc."
+    );
+    // Automation tell: must be the boolean false, not undefined/true.
+    assert_eq!(
+        run_with_dom("<body></body>", "String(navigator.webdriver)").unwrap(),
+        "false"
+    );
+    // A non-empty plugin set + `window.chrome` are both presence checks headless
+    // clients classically fail.
+    assert_eq!(
+        run_with_dom("<body></body>", "String(navigator.plugins.length > 0)").unwrap(),
+        "true"
+    );
+    assert_eq!(
+        run_with_dom("<body></body>", "typeof window.chrome").unwrap(),
+        "object"
     );
 }
 

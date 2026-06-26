@@ -23,6 +23,13 @@ fingerprint — an instant tell for WAFs.
   (`tests/impersonate.rs`) asserts a Chrome JA4 + HTTP-2 fingerprint against a
   public echo (auto-skips offline); a localhost e2e asserts the Chrome headers
   reach the wire on the default path.
+- **Real Chrome `navigator` in the JS render tier** — `ENV_BOOTSTRAP` now installs
+  a coherent Chrome 149 (macOS) `navigator` (UA, `platform`, `vendor`,
+  `webdriver: false`, `hardwareConcurrency`/`deviceMemory`, a Chrome PDF plugin
+  set) plus a `window.chrome`, replacing the old `turbo-surf`/`turbo-test` tell
+  page JS used to see. Kept in sync with the tier-1 HTTP UA. No-Chromium env
+  emulation: satisfies passive/consistency anti-bot probes, not active
+  canvas/WebGL/audio fingerprinting or PoW challenges.
 
 ## [0.2.4]
 A **Linux SIGBUS** fix in the Playwright-shim test harness, plus a new **Python

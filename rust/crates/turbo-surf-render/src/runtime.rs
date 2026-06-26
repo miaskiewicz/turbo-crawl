@@ -240,16 +240,43 @@ deno_core::extension!(
 const ENV_BOOTSTRAP: &str = r##"(() => {
 const ops = Deno.core.ops;
 globalThis.self = globalThis;
-// turbo-surf brand UA (browser_env.js seeds a generic one; override it here).
+// Present a real Chrome (macOS) navigator so page JS that profiles the browser
+// (consistency-only anti-bot gates, feature detection) sees Chrome, not the old
+// `turbo-surf`/`turbo-test` tell. Kept in sync with the tier-1 HTTP UA in
+// turbo-surf-core (net.rs DEFAULT_UA): same Chrome major + macOS, so navigator
+// and the request headers agree (a UA/platform mismatch is itself a bot signal).
+// This is no-Chromium env emulation — it satisfies passive/consistency probes,
+// not active canvas/WebGL/audio draw-and-hash or PoW challenges.
 // `onLine: true` matters: auth SDKs (PropelAuth) only auto-refresh the session from the
 // cookie when the browser reports online — an undefined/falsy onLine made a cold load of
 // an authed page skip the refresh and render nothing.
+const __ua = (Deno.core.ops.op_user_agent && Deno.core.ops.op_user_agent()) ||
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
+// Chrome ships exactly these five PDF-viewer plugins, all aliased to the internal
+// viewer; `navigator.plugins.length === 0` is a classic headless giveaway.
+const __plugin = (name) => ({ name, filename: "internal-pdf-viewer", description: "Portable Document Format", length: 1 });
+const __plugins = ["PDF Viewer", "Chrome PDF Viewer", "Chromium PDF Viewer", "Microsoft Edge PDF Viewer", "WebKit built-in PDF"].map(__plugin);
 globalThis.navigator = {
-  userAgent: (Deno.core.ops.op_user_agent && Deno.core.ops.op_user_agent()) || "turbo-surf",
-  language: "en-US", languages: ["en-US"], onLine: true,
+  userAgent: __ua,
+  appVersion: __ua.replace(/^Mozilla\//, ""),
+  appName: "Netscape", appCodeName: "Mozilla", product: "Gecko", productSub: "20030107",
+  platform: "MacIntel", vendor: "Google Inc.", vendorSub: "",
+  language: "en-US", languages: ["en-US", "en"], onLine: true,
+  // Automation tell: real Chrome exposes this as `false`, never `true`/undefined.
+  webdriver: false,
+  hardwareConcurrency: 8, deviceMemory: 8, maxTouchPoints: 0,
+  cookieEnabled: true, doNotTrack: null,
+  plugins: __plugins, mimeTypes: [],
   // In-memory clipboard: an app that writeText()s a value (e.g. a copy-link button)
   // and reads it back round-trips, with no OS clipboard.
   clipboard: (() => { let v = ""; return { writeText: async (t) => { v = String(t == null ? "" : t); }, readText: async () => v }; })(),
+};
+// `window.chrome` presence (with loadTimes/csi/app, but no extension `runtime`) is
+// what a plain Chrome page exposes; its absence flags a non-Chrome/headless client.
+globalThis.chrome = globalThis.chrome || {
+  app: { isInstalled: false },
+  loadTimes: function () { return {}; },
+  csi: function () { return {}; },
 };
 globalThis.location = globalThis.location || { href: "about:blank", protocol: "about:", host: "", pathname: "blank" };
 globalThis.localStorage = (() => {
