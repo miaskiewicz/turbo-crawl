@@ -3,6 +3,78 @@
 All notable changes to turbo-surf are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer.
 
+## [0.2.6]
+**Look like a real Chrome on the wire.** The stock client sent a bare
+`turbo-surf/0.1` UA + a thin `Accept` and a generic rustls TLS/HTTP-2
+fingerprint — an instant tell for WAFs.
+
+### Added
+- **Chrome default headers** (default, rustls path, no new build deps) — every
+  fetch now sends a current Chrome 149 (macOS) UA plus the full navigation header
+  set (`accept`, `accept-language`, `sec-ch-ua`/`-mobile`/`-platform`,
+  `sec-fetch-*`, `upgrade-insecure-requests`), values matched against a live
+  real-Chrome capture. `accept-encoding` stays client-managed so auto-decompress
+  still works; caller/crawl headers still override.
+- **`impersonate` feature** (opt-in, BoringSSL) — swaps the reqwest+rustls client
+  for `wreq`/`wreq-util`, presenting a real Chrome TLS/JA3/JA4 + HTTP-2 (Akamai)
+  fingerprint. Off by default (needs a C toolchain — cmake/nasm — to build);
+  forwarded by `turbo-surf-{page,napi,mcp}`. A single `http_backend` alias in
+  `turbo-surf-core` swaps the backend in one place. New live e2e
+  (`tests/impersonate.rs`) asserts a Chrome JA4 + HTTP-2 fingerprint against a
+  public echo (auto-skips offline); a localhost e2e asserts the Chrome headers
+  reach the wire on the default path.
+- **Real Chrome `navigator` in the JS render tier** — `ENV_BOOTSTRAP` now installs
+  a coherent Chrome 149 (macOS) `navigator` (UA, `platform`, `vendor`,
+  `webdriver: false`, `hardwareConcurrency`/`deviceMemory`, a Chrome PDF plugin
+  set) plus a `window.chrome`, and masks the JS polyfills' `Function.prototype.
+  toString` so built-ins (`fetch`, `setTimeout`, …) report `[native code]`.
+  Replaces the old `turbo-surf`/`turbo-test` tell page JS used to see. No-Chromium
+  env emulation: satisfies passive/consistency anti-bot probes, not active
+  canvas/WebGL/audio fingerprinting or PoW challenges.
+- **Fingerprint seed pool** (`turbo-surf-core::fingerprint`) — ~4000 internally
+  coherent real-Chrome identities, selected deterministically by a client key
+  (stable per client, spread across the fleet). Opt-in via `FetchOptions.profile`;
+  the default reproduces the prior fixed Chrome-149/macOS wire behaviour. Raises
+  the passive/consistency anti-bot bar; does not defeat active fingerprinting/PoW.
+- **Challenge-solver integration** (`turbo-surf-core::challenge`) — detect a JS-
+  challenge/PoW wall (Akamai/DataDome/Kasada/Cloudflare) and hand it to a server-
+  side solver (`ScrapflySolver`/`HyperSolver`) that returns tokens/cookies to
+  replay. Configured via env / `.env` (`HYPER_API_KEY`, `SCRAPFLY_API_KEY`,
+  `TURBO_SURF_SOLVER`, `TURBO_SURF_PROXY`); inert until a real key is set. See
+  `.env.example`. Wired into the MCP session (per-host profile + auto solve/replay
+  on a detected wall) and `TurboNavigator` (the crawl seam). Also a self-owned
+  `BrowserSolver` (opt-in `TURBO_SURF_SOLVER=browser` + `TURBO_SURF_BROWSER_CMD`)
+  that shells to a hardened-headless sidecar over a JSON contract — Chromium stays
+  out of the engine; reference sidecar in `harness/browser-solver/`. MCP
+  `stealth_status` tool reports the active profile + wired solver.
+- **In-house Akamai solver** (`turbo-surf-core::akamai`, `TURBO_SURF_SOLVER=akamai`,
+  no key) — the first hand-written `ChallengeSolver`: `generate_sensor` builds a
+  deterministic Akamai-shaped `sensor_data` payload, `AkamaiSolver` POSTs it to the
+  sensor endpoint and parses the cleared `_abck`. Structure + POST/parse flow are
+  tested + green; the dynamic field encoding a live edge validates still needs
+  keying off a real `_abck` script (use the `probe` mode).
+- **In-house Cloudflare solver** (`turbo-surf-core::cloudflare`,
+  `TURBO_SURF_SOLVER=cloudflare`, no key) — parse the managed-challenge
+  interstitial (`window._cf_chl_opt`), solve its (JS-compute) PoW, POST to the
+  challenge-platform endpoint, harvest `cf_clearance`. Structure + flow green; real
+  per-version PoW math keyed off a live challenge. Turnstile-interactive stays on
+  the browser sidecar.
+- **`probe-script` example** (`cargo run -p turbo-surf-render --example probe-script
+  -- script.js`) — run the `probe` instrumentation over a real captured anti-bot
+  script and print what it touched + the shim gaps. Run against a real Akamai
+  sensor it surfaced two missing `navigator` props (`connection`,
+  `userAgentData`), now added to the render-tier navigator (coherent with the UA).
+- **Runtime-controllable render fingerprint** — every render-tier `navigator` field
+  (UA, platform, vendor, languages, hardwareConcurrency, deviceMemory, chromeMajor,
+  connection, userAgentData, screen, devicePixelRatio) now has a Chrome 149 default
+  and is overridable via `turbo_surf_render::set_fingerprint(json)` / the MCP
+  `set_fingerprint` tool. `stealth_status` reports the active overrides.
+- **Fingerprint debug/probe mode** (`turbo-surf-render::probe_globals`, MCP `probe`
+  tool) — run a page's JS with `navigator`/`screen`/`window.chrome`/canvas wrapped
+  in logging proxies and report every property it touched + which reads returned
+  `undefined` (the shim to-do list). Recon for what an anti-bot check probes and
+  what's left to emulate.
+
 ## [0.2.5]
 A **pooled-render latency** fix on the JS-crawl fast path.
 

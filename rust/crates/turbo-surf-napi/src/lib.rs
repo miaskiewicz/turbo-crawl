@@ -25,7 +25,7 @@ use view::{Field, FieldType, QueryType, TextMode};
 
 #[napi]
 pub fn version() -> String {
-    "0.2.5".to_string()
+    "0.2.6".to_string()
 }
 
 fn to_json_string<T: serde::Serialize>(v: &T) -> String {
@@ -578,8 +578,8 @@ pub fn click_node(html: String, node: u32, base_url: String) -> String {
 /// Process-shared HTTP client so connections + TLS sessions are pooled across
 /// every `fetchHtml`/`request`/`goto` (without it, each fetch paid a fresh TLS
 /// handshake — the dominant per-page cost in a multi-page crawl).
-fn shared_client() -> &'static turbo_surf_core::reqwest::Client {
-    static CLIENT: std::sync::OnceLock<turbo_surf_core::reqwest::Client> =
+fn shared_client() -> &'static turbo_surf_core::http_backend::Client {
+    static CLIENT: std::sync::OnceLock<turbo_surf_core::http_backend::Client> =
         std::sync::OnceLock::new();
     CLIENT.get_or_init(build_client)
 }

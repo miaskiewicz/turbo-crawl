@@ -12,15 +12,17 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use turbo_dom_parser::rtdom::serialize::serialize_inner;
 use turbo_dom_parser::rtdom::Tree;
+use turbo_surf_core::challenge::{self, ChallengeSolver, SolveContext};
 use turbo_surf_core::cookies::CookieJar;
 use turbo_surf_core::crawl::{crawl as run_crawl, CrawlOptions};
+use turbo_surf_core::fingerprint;
 use turbo_surf_core::net::{fetch_html, FetchOptions};
 use turbo_surf_core::robots::{RobotsCache, RobotsFetcher};
 use turbo_surf_page::{batch as batch_urls, TurboNavigator};
 use turbo_surf_view as view;
 use view::{Field, FieldType, QueryType, TextMode};
 
-pub const VERSION: &str = "0.2.5";
+pub const VERSION: &str = "0.2.6";
 
 /// One agent session: the current page URL + parsed tree + nav history, plus the
 /// browser-ish state agents expect (UA / extra headers / cookie jar / JS mode) and
@@ -40,11 +42,38 @@ pub struct Session {
     dom_history: Vec<String>,
     /// Every URL fetched this session (navigations + direct fetches).
     requests: Vec<String>,
+    /// Optional challenge solver (Hyper/Scrapfly), configured from env / `.env`.
+    /// `None` (the default) leaves the solve path inert.
+    solver: Option<Box<dyn ChallengeSolver>>,
+    /// Render-tier navigator fingerprint overrides (JSON object), applied via
+    /// `set_fingerprint`. Empty = Chrome 149 defaults.
+    fingerprint: String,
 }
 
 impl Session {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            // Pick up a solver from env/`.env` if one is configured (else inert).
+            solver: challenge::solver_from_env(),
+            ..Self::default()
+        }
+    }
+
+    /// Construct with an explicit solver (used by the e2e harness to inject a
+    /// fake/sidecar solver without touching process env).
+    pub fn with_solver(solver: Box<dyn ChallengeSolver>) -> Self {
+        Self {
+            solver: Some(solver),
+            ..Self::default()
+        }
+    }
+
+    // Stable per-host Chrome identity from the seed pool: same host → same
+    // profile (so any solver token stays consistent with the fingerprint),
+    // distinct hosts spread across the pool.
+    fn profile_for(&self, url: &str) -> fingerprint::Profile {
+        let key = turbo_surf_core::url::host_of(url).unwrap_or_else(|| url.to_string());
+        fingerprint::select(&key)
     }
 
     /// Inject a parsed tree (test seam, bypasses the network).
@@ -83,20 +112,88 @@ impl Session {
         body: Option<String>,
     ) -> Result<Value, String> {
         self.requests.push(url.to_string());
+        let profile = self.profile_for(url);
         let opts = FetchOptions {
             method,
             body,
             allow_non_html: true,
             headers: self.request_headers(),
             jar: Some(&mut self.jar),
+            profile: Some(&profile),
             ..Default::default()
         };
         let res = fetch_html_with(url, opts).await?;
         self.load(&res.0, &res.1);
+        let mut status = res.2;
+        // If the response is a JS-challenge / PoW wall and a solver is configured,
+        // solve it, inject the cleared cookies, and re-fetch on the fast path.
+        if let Some(new_status) = self.try_solve_challenge(&res.0, status, &res.1).await? {
+            status = new_status;
+        }
         if self.render_mode() {
             self.render_current().await?;
         }
-        Ok(json!({ "url": res.0, "status": res.2, "title": title_of(self.tree.as_ref().unwrap()) }))
+        Ok(
+            json!({ "url": res.0, "status": status, "title": title_of(self.tree.as_ref().unwrap()) }),
+        )
+    }
+
+    // Detect an anti-bot wall on a just-fetched response and, if a solver is set,
+    // solve → inject token cookies/headers → re-fetch once. Returns the re-fetch
+    // status when it solved, else `None` (no solver / not a challenge / solve
+    // failed — the original page stands). Uses the session jar's cookies as the
+    // header signal (set-cookie was already ingested into the jar).
+    async fn try_solve_challenge(
+        &mut self,
+        url: &str,
+        status: u16,
+        body: &str,
+    ) -> Result<Option<u16>, String> {
+        if self.solver.is_none() {
+            return Ok(None);
+        }
+        let cookie_line = self.jar.cookie_header(url, 0.0);
+        let signal: Vec<(String, String)> = cookie_line
+            .split("; ")
+            .filter(|s| !s.is_empty())
+            .map(|c| ("set-cookie".to_string(), c.to_string()))
+            .collect();
+        let Some(ch) = challenge::detect(url, status, &signal, body) else {
+            return Ok(None);
+        };
+        let ctx = SolveContext {
+            user_agent: self.ua.clone().unwrap_or_default(),
+            proxy: std::env::var("TURBO_SURF_PROXY")
+                .ok()
+                .filter(|s| !s.is_empty()),
+        };
+        // Borrow the solver out so we can mutate the jar/headers while it runs.
+        let solver = self.solver.take().unwrap();
+        let solved = solver.solve(&ch, &ctx).await;
+        self.solver = Some(solver);
+        let token = match solved {
+            Ok(t) => t,
+            Err(_) => return Ok(None), // leave the challenge page in place
+        };
+        for (k, v) in &token.cookies {
+            self.jar
+                .set_from_response(url, &[format!("{k}={v}; Path=/")], 0.0);
+        }
+        for (k, v) in &token.headers {
+            self.headers.insert(k.to_ascii_lowercase(), v.clone());
+        }
+        // Re-fetch with the cleared cookies (same profile/headers/jar).
+        let profile = self.profile_for(url);
+        let opts = FetchOptions {
+            allow_non_html: true,
+            headers: self.request_headers(),
+            jar: Some(&mut self.jar),
+            profile: Some(&profile),
+            ..Default::default()
+        };
+        let res = fetch_html_with(url, opts).await?;
+        self.load(&res.0, &res.1);
+        Ok(Some(res.2))
     }
 
     fn render_mode(&self) -> bool {
@@ -244,12 +341,65 @@ impl Session {
         Ok(json!({ "ok": true }))
     }
 
+    // Debug/probe mode: run the current page's own scripts with the fingerprint
+    // globals (navigator/screen/chrome/canvas) instrumented, and report what they
+    // touched + which reads came back undefined — i.e. what an anti-bot check read
+    // and what we still need to shim. Recon, not a render (the page isn't mutated).
+    async fn probe(&self) -> Result<Value, String> {
+        let html = serialize_doc(self.tree()?);
+        let script = self.page_script().await;
+        let report = turbo_surf_render::probe_globals(&html, &script)?;
+        serde_json::to_value(report).map_err(|e| e.to_string())
+    }
+
+    // Override render-tier navigator fingerprint fields (JSON object merged over
+    // the Chrome 149 defaults; every field is individually overridable). Persisted
+    // on the session and pushed to the render isolate. `{}` resets to defaults.
+    fn set_fingerprint(&mut self, overrides: &Value) -> Result<Value, String> {
+        let json = if overrides.is_null() {
+            "{}".to_string()
+        } else {
+            overrides.to_string()
+        };
+        turbo_surf_render::set_fingerprint(&json);
+        self.fingerprint = json.clone();
+        Ok(json!({ "ok": true, "fingerprint": overrides.clone() }))
+    }
+
+    // Report the active stealth posture: the per-host fingerprint profile this
+    // session would send, whether a challenge solver is wired, and the pool size.
+    fn stealth_status(&self) -> Value {
+        let key = if self.url.is_empty() {
+            "about:blank"
+        } else {
+            &self.url
+        };
+        let p = self.profile_for(key);
+        json!({
+            "profile": {
+                "userAgent": p.user_agent,
+                "platform": p.nav_platform,
+                "chromeMajor": p.chrome_major,
+                "acceptLanguage": p.accept_language,
+            },
+            "solver": self.solver.as_ref().map(|s| s.name()),
+            "poolSize": fingerprint::pool_size(),
+            "renderFingerprintOverrides": if self.fingerprint.is_empty() {
+                json!({})
+            } else {
+                serde_json::from_str(&self.fingerprint).unwrap_or(json!({}))
+            },
+        })
+    }
+
     async fn fetch_body(&mut self, url: &str) -> Result<String, String> {
         self.requests.push(url.to_string());
+        let profile = self.profile_for(url);
         let opts = FetchOptions {
             allow_non_html: true,
             headers: self.request_headers(),
             jar: Some(&mut self.jar),
+            profile: Some(&profile),
             ..Default::default()
         };
         Ok(fetch_html_with(url, opts).await?.1)
@@ -476,6 +626,22 @@ pub fn tools() -> Value {
             "Accessible description of the first match",
         ),
         // render / JS tier
+        (
+            "probe",
+            "Debug: run page JS with navigator/canvas instrumented; report what \
+             fingerprinting code touched + what to shim",
+        ),
+        (
+            "stealth_status",
+            "Report the active fingerprint profile + whether a challenge solver is \
+             wired + pool size",
+        ),
+        (
+            "set_fingerprint",
+            "Override render-tier navigator fields (JSON: userAgent, platform, \
+             vendor, languages, hardwareConcurrency, deviceMemory, chromeMajor, \
+             connection, userAgentData, screen, devicePixelRatio). {} resets.",
+        ),
         ("set_mode", "Set JS render mode (no-js | fast | secure)"),
         (
             "render",
@@ -585,6 +751,9 @@ pub async fn call_tool(session: &mut Session, name: &str, args: &Value) -> Resul
                 .await
                 .map(|()| json!({ "ok": true })),
         },
+        "probe" => session.probe().await,
+        "stealth_status" => Ok(session.stealth_status()),
+        "set_fingerprint" => session.set_fingerprint(args.get("overrides").unwrap_or(args)),
         "latest_dom" => Ok(json!(session.dom_history.last())),
         "dom_history" => Ok(json!(session.dom_history)),
         "run_playwright" => tool_run_playwright(session, args).await,
@@ -1073,6 +1242,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_fingerprint_overrides_render_navigator() {
+        let mut s = Session::new();
+        let r = call(
+            &mut s,
+            "set_fingerprint",
+            json!({ "overrides": { "platform": "Win32", "hardwareConcurrency": 16 } }),
+        )
+        .await;
+        assert_eq!(r["ok"], true);
+        // Persisted on the session + reflected by stealth_status. (The JS
+        // application of the override is covered in the render crate; eval_js here
+        // would hit the per-thread cached isolate and race.)
+        let st = call(&mut s, "stealth_status", json!({})).await;
+        assert_eq!(st["renderFingerprintOverrides"]["platform"], "Win32");
+        assert_eq!(st["renderFingerprintOverrides"]["hardwareConcurrency"], 16);
+        // Reset the process-global for other tests.
+        turbo_surf_render::set_fingerprint("{}");
+    }
+
+    #[tokio::test]
     async fn goto_fetches_and_loads_over_localhost() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
@@ -1080,7 +1269,10 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
             while let Ok((mut sock, _)) = listener.accept().await {
-                let mut b = [0u8; 512];
+                // Drain the whole request before replying: a real Chrome header
+                // set is ~600 B, so a 512-B buffer left bytes unread and the
+                // close-after-write RST-truncated the response on the client.
+                let mut b = [0u8; 2048];
                 let _ = sock.read(&mut b).await;
                 let body = "<html><head><title>Live</title></head><body><p>hello</p></body></html>";
                 let resp = format!(
@@ -1106,6 +1298,126 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("hello"));
+    }
+
+    // E2E of the whole challenge pipeline (detect → solve → inject cookie →
+    // replay) over localhost, no real browser/network: a server that walls the
+    // first hit and serves the page once a "cleared" cookie is present, plus a
+    // fake sidecar (BrowserSolver shelling to `printf`) that returns that cookie.
+    #[tokio::test]
+    async fn e2e_solver_clears_wall_and_replays() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut b = [0u8; 4096];
+                    let n = sock.read(&mut b).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&b[..n]);
+                    let cleared = req.lines().any(|l| {
+                        l.to_ascii_lowercase().starts_with("cookie:") && l.contains("cleared=1")
+                    });
+                    let resp = if cleared {
+                        let body = "<html><head><title>Real</title></head><body>ok</body></html>";
+                        format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                    } else {
+                        // Challenge wall: a body marker the detector keys on.
+                        let body =
+                            "<html><body>/cdn-cgi/challenge-platform/ checking…</body></html>";
+                        format!("HTTP/1.1 403 Forbidden\r\nContent-Type: text/html\r\nSet-Cookie: datadome=chal; Path=/\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                    };
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.flush().await;
+                });
+            }
+        });
+        // Fake hardened-headless sidecar: "solves" by returning the gating cookie.
+        let solver = Box::new(turbo_surf_core::challenge::BrowserSolver::new(
+            "cat >/dev/null; printf '{\"cookies\":{\"cleared\":\"1\"}}'".into(),
+        ));
+        let mut s = Session::with_solver(solver);
+        let out = s.goto(&format!("http://127.0.0.1:{port}/")).await.unwrap();
+        // Walled 403 → detected → solved → re-fetched → real page.
+        assert_eq!(out["status"], 200, "expected solved page, got {out}");
+        assert_eq!(out["title"], "Real");
+    }
+
+    // E2E with the REAL in-house AkamaiSolver (not a stub): an Akamai-walled
+    // localhost site — 403 + `_abck` seed until a sensor POST clears it — driven
+    // through the whole MCP session pipeline (detect → AkamaiSolver.solve → inject
+    // `_abck` → replay → real page).
+    #[tokio::test]
+    async fn e2e_akamai_solver_clears_wall() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut b = vec![0u8; 8192];
+                    let n = sock.read(&mut b).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&b[..n]);
+                    let resp = if req.starts_with("POST") {
+                        // Sensor accepted → issue a cleared _abck.
+                        let body = "{}";
+                        format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nSet-Cookie: _abck=CLEARED~0~ok; Path=/\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                    } else if req.contains("_abck=CLEARED") {
+                        let body = "<html><head><title>Real</title></head><body>ok</body></html>";
+                        format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                    } else {
+                        // Wall: seed _abck so the detector fires Akamai.
+                        let body = "<html><body>bot wall</body></html>";
+                        format!("HTTP/1.1 403 Forbidden\r\nContent-Type: text/html\r\nSet-Cookie: _abck=0~seed~-1~-1; Path=/\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                    };
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.flush().await;
+                });
+            }
+        });
+        let mut s = Session::with_solver(Box::new(turbo_surf_core::akamai::AkamaiSolver::new()));
+        let out = s.goto(&format!("http://127.0.0.1:{port}/")).await.unwrap();
+        assert_eq!(out["status"], 200, "akamai not cleared: {out}");
+        assert_eq!(out["title"], "Real");
+    }
+
+    // E2E with the REAL in-house CloudflareSolver: a managed-challenge localhost
+    // site — interstitial until the challenge POST issues `cf_clearance`.
+    #[tokio::test]
+    async fn e2e_cloudflare_solver_clears_wall() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        const INTERSTITIAL: &str = "<html><head><script>window._cf_chl_opt={cvId:'3',cRay:'8af0deadbeef'};</script></head><body>/cdn-cgi/challenge-platform/ checking…</body></html>";
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut b = vec![0u8; 8192];
+                    let n = sock.read(&mut b).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&b[..n]);
+                    let resp = if req.starts_with("POST") {
+                        let body = "{}";
+                        format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nSet-Cookie: cf_clearance=CF~cleared~1; Path=/\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                    } else if req.contains("cf_clearance=CF") {
+                        let body = "<html><head><title>Real</title></head><body>ok</body></html>";
+                        format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                    } else {
+                        format!("HTTP/1.1 403 Forbidden\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{INTERSTITIAL}", INTERSTITIAL.len())
+                    };
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.flush().await;
+                });
+            }
+        });
+        let mut s = Session::with_solver(Box::new(
+            turbo_surf_core::cloudflare::CloudflareSolver::new(),
+        ));
+        let out = s.goto(&format!("http://127.0.0.1:{port}/")).await.unwrap();
+        assert_eq!(out["status"], 200, "cloudflare not cleared: {out}");
+        assert_eq!(out["title"], "Real");
     }
 
     #[tokio::test]
@@ -1186,7 +1498,10 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
             while let Ok((mut sock, _)) = listener.accept().await {
-                let mut b = [0u8; 512];
+                // Drain the whole request before replying: a real Chrome header
+                // set is ~600 B, so a 512-B buffer left bytes unread and the
+                // close-after-write RST-truncated the response on the client.
+                let mut b = [0u8; 2048];
                 let _ = sock.read(&mut b).await;
                 let resp = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<title>Dest</title>";
                 let _ = sock.write_all(resp.as_bytes()).await;

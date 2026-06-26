@@ -6,6 +6,12 @@ license.workspace = true
 repository.workspace = true
 description = "Browserless native-speed crawler core (Rust port, tier 1)"
 
+[features]
+# Swap the stock reqwest+rustls client for wreq (BoringSSL), which presents a
+# real Chrome TLS/JA3/JA4 + HTTP-2 (Akamai) fingerprint. Off by default: wreq
+# pulls BoringSSL, which needs a C toolchain (cmake/nasm) to build. See net.rs.
+impersonate = ["dep:wreq", "dep:wreq-util"]
+
 [dependencies]
 url = "2"
 reqwest = { version = "0.12", default-features = false, features = [
@@ -15,9 +21,33 @@ reqwest = { version = "0.12", default-features = false, features = [
     "deflate",
     "stream",
 ] }
+# BoringSSL-backed client for the `impersonate` feature (see [features]).
+# `stream` for incremental body reads (byte-cap enforcement); the codec features
+# because wreq's Chrome emulation advertises `accept-encoding: gzip, deflate, br,
+# zstd` — without them it can't decode the responses it asks for.
+#
+# Pinned to the 6.0.0-rc / 3.0.0-rc line because Chrome 149 only lands there
+# (stable wreq-util 2.x tops out at Chrome 137); keeps the emulated version in
+# lockstep with the tier-1 HTTP UA + the render-tier navigator. Pre-release, but
+# only pulled by this opt-in feature — the default build never sees it.
+wreq = { version = "6.0.0-rc.29", optional = true, features = [
+    "stream",
+    "gzip",
+    "brotli",
+    "deflate",
+    "zstd",
+] }
+wreq-util = { version = "3.0.0-rc.13", optional = true }
 encoding_rs = "0.8"
 bytes = "1"
-tokio = { version = "1", features = ["macros", "rt", "time", "sync"] }
+tokio = { version = "1", features = [
+    "macros",
+    "rt",
+    "time",
+    "sync",
+    "process",
+    "io-util",
+] }
 futures-util = "0.3"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }

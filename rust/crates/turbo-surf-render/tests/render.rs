@@ -9,6 +9,10 @@ use turbo_surf_render::{
     DEFAULT_RENDER_BUDGET_MS,
 };
 
+// set_fingerprint is a PROCESS-global override; serialize the tests that read or
+// mutate it so a parallel override can't leak into a default-assuming test.
+static FP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 // --- pooled render (reused isolate) keeps fresh-navigation isolation --------
 // `render_page_pooled` reuses one V8 isolate across pages for speed; the cross-page
 // global scrub must make a reused isolate behave like a fresh navigation. Run a page
@@ -123,12 +127,86 @@ fn element_api_surface() {
 #[test]
 fn window_and_navigator_present() {
     assert_eq!(
-        run_with_dom("<body></body>", "navigator.userAgent").unwrap(),
-        "turbo-surf"
-    );
-    assert_eq!(
         run_with_dom("<body></body>", "String(window === globalThis)").unwrap(),
         "true"
+    );
+}
+
+// Page JS that profiles the browser must see a coherent real-Chrome navigator,
+// not the old `turbo-surf`/`turbo-test` tell — the no-Chromium env emulation that
+// gets past consistency-only anti-bot gates (see ENV_BOOTSTRAP in runtime.rs).
+#[test]
+fn navigator_looks_like_chrome() {
+    let _g = FP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    turbo_surf_render::set_fingerprint("{}"); // defaults (render_html = fresh isolate)
+                                              // Dump the identity surface into a DOM attribute so one fresh render asserts
+                                              // it all deterministically (run_with_dom caches its isolate, so it can't
+                                              // observe the current override).
+    let probe = "document.body.setAttribute('data-n', [\
+        navigator.userAgent.includes('Chrome/') && navigator.userAgent.includes('Macintosh'),\
+        navigator.platform, navigator.vendor, navigator.webdriver,\
+        navigator.plugins.length > 0, typeof window.chrome,\
+        navigator.connection.effectiveType, navigator.userAgentData.platform,\
+        typeof fetch.toString].join('|'))";
+    let out = turbo_surf_render::render_html("<body></body>", probe).unwrap();
+    assert!(
+        out.contains("data-n=\"true|MacIntel|Google Inc.|false|true|object|4g|macOS|function\""),
+        "navigator not coherent Chrome: {out}"
+    );
+}
+
+// Runtime fingerprint override: every navigator field has a default and is
+// controllable via set_fingerprint (the MCP `set_fingerprint` tool). Uses
+// render_html (a fresh isolate per call, so ENV_BOOTSTRAP re-reads the override),
+// writing the values into the DOM to assert on the hydrated output.
+#[test]
+fn fingerprint_override_applies_and_resets() {
+    let _g = FP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let probe = "document.body.setAttribute('data-fp', \
+        navigator.platform + '|' + navigator.hardwareConcurrency + '|' + \
+        navigator.languages.join(',') + '|' + screen.width + '|' + \
+        navigator.userAgentData.brands[0].version)";
+
+    turbo_surf_render::set_fingerprint(
+        r#"{"platform":"Win32","hardwareConcurrency":16,"languages":["en-GB","en"],
+            "screen":{"width":2560,"height":1440},"chromeMajor":150}"#,
+    );
+    let out = turbo_surf_render::render_html("<body></body>", probe).unwrap();
+    assert!(
+        out.contains("data-fp=\"Win32|16|en-GB,en|2560|150\""),
+        "override not applied: {out}"
+    );
+
+    // Reset → Chrome 149 macOS defaults return.
+    turbo_surf_render::set_fingerprint("{}");
+    let out = turbo_surf_render::render_html("<body></body>", probe).unwrap();
+    assert!(
+        out.contains("data-fp=\"MacIntel|8|en-US,en|1920|149\""),
+        "reset to defaults failed: {out}"
+    );
+}
+
+// Native-function fidelity: page JS that does `fetch.toString()` (a common
+// anti-bot probe) must see "[native code]", not our polyfill's JS source — and
+// the toString trap must report itself native too.
+#[test]
+fn shimmed_builtins_report_native() {
+    assert_eq!(
+        run_with_dom("<body></body>", "fetch.toString()").unwrap(),
+        "function fetch() { [native code] }"
+    );
+    assert_eq!(
+        run_with_dom("<body></body>", "setTimeout.toString()").unwrap(),
+        "function setTimeout() { [native code] }"
+    );
+    assert_eq!(
+        run_with_dom("<body></body>", "Function.prototype.toString.toString()").unwrap(),
+        "function toString() { [native code] }"
+    );
+    // A genuine page function must still reveal its JS source (we only mask shims).
+    assert_eq!(
+        run_with_dom("<body></body>", "(function foo(){return 1}).toString()").unwrap(),
+        "function foo(){return 1}"
     );
 }
 
@@ -1681,7 +1759,10 @@ async fn spawn_paths_js_server(routes: &[(&'static str, &'static str)]) -> u16 {
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
         while let Ok((mut s, _)) = listener.accept().await {
-            let mut b = [0u8; 1024];
+            // Buffer must hold the whole request: the in-V8 fetch now sends a
+            // full Chrome header set (~700 B), and reading less leaves bytes
+            // unread so the close-after-write RST-truncates the client's read.
+            let mut b = [0u8; 4096];
             let n = s.read(&mut b).await.unwrap_or(0);
             let req = String::from_utf8_lossy(&b[..n]).to_string();
             let path = req
@@ -1715,7 +1796,7 @@ async fn spawn_js_server(body: &'static str) -> u16 {
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
         while let Ok((mut s, _)) = listener.accept().await {
-            let mut b = [0u8; 1024];
+            let mut b = [0u8; 4096];
             let _ = s.read(&mut b).await;
             let resp = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\nConnection: close\r\n\r\n{body}"
@@ -1734,7 +1815,7 @@ async fn spawn_json_server(body: &'static str) -> u16 {
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
         while let Ok((mut s, _)) = listener.accept().await {
-            let mut b = [0u8; 512];
+            let mut b = [0u8; 4096];
             let _ = s.read(&mut b).await;
             let resp = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}"

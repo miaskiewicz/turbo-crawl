@@ -10,10 +10,13 @@
 //! unit-tested offline; only `goto` touches the network.
 
 use async_trait::async_trait;
+use std::collections::BTreeMap;
 use turbo_dom_parser::rtdom::Tree;
+use turbo_surf_core::challenge::{self, ChallengeSolver, SolveContext};
 use turbo_surf_core::crawl::{Nav, Navigator};
+use turbo_surf_core::fingerprint;
 use turbo_surf_core::net::{fetch_html, FetchOptions};
-use turbo_surf_core::url::resolve;
+use turbo_surf_core::url::{host_of, resolve};
 
 /// Parse a fetched document into a [`Nav`]: title + absolute out-links. Pure —
 /// no network. `final_url` is the post-redirect URL (the link-resolution base).
@@ -75,7 +78,10 @@ pub struct TurboNavigator {
     /// Optional extraction target counted per page (for the crawl benchmark's
     /// item-parity metric); `None` skips counting.
     pub item_selector: Option<String>,
-    client: reqwest::Client,
+    /// Optional challenge solver (Hyper/Scrapfly). `None` leaves the solve path
+    /// inert; set via [`TurboNavigator::with_solver_from_env`].
+    solver: Option<Box<dyn ChallengeSolver>>,
+    client: turbo_surf_core::http_backend::Client,
 }
 
 impl Default for TurboNavigator {
@@ -84,6 +90,7 @@ impl Default for TurboNavigator {
             max_bytes: None,
             allow_non_html: false,
             item_selector: None,
+            solver: None,
             client: turbo_surf_core::net::build_client(),
         }
     }
@@ -95,18 +102,79 @@ impl TurboNavigator {
         self.item_selector = selector;
         self
     }
+
+    /// Enable challenge solving by reading a solver (Hyper/Scrapfly) from env /
+    /// `.env`. No-op when nothing is configured.
+    pub fn with_solver_from_env(mut self) -> Self {
+        self.solver = challenge::solver_from_env();
+        self
+    }
+
+    // Per-host Chrome identity from the seed pool: same host → same profile across
+    // the crawl (stable), distinct hosts spread across the pool (varied).
+    fn profile_for(url: &str) -> fingerprint::Profile {
+        let key = host_of(url).unwrap_or_else(|| url.to_string());
+        fingerprint::select(&key)
+    }
 }
 
 #[async_trait]
 impl Navigator for TurboNavigator {
     async fn goto(&self, url: &str) -> Result<Nav, String> {
+        let profile = Self::profile_for(url);
         let opts = FetchOptions {
             max_bytes: self.max_bytes,
             allow_non_html: self.allow_non_html,
             client: Some(&self.client),
+            profile: Some(&profile),
             ..Default::default()
         };
         let res = fetch_html(url, opts).await.map_err(|e| e.to_string())?;
+        // Anti-bot wall + solver configured → solve and re-fetch once with the
+        // token cookies/headers attached. (No cookie jar here, so detection keys
+        // on body markers — the cookie-only Akamai signal is caught in the MCP
+        // session path, which has a jar.)
+        if let Some(solver) = &self.solver {
+            if let Some(ch) = challenge::detect(&res.final_url, res.status, &[], &res.html) {
+                let ctx = SolveContext {
+                    user_agent: profile.user_agent.clone(),
+                    proxy: std::env::var("TURBO_SURF_PROXY")
+                        .ok()
+                        .filter(|s| !s.is_empty()),
+                };
+                if let Ok(token) = solver.solve(&ch, &ctx).await {
+                    let mut headers = BTreeMap::new();
+                    if !token.cookies.is_empty() {
+                        let cookie = token
+                            .cookies
+                            .iter()
+                            .map(|(k, v)| format!("{k}={v}"))
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        headers.insert("cookie".to_string(), cookie);
+                    }
+                    for (k, v) in &token.headers {
+                        headers.insert(k.to_ascii_lowercase(), v.clone());
+                    }
+                    let retry = FetchOptions {
+                        max_bytes: self.max_bytes,
+                        allow_non_html: self.allow_non_html,
+                        client: Some(&self.client),
+                        profile: Some(&profile),
+                        headers,
+                        ..Default::default()
+                    };
+                    if let Ok(solved) = fetch_html(url, retry).await {
+                        return Ok(parse_nav_with_items(
+                            &solved.html,
+                            &solved.final_url,
+                            solved.status,
+                            self.item_selector.as_deref(),
+                        ));
+                    }
+                }
+            }
+        }
         Ok(parse_nav_with_items(
             &res.html,
             &res.final_url,

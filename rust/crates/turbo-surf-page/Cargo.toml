@@ -6,8 +6,12 @@ license.workspace = true
 repository.workspace = true
 description = "turbo-surf tier 2: Page over the turbo-dom Rust parser + Navigator impl"
 
+[features]
+# Forward turbo-surf-core's BoringSSL Chrome-fingerprint client. See its net.rs.
+impersonate = ["turbo-surf-core/impersonate"]
+
 [dependencies]
-turbo-surf-core = { path = "../turbo-surf-core", version = "0.2.5" }
+turbo-surf-core = { path = "../turbo-surf-core", version = "0.2.6" }
 turbo-dom-parser = { package = "turbo-dom", version = "0.3.5" }
 async-trait = "0.1"
 futures-util = "0.3"
