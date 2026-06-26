@@ -104,7 +104,7 @@ npx turbo-surf-mcp          # stdio MCP server (60 tools), e.g.:
 #              is_empty, aria_role, accessible_name, accessible_description
 # bulk:        crawl, batch
 # render/JS:   render, set_mode, eval_js, inject_js, latest_dom, dom_history,
-#              evaluate, detect_js, run_playwright
+#              evaluate, detect_js, run_playwright, probe
 # session:     get_cookies, set_cookie, set_extra_headers, robots_check
 # direct:      fetch_json, fetch_raw
 ```
@@ -186,6 +186,52 @@ platform there's no prebuilt binary (build from a checkout as above).
 
 **Other MCP clients** (Claude Desktop, Cursor, …) — point their MCP config's
 `command` at `npx` with args `["-y", "turbo-surf-mcp"]`, or at the binary path.
+
+## Looking like a real browser (fingerprint + anti-bot)
+
+By default every request carries a real **Chrome 149** identity — full UA + client
+hints (`sec-ch-ua`, `sec-fetch-*`, …) on the wire, and a matching Chrome
+`navigator` (`platform`, `vendor`, `webdriver: false`, plugins, `window.chrome`,
+native-`toString`) inside the JS render tier. No config needed.
+
+**TLS/HTTP-2 fingerprint (`impersonate`).** rustls can't forge Chrome's
+JA3/JA4 + Akamai HTTP-2 fingerprint. Build with the opt-in feature to swap in a
+BoringSSL client (`wreq`) that does — it presents a real Chrome 149 TLS + HTTP-2
+fingerprint:
+
+```bash
+# needs a C toolchain (cmake + nasm) for BoringSSL
+cargo build --release -p turbo-surf-mcp --features impersonate
+```
+
+Off by default (keeps the pure-rustls build dependency-free). Verified against a
+live TLS/HTTP-2 echo in the test suite.
+
+**Fingerprint seed pool.** `turbo-surf-core::fingerprint` holds ~4000 internally
+coherent real-Chrome identities (UA ↔ client hints ↔ `navigator` all agree),
+selected deterministically by a client key — the same host always gets the same
+profile, while the fleet spreads across the pool. The MCP session and the crawl
+navigator rotate per host automatically; in code:
+
+```rust
+use turbo_surf_core::{fingerprint, net::{fetch_html, FetchOptions}};
+let profile = fingerprint::select("example.com");      // stable per key
+let opts = FetchOptions { profile: Some(&profile), ..Default::default() };
+let res = fetch_html("https://example.com/", opts).await?;
+```
+
+**JS-challenge / PoW walls (Akamai, DataDome, Kasada, Cloudflare).** A fingerprint
+gets you past *consistency* checks, not the active canvas/WebGL/PoW gates. Point a
+server-side solver at those: copy `.env.example` → `.env`, set `HYPER_API_KEY` or
+`SCRAPFLY_API_KEY` (+ `TURBO_SURF_PROXY` so the token's IP/JA3 matches your egress),
+and the MCP session / crawl navigator auto-detect a wall, solve it, and replay the
+cleared cookies on the fast path. Inert until a key is set.
+
+**Debug mode (`probe`).** To see *what* a page's anti-bot JS reads — and what's
+still missing — run the `probe` MCP tool (or `turbo-surf-render::probe_globals`):
+it runs the page's scripts with `navigator`/`screen`/`window.chrome`/canvas
+instrumented and reports every property touched plus the reads that returned
+`undefined` (your shim to-do list).
 
 ## Playwright drop-in (run your e2e specs with no browser)
 
