@@ -131,6 +131,10 @@ fn fnv1a(s: &str) -> u64 {
 /// POST the answer to the challenge-platform endpoint, read `cf_clearance`.
 pub struct CloudflareSolver {
     submit_url: Option<String>,
+    /// When set, the challenge's *own* JS is executed by this engine to compute the
+    /// answer (the proper path — no reversing the math). When `None`, falls back to
+    /// the structural [`solve_pow`] placeholder. The render tier supplies a V8 engine.
+    pow: Option<Box<dyn crate::challenge::PowEngine>>,
     client: http::Client,
 }
 
@@ -138,6 +142,7 @@ impl CloudflareSolver {
     pub fn new() -> Self {
         Self {
             submit_url: None,
+            pow: None,
             client: crate::net::build_client(),
         }
     }
@@ -147,6 +152,61 @@ impl CloudflareSolver {
         self.submit_url = Some(url);
         self
     }
+    /// Run the challenge's own JS (via the render tier's V8) to compute the answer,
+    /// instead of the structural placeholder. The proper Cloudflare solve.
+    pub fn with_pow_engine(mut self, engine: Box<dyn crate::challenge::PowEngine>) -> Self {
+        self.pow = Some(engine);
+        self
+    }
+
+    // The answer: run the interstitial's challenge script in V8 when an engine is
+    // wired (the proper path), else the structural placeholder.
+    fn answer(&self, page: &str, params: &ChallengeParams) -> String {
+        if let Some(engine) = &self.pow {
+            if let Some(script) = extract_challenge_script(page) {
+                if let Ok(ans) = engine.compute(&script) {
+                    if !ans.is_empty() {
+                        return ans;
+                    }
+                }
+            }
+        }
+        solve_pow(params)
+    }
+}
+
+// Pull the challenge's inline compute out of the interstitial: the `<script>` that
+// defines `window._cf_chl_opt` (and the legacy jschl math). Returned wrapped so the
+// engine can run it and read back the answer the script assigns.
+fn extract_challenge_script(html: &str) -> Option<String> {
+    // Grab inline <script>…</script> bodies that mention the challenge globals.
+    let mut body = String::new();
+    let mut rest = html;
+    while let Some(open) = rest.find("<script") {
+        let after = &rest[open..];
+        let start = after.find('>')? + 1;
+        let end = after.find("</script>")?;
+        let code = &after[start..end];
+        if code.contains("_cf_chl_opt") || code.contains("jschl") || code.contains("chl_answer") {
+            body.push_str(code);
+            body.push('\n');
+        }
+        rest = &after[end + "</script>".len()..];
+    }
+    if body.is_empty() {
+        return None;
+    }
+    // Run the challenge code, then surface whatever answer it produced. The
+    // challenge assigns its result to a known global / form field; we read the
+    // common sinks and return the first present as a string.
+    Some(format!(
+        "{body}\n;(function(){{ \
+           try {{ if (window._cf_chl_answer != null) return String(window._cf_chl_answer); }} catch(e){{}} \
+           try {{ var f=document.getElementById('challenge-form'); \
+                  if (f && f.elements && f.elements['jschl_answer']) return String(f.elements['jschl_answer'].value); }} catch(e){{}} \
+           try {{ if (window.jschl_answer != null) return String(window.jschl_answer); }} catch(e){{}} \
+           return ''; }})()"
+    ))
 }
 
 impl Default for CloudflareSolver {
@@ -173,7 +233,7 @@ impl ChallengeSolver for CloudflareSolver {
             .await
             .map_err(|e| SolveError::Http(e.to_string()))?;
         let params = parse_challenge(&page).ok_or(SolveError::Unsupported(Vendor::Cloudflare))?;
-        let answer = solve_pow(&params);
+        let answer = self.answer(&page, &params);
 
         let submit = self.submit_url.clone().unwrap_or_else(|| {
             let origin = crate::url::origin_of(&ch.page_url).unwrap_or_else(|| ch.page_url.clone());
@@ -237,6 +297,33 @@ mod tests {
         let p = parse_challenge(INTERSTITIAL).unwrap();
         assert_eq!(solve_pow(&p), solve_pow(&p));
         assert!(solve_pow(&p).chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // The proper path: a PowEngine (the V8 render tier in production) runs the
+    // challenge's own JS and its answer is used verbatim — NOT the placeholder.
+    #[test]
+    fn pow_engine_answer_is_used_over_placeholder() {
+        struct StubEngine;
+        impl crate::challenge::PowEngine for StubEngine {
+            fn compute(&self, script: &str) -> Result<String, String> {
+                // Prove the real challenge script reached the engine.
+                assert!(
+                    script.contains("_cf_chl_opt"),
+                    "challenge script not extracted"
+                );
+                Ok("ENGINE_ANSWER".into())
+            }
+        }
+        let cf = CloudflareSolver::new().with_pow_engine(Box::new(StubEngine));
+        let p = parse_challenge(INTERSTITIAL).unwrap();
+        let ans = cf.answer(INTERSTITIAL, &p);
+        assert_eq!(
+            ans, "ENGINE_ANSWER",
+            "engine answer must win over solve_pow"
+        );
+        // Without an engine, falls back to the structural placeholder.
+        let cf2 = CloudflareSolver::new();
+        assert_eq!(cf2.answer(INTERSTITIAL, &p), solve_pow(&p));
     }
 
     // The HARNESS: each generation is detected from its marker and every

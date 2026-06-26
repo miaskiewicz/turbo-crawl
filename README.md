@@ -52,7 +52,7 @@ happy-dom). turbo-surf is unusual on four axes at once:
 See [CHANGELOG.md](./CHANGELOG.md) for what shipped and
 [rust/README.md](./rust/README.md) for the engine internals.
 
-Status: **v0.2.6 — working** ([npm](https://www.npmjs.com/package/turbo-surf)).
+Status: **v0.2.7 — working** ([npm](https://www.npmjs.com/package/turbo-surf)).
 A native Rust engine (7-crate workspace on the `turbo-dom` crate): hardened
 networking (cookies / `document.cookie` bridge / robots + crawl-delay / charset /
 size + redirect caps, HTTP/2 + a pooled client, 304 conditional cache), crawl
@@ -106,7 +106,7 @@ npx turbo-surf-mcp          # stdio MCP server (60 tools), e.g.:
 # bulk:        crawl, batch
 # render/JS:   render, set_mode, eval_js, inject_js, latest_dom, dom_history,
 #              evaluate, detect_js, run_playwright, probe
-# stealth:     stealth_status, set_fingerprint
+# stealth:     stealth_status, set_fingerprint, analyze_akamai
 # session:     get_cookies, set_cookie, set_extra_headers, robots_check
 # direct:      fetch_json, fetch_raw
 ```
@@ -226,15 +226,24 @@ All optional. Set in `.env` (auto-loaded) or the process env.
 | `TURBO_SURF_SOLVER` | `akamai` · `cloudflare` · `hyper` · `scrapfly` · `browser` | Pick the challenge solver. Unset = no solving (fingerprint only). `akamai`/`cloudflare` are in-house (no key). |
 | `HYPER_API_KEY` | key | Hyper Solutions token API (Akamai/DataDome/Kasada). Used when solver=`hyper`. |
 | `SCRAPFLY_API_KEY` | key | Scrapfly ASP API (Cloudflare + fallback). Used when solver=`scrapfly`. |
-| `TURBO_SURF_BROWSER_CMD` | shell command | The hardened-headless sidecar to run for solver=`browser` (e.g. `node harness/browser-solver/solve.mjs`). |
+| `TURBO_SURF_BROWSER_CMD` | shell command | The hardened-headless sidecar to run for solver=`browser` (e.g. `node harness/browser-solver/solve.mjs`). When solver=`akamai`, also enables the browser fallback (see below). |
 | `TURBO_SURF_PROXY` | `http://user:pass@host:port` | Egress proxy. **Required for real solves** — tokens bind to the IP/JA3 that minted them; replay must use the same egress. |
+| `TURBO_SURF_SENSOR_DIR` | path (default `akamai-sensors`) | Where `analyze_akamai`'s `retry` saves a working sensor (keyed by script hash + version). |
+
+**Solver maturity** — `cloudflare` (managed/Iuam) runs the challenge's own JS in
+the V8 tier (no browser) and is the most viable in-house solve. `akamai` is
+**experimental** (the live sensor crypto isn't reversed per-version yet) — it tries
+in-house, then falls back to the browser sidecar if `TURBO_SURF_BROWSER_CMD` is set.
+`hyper`/`scrapfly`/`browser` are the robust paths. Turnstile-interactive always
+routes to the browser sidecar.
 
 Build feature (not env): **`--features impersonate`** swaps rustls → BoringSSL
 (`wreq`) for a real Chrome TLS/JA3/JA4 + HTTP-2 fingerprint. Needs `cmake`+`nasm`.
 
 MCP tools for stealth: **`set_fingerprint`** (override navigator fields),
 **`stealth_status`** (inspect active profile/solver/overrides), **`probe`** (see
-what a page's anti-bot JS reads). Detailed below.
+what a page's anti-bot JS reads), **`analyze_akamai`** (experimental: rebuild +
+test Akamai sensors). Detailed below.
 
 ---
 
@@ -272,12 +281,35 @@ Inert until configured. Copy `.env.example` → `.env` and pick one:
 
 - **Rented** (`TURBO_SURF_SOLVER=hyper|scrapfly` + `HYPER_API_KEY`/`SCRAPFLY_API_KEY`)
   — server-side token gen, no browser.
+- **In-house, no key** (`TURBO_SURF_SOLVER=cloudflare` or `akamai`) — solve it
+  yourself, no third party. **Cloudflare** runs the challenge's *own* JS in the V8
+  render tier to compute the answer (the proper path — no reversing the math), then
+  POSTs it and harvests `cf_clearance`. **Akamai** is experimental (see below).
 - **Self-owned browser sidecar** (`TURBO_SURF_SOLVER=browser` +
   `TURBO_SURF_BROWSER_CMD="node harness/browser-solver/solve.mjs"`) — drives a real
   hardened headless Chromium just for the handshake, harvests the cookie, then
   turbo-surf does the volume. Opt-in only (spawns a process); the browser stays a
   dev-side sidecar, never in the engine. See
   [`harness/browser-solver/`](./harness/browser-solver/README.md).
+
+**Akamai experimental flow (`analyze_akamai`).** Akamai's live `sensor_data` is
+per-version, obfuscated, and key-rotated, so the in-house solver isn't a guaranteed
+live bypass — it's a **recon → rebuild → test** loop you drive from MCP:
+
+```jsonc
+// 1. navigate to an Akamai-walled page first (goto), then:
+// MCP: analyze_akamai          → finds the live Akamai script, hashes it, probes
+//                                what it reads, builds candidate sensors per version
+{ }
+// MCP: analyze_akamai          → with retry: POST each candidate, test live
+{ "retry": true }               //   acceptance, and SAVE a working one locally
+```
+
+`retry` returns `accepted` (the version that cleared the wall, if any) and saves it
+to `TURBO_SURF_SENSOR_DIR`. None accepted = that script's encoding still needs
+reversing (the candidates are hash-seeded structural rebuilds). With
+`TURBO_SURF_BROWSER_CMD` set, a normal Akamai `goto` auto-falls-back to the browser
+sidecar when the in-house solve fails — so you stay unblocked while iterating.
 
 Set `TURBO_SURF_PROXY` so the token's IP/JA3 matches your egress (and build with
 `--features impersonate` so the replay JA3 matches the Chrome that minted it).

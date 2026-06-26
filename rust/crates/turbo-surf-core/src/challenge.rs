@@ -91,6 +91,44 @@ pub trait ChallengeSolver: Send + Sync {
     fn name(&self) -> &'static str;
 }
 
+/// Runs a challenge's *own* JavaScript and returns the answer it computes — the
+/// proper way to clear a JS-compute wall (e.g. Cloudflare): execute the script
+/// instead of reverse-engineering its math. Implemented by the render tier
+/// (`turbo-surf-render`) over the V8 isolate; injected into a solver so
+/// `turbo-surf-core` stays render-free (no circular dep).
+pub trait PowEngine: Send + Sync {
+    /// Evaluate `script` (the challenge's compute) and return the answer string it
+    /// produces (e.g. the value it assigns to the answer field).
+    fn compute(&self, script: &str) -> Result<String, String>;
+}
+
+/// Try `primary`; on a solve error fall back to `fallback`. Lets an *experimental*
+/// in-house solver lead while a robust solver (e.g. the browser sidecar) catches
+/// what it can't yet clear. See the Akamai routing in [`solver_from_env`].
+pub struct FallbackSolver {
+    primary: Box<dyn ChallengeSolver>,
+    fallback: Box<dyn ChallengeSolver>,
+}
+
+impl FallbackSolver {
+    pub fn new(primary: Box<dyn ChallengeSolver>, fallback: Box<dyn ChallengeSolver>) -> Self {
+        Self { primary, fallback }
+    }
+}
+
+#[async_trait::async_trait]
+impl ChallengeSolver for FallbackSolver {
+    fn name(&self) -> &'static str {
+        "fallback"
+    }
+    async fn solve(&self, ch: &Challenge, ctx: &SolveContext) -> Result<SolvedToken, SolveError> {
+        match self.primary.solve(ch, ctx).await {
+            Ok(t) => Ok(t),
+            Err(_) => self.fallback.solve(ch, ctx).await,
+        }
+    }
+}
+
 // ---- detection -------------------------------------------------------------
 
 fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
@@ -474,6 +512,14 @@ fn load_dotenv() {
 /// `hyper`|`scrapfly`; otherwise the first key present wins. Returns `None` when
 /// nothing is configured — so the whole feature is inert until a real key is set.
 pub fn solver_from_env() -> Option<Box<dyn ChallengeSolver>> {
+    solver_from_env_pow(None)
+}
+
+/// Like [`solver_from_env`] but with an optional [`PowEngine`] — when the selected
+/// solver is Cloudflare and an engine is supplied, the solver runs the challenge's
+/// own JS to compute the answer (the proper path). The render tier passes a V8
+/// engine here; everything else ignores it.
+pub fn solver_from_env_pow(pow: Option<Box<dyn PowEngine>>) -> Option<Box<dyn ChallengeSolver>> {
     load_dotenv();
     let hyper = std::env::var("HYPER_API_KEY")
         .ok()
@@ -496,10 +542,29 @@ pub fn solver_from_env() -> Option<Box<dyn ChallengeSolver>> {
             .ok()
             .filter(|c| !c.trim().is_empty())
             .map(|cmd| Box::new(BrowserSolver::new(cmd)) as Box<dyn ChallengeSolver>),
-        // In-house solvers — no API key needed.
-        "akamai" => Some(Box::new(crate::akamai::AkamaiSolver::new()) as Box<dyn ChallengeSolver>),
+        // In-house Akamai is EXPERIMENTAL (the live sensor encoding isn't reversed
+        // per-version yet). Route to the browser sidecar by default when one is
+        // configured — try in-house first, fall back to the real browser — so a
+        // failed in-house solve still clears the wall. Browserless → in-house only.
+        "akamai" => {
+            let akamai = Box::new(crate::akamai::AkamaiSolver::new()) as Box<dyn ChallengeSolver>;
+            match std::env::var("TURBO_SURF_BROWSER_CMD")
+                .ok()
+                .filter(|c| !c.trim().is_empty())
+            {
+                Some(cmd) => Some(Box::new(FallbackSolver::new(
+                    akamai,
+                    Box::new(BrowserSolver::new(cmd)),
+                ))),
+                None => Some(akamai),
+            }
+        }
         "cloudflare" => {
-            Some(Box::new(crate::cloudflare::CloudflareSolver::new()) as Box<dyn ChallengeSolver>)
+            let mut cf = crate::cloudflare::CloudflareSolver::new();
+            if let Some(engine) = pow {
+                cf = cf.with_pow_engine(engine);
+            }
+            Some(Box::new(cf) as Box<dyn ChallengeSolver>)
         }
         _ => hyper
             .map(|k| Box::new(HyperSolver::new(k)) as Box<dyn ChallengeSolver>)

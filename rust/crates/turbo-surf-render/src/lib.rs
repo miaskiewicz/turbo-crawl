@@ -15,3 +15,18 @@ pub use runtime::{
     render_hydrate_with_budget, render_page, render_page_pooled, render_page_with_budget,
     run_with_dom, set_fingerprint, PageSession, DEFAULT_RENDER_BUDGET_MS,
 };
+
+/// A [`turbo_surf_core::challenge::PowEngine`] backed by the V8 render tier — runs a
+/// challenge's own JS (against a real `document` + the controllable Chrome
+/// navigator) and returns the answer it computes. This is what makes the
+/// Cloudflare solver *proper*: execute the challenge instead of reversing its math.
+pub struct V8PowEngine;
+
+impl turbo_surf_core::challenge::PowEngine for V8PowEngine {
+    fn compute(&self, script: &str) -> Result<String, String> {
+        // The challenge JS runs against an empty document; it computes against the
+        // navigator/window we expose. `run_with_dom` returns the trailing
+        // expression — the wrapper script ends by reading the answer sink.
+        run_with_dom("<html><body></body></html>", script)
+    }
+}

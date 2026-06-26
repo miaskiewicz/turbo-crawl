@@ -3,9 +3,24 @@
 All notable changes to turbo-surf are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer.
 
-## [Unreleased]
+## [0.2.7]
+In-house solver maturity: a proper Cloudflare solve (run the challenge's own JS),
+Akamai experimental recon/rebuild tooling, and versioned encoding registries.
 
 ### Added
+- **Proper Cloudflare solver (run the challenge's own JS)** — a `PowEngine` trait
+  (core) implemented by the render tier (`turbo_surf_render::V8PowEngine`) lets
+  `CloudflareSolver` execute the interstitial's challenge script in the V8 isolate
+  and use the answer it computes, instead of the structural placeholder — the
+  proper self-solve for CF's JS-compute challenge, no browser. Wired in the MCP
+  session via `solver_from_env_pow`.
+- **Akamai experimental routing + `analyze_akamai` MCP tool** — the in-house Akamai
+  solver is now flagged experimental and, when `TURBO_SURF_BROWSER_CMD` is set,
+  routes through a `FallbackSolver` (try in-house → fall back to the browser
+  sidecar). New `analyze_akamai` tool: probe the live Akamai script on the current
+  page, hash it, build candidate `sensor_data` per stored version, and with
+  `{retry:true}` POST each candidate, test live acceptance, and **save a working
+  sensor locally** (`TURBO_SURF_SENSOR_DIR`).
 - **Versioned solver encodings** — both in-house solvers now store *multiple*
   generations of their challenge encoding behind a registry, since Akamai/CF shift
   format across versions. Akamai `SensorVersion` {V1 plaintext, V2 PRNG-shuffled,
