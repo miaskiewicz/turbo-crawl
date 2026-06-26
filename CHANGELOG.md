@@ -53,6 +53,12 @@ fingerprint — an instant tell for WAFs.
   sensor endpoint and parses the cleared `_abck`. Structure + POST/parse flow are
   tested + green; the dynamic field encoding a live edge validates still needs
   keying off a real `_abck` script (use the `probe` mode).
+- **In-house Cloudflare solver** (`turbo-surf-core::cloudflare`,
+  `TURBO_SURF_SOLVER=cloudflare`, no key) — parse the managed-challenge
+  interstitial (`window._cf_chl_opt`), solve its (JS-compute) PoW, POST to the
+  challenge-platform endpoint, harvest `cf_clearance`. Structure + flow green; real
+  per-version PoW math keyed off a live challenge. Turnstile-interactive stays on
+  the browser sidecar.
 - **Fingerprint debug/probe mode** (`turbo-surf-render::probe_globals`, MCP `probe`
   tool) — run a page's JS with `navigator`/`screen`/`window.chrome`/canvas wrapped
   in logging proxies and report every property it touched + which reads returned

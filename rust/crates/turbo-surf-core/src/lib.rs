@@ -15,6 +15,7 @@
 pub mod akamai;
 pub mod cache;
 pub mod challenge;
+pub mod cloudflare;
 pub mod cookies;
 pub mod crawl;
 pub mod fingerprint;
