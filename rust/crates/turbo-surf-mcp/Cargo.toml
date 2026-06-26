@@ -21,10 +21,10 @@ path = "src/main.rs"
 impersonate = ["turbo-surf-core/impersonate"]
 
 [dependencies]
-turbo-surf-core = { path = "../turbo-surf-core", version = "0.2.6" }
-turbo-surf-view = { path = "../turbo-surf-view", version = "0.2.6" }
-turbo-surf-page = { path = "../turbo-surf-page", version = "0.2.6" }
-turbo-surf-render = { path = "../turbo-surf-render", version = "0.2.6" }
+turbo-surf-core = { path = "../turbo-surf-core", version = "0.2.7" }
+turbo-surf-view = { path = "../turbo-surf-view", version = "0.2.7" }
+turbo-surf-page = { path = "../turbo-surf-page", version = "0.2.7" }
+turbo-surf-render = { path = "../turbo-surf-render", version = "0.2.7" }
 turbo-dom-parser = { package = "turbo-dom", version = "0.3.5" }
 async-trait = "0.1"
 serde_json = "1"

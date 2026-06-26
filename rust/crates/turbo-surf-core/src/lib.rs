@@ -13,6 +13,7 @@
 //! tier-2 `Page` (on the turbo-dom Rust crate) will implement.
 
 pub mod akamai;
+pub mod aws_waf;
 pub mod cache;
 pub mod challenge;
 pub mod cloudflare;
@@ -38,4 +39,4 @@ pub use reqwest as http_backend;
 pub use wreq as http_backend;
 
 /// Library version — kept in lockstep with `package.json` per the release rules.
-pub const VERSION: &str = "0.2.6";
+pub const VERSION: &str = "0.2.7";

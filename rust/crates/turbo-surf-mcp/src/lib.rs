@@ -22,7 +22,7 @@ use turbo_surf_page::{batch as batch_urls, TurboNavigator};
 use turbo_surf_view as view;
 use view::{Field, FieldType, QueryType, TextMode};
 
-pub const VERSION: &str = "0.2.6";
+pub const VERSION: &str = "0.2.7";
 
 /// One agent session: the current page URL + parsed tree + nav history, plus the
 /// browser-ish state agents expect (UA / extra headers / cookie jar / JS mode) and
@@ -54,7 +54,9 @@ impl Session {
     pub fn new() -> Self {
         Self {
             // Pick up a solver from env/`.env` if one is configured (else inert).
-            solver: challenge::solver_from_env(),
+            // Supply the V8 engine so the Cloudflare solver runs the challenge's own
+            // JS to compute the answer (the proper path) instead of the placeholder.
+            solver: challenge::solver_from_env_pow(Some(Box::new(turbo_surf_render::V8PowEngine))),
             ..Self::default()
         }
     }
@@ -352,6 +354,140 @@ impl Session {
         serde_json::to_value(report).map_err(|e| e.to_string())
     }
 
+    // EXPERIMENTAL: reconstruct an Akamai sensor from the live page. Find the
+    // Akamai script, hash it (the key Akamai seeds its shuffle/encryption from),
+    // probe what it reads (the shim surface), and build a CANDIDATE sensor_data for
+    // every stored SensorVersion seeded by that hash. This is the recon → rebuild
+    // loop; candidates still need testing against the live edge (key rotation means
+    // a hash-seeded candidate may not be accepted — that's the open question).
+    async fn analyze_akamai(&mut self, retry: bool) -> Result<Value, String> {
+        use turbo_surf_core::akamai::{generate_sensor_versioned, SensorInput, SensorVersion};
+        // Locate the Akamai script: an external <script src> whose body carries the
+        // Akamai markers (bmak / sensor_data / _abck).
+        let mut script_url = None;
+        let mut script_body = String::new();
+        if let Some(tree) = &self.tree {
+            for &h in tree.query_selector_all("script[src]").iter() {
+                let Some(src) = tree.get_attribute(h, "src") else {
+                    continue;
+                };
+                let Some(abs) = turbo_surf_core::url::resolve(&self.url, src) else {
+                    continue;
+                };
+                if let Ok(r) = fetch_html(
+                    &abs,
+                    FetchOptions {
+                        allow_non_html: true,
+                        ..Default::default()
+                    },
+                )
+                .await
+                {
+                    if r.html.contains("bmak") || r.html.contains("sensor_data") {
+                        script_url = Some(abs);
+                        script_body = r.html;
+                        break;
+                    }
+                }
+            }
+        }
+        if script_body.is_empty() {
+            return Err("no Akamai script found on the current page".into());
+        }
+        let script_hash = format!("{:016x}", fnv_hex(&script_body));
+        // What the script reads — the shim surface to satisfy.
+        let probe = turbo_surf_render::probe_globals("<html><body></body></html>", &script_body)
+            .ok()
+            .map(|r| r.shim_needed)
+            .unwrap_or_default();
+        // A candidate sensor per stored version, seeded by the script hash.
+        let input = SensorInput {
+            user_agent: self.ua.clone().unwrap_or_default(),
+            page_url: self.url.clone(),
+            abck: self.jar.cookie_header(&self.url, 0.0),
+            bm_sz: String::new(),
+            script_hash: script_hash.clone(),
+        };
+        let built: Vec<(SensorVersion, String)> = SensorVersion::all()
+            .iter()
+            .map(|&v| (v, generate_sensor_versioned(&input, v)))
+            .collect();
+
+        // RETRY MODE: POST each candidate to the sensor endpoint and test whether it
+        // clears the wall (the live-acceptance loop). On a hit, the cleared `_abck`
+        // is left in the session jar and that candidate is returned as accepted.
+        let mut accepted: Option<Value> = None;
+        let mut candidates = Vec::new();
+        for (v, sensor) in &built {
+            let mut entry = json!({ "version": format!("{v:?}"), "sensor_data": sensor });
+            if retry && accepted.is_none() {
+                let ok = self.test_sensor(sensor).await;
+                entry["accepted"] = json!(ok);
+                if ok {
+                    // Persist the working sensor locally, keyed by script hash +
+                    // version, so it can be reused while it stays valid.
+                    let saved = save_sensor(&script_hash, &format!("{v:?}"), sensor, &self.url);
+                    entry["savedTo"] = json!(saved);
+                    accepted = Some(json!({ "version": format!("{v:?}"), "savedTo": saved }));
+                }
+            }
+            candidates.push(entry);
+        }
+        Ok(json!({
+            "scriptUrl": script_url,
+            "scriptHash": script_hash,
+            "scriptBytes": script_body.len(),
+            "shimNeeded": probe,
+            "candidates": candidates,
+            "retried": retry,
+            "accepted": accepted,
+            "note": "EXPERIMENTAL — candidates are hash-seeded structural rebuilds. \
+                     `retry` POSTs each to the sensor endpoint and tests live \
+                     acceptance; key rotation may reject all (none accepted = the \
+                     per-version encoding still needs reversing off this script).",
+        }))
+    }
+
+    // POST a candidate sensor_data to the current page (Akamai's sensor endpoint)
+    // and test whether the wall clears: re-fetch with the returned _abck and check
+    // the page is no longer a challenge. On success the jar holds the cleared cookie.
+    async fn test_sensor(&mut self, sensor: &str) -> bool {
+        let url = self.url.clone();
+        let body = json!({ "sensor_data": sensor }).to_string();
+        // Post the sensor (cookies round-trip through the jar).
+        let post = FetchOptions {
+            method: Some("POST".into()),
+            body: Some(body),
+            allow_non_html: true,
+            headers: self.request_headers(),
+            jar: Some(&mut self.jar),
+            ..Default::default()
+        };
+        if fetch_html_with(&url, post).await.is_err() {
+            return false;
+        }
+        // Re-fetch the page with the (possibly cleared) cookies; accepted if it is
+        // no longer detected as an Akamai wall.
+        let get = FetchOptions {
+            allow_non_html: true,
+            headers: self.request_headers(),
+            jar: Some(&mut self.jar),
+            ..Default::default()
+        };
+        match fetch_html_with(&url, get).await {
+            Ok((u, html, status)) => {
+                let cookie = self.jar.cookie_header(&u, 0.0);
+                let sig: Vec<(String, String)> = cookie
+                    .split("; ")
+                    .filter(|s| !s.is_empty())
+                    .map(|c| ("set-cookie".to_string(), c.to_string()))
+                    .collect();
+                status == 200 && challenge::detect(&u, status, &sig, &html).is_none()
+            }
+            Err(_) => false,
+        }
+    }
+
     // Override render-tier navigator fingerprint fields (JSON object merged over
     // the Chrome 149 defaults; every field is individually overridable). Persisted
     // on the session and pushed to the render isolate. `{}` resets to defaults.
@@ -413,6 +549,33 @@ async fn fetch_html_with(
 ) -> Result<(String, String, u16), String> {
     let res = fetch_html(url, opts).await.map_err(|e| e.to_string())?;
     Ok((res.final_url, res.html, res.status))
+}
+
+// FNV-1a (64-bit) over a string — the Akamai script-hash seed for analyze_akamai.
+fn fnv_hex(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+// Persist a working Akamai sensor locally so it can be reused while valid. Dir is
+// `TURBO_SURF_SENSOR_DIR` (default `./akamai-sensors`); file is keyed by script
+// hash + version. Returns the path written, or None on failure (best-effort).
+fn save_sensor(script_hash: &str, version: &str, sensor: &str, page_url: &str) -> Option<String> {
+    let dir = std::env::var("TURBO_SURF_SENSOR_DIR").unwrap_or_else(|_| "akamai-sensors".into());
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = format!("{dir}/{script_hash}-{version}.json");
+    let blob = json!({
+        "scriptHash": script_hash,
+        "version": version,
+        "pageUrl": page_url,
+        "sensor_data": sensor,
+    });
+    std::fs::write(&path, serde_json::to_vec_pretty(&blob).ok()?).ok()?;
+    Some(path)
 }
 
 fn title_of(tree: &Tree) -> String {
@@ -637,6 +800,12 @@ pub fn tools() -> Value {
              wired + pool size",
         ),
         (
+            "analyze_akamai",
+            "EXPERIMENTAL: probe the live Akamai script on the current page, hash it, \
+             and build candidate sensor_data per version. `{retry:true}` POSTs each \
+             candidate, tests live acceptance, and saves a working one locally.",
+        ),
+        (
             "set_fingerprint",
             "Override render-tier navigator fields (JSON: userAgent, platform, \
              vendor, languages, hardwareConcurrency, deviceMemory, chromeMajor, \
@@ -752,6 +921,11 @@ pub async fn call_tool(session: &mut Session, name: &str, args: &Value) -> Resul
                 .map(|()| json!({ "ok": true })),
         },
         "probe" => session.probe().await,
+        "analyze_akamai" => {
+            session
+                .analyze_akamai(args.get("retry").and_then(|v| v.as_bool()).unwrap_or(false))
+                .await
+        }
         "stealth_status" => Ok(session.stealth_status()),
         "set_fingerprint" => session.set_fingerprint(args.get("overrides").unwrap_or(args)),
         "latest_dom" => Ok(json!(session.dom_history.last())),
