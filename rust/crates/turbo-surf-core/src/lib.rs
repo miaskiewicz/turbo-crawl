@@ -21,9 +21,17 @@ pub mod net;
 pub mod robots;
 pub mod url;
 
-/// Re-export reqwest so downstream crates (e.g. the napi addon's shared client)
-/// name the exact same client type/version without a parallel dependency.
-pub use reqwest;
+/// The active HTTP backend, re-exported so this crate's `net` module and every
+/// downstream crate type against one alias instead of an extern crate — the
+/// backend then swaps in a single place. Default is stock `reqwest` (rustls);
+/// with the `impersonate` feature it becomes `wreq` (BoringSSL), which forges a
+/// real Chrome TLS/JA3/JA4 + HTTP-2 fingerprint. Their client/response/builder
+/// surfaces line up closely enough that `net` compiles against either. (Named
+/// `http_backend`, not `http`, to avoid colliding with the extern `http` crate.)
+#[cfg(not(feature = "impersonate"))]
+pub use reqwest as http_backend;
+#[cfg(feature = "impersonate")]
+pub use wreq as http_backend;
 
 /// Library version — kept in lockstep with `package.json` per the release rules.
 pub const VERSION: &str = "0.2.4";

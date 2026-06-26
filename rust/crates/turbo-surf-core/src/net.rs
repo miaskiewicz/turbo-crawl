@@ -6,11 +6,49 @@
 
 use crate::cache::ResponseCache;
 use crate::cookies::CookieJar;
+use crate::http_backend as http; // reqwest (rustls) or wreq (BoringSSL); see lib.rs
 use bytes::BytesMut;
 use futures_util::StreamExt;
 use std::collections::BTreeMap;
 
-const DEFAULT_UA: &str = "turbo-surf/0.1 (+https://github.com/miaskiewicz/turbo-surf)";
+// A current stable Chrome (macOS) UA. Looking like a real browser lets WAFs
+// keyed on the UA string serve the page instead of a bot wall; the bare
+// `turbo-surf/0.1` token was an instant tell. Still overridable per-fetch /
+// per-crawl (see `build_headers`). Only the default (rustls) path sets these by
+// hand; under `impersonate` wreq's emulation owns a coherent UA + nav headers
+// that match its TLS fingerprint, so these would be dead code (and wrong).
+#[cfg(not(feature = "impersonate"))]
+const DEFAULT_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
+
+// Chrome's default top-level navigation header set, minus the ones reqwest owns:
+// `accept-encoding` (reqwest advertises only the codings it can auto-decompress,
+// so overriding it would hand back undecodable bytes), `host`, and `cookie`.
+// Stored in a `BTreeMap`, so the wire order is reqwest's, not this list's — this
+// tier fixes the *content* tell (bare UA + thin `accept`), not header ordering or
+// the TLS/HTTP-2 fingerprint. Keep the Chrome major in `sec-ch-ua` in sync with
+// `DEFAULT_UA`.
+#[cfg(not(feature = "impersonate"))]
+const CHROME_HEADERS: &[(&str, &str)] = &[
+    (
+        "accept",
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,\
+image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+    ),
+    ("accept-language", "en-US,en;q=0.9"),
+    (
+        "sec-ch-ua",
+        "\"Google Chrome\";v=\"149\", \"Chromium\";v=\"149\", \"Not)A;Brand\";v=\"24\"",
+    ),
+    ("sec-ch-ua-mobile", "?0"),
+    ("sec-ch-ua-platform", "\"macOS\""),
+    ("sec-fetch-dest", "document"),
+    ("sec-fetch-mode", "navigate"),
+    ("sec-fetch-site", "none"),
+    ("sec-fetch-user", "?1"),
+    ("upgrade-insecure-requests", "1"),
+];
+
 const DEFAULT_MAX_BYTES: usize = 8 * 1024 * 1024; // 8 MiB
 const HTML_TYPES: &[&str] = &[
     "text/html",
@@ -69,7 +107,7 @@ pub struct FetchOptions<'a> {
     pub cache: Option<&'a mut ResponseCache>,
     /// Shared client for connection reuse (see [`build_client`]); built per-call
     /// when `None`.
-    pub client: Option<&'a reqwest::Client>,
+    pub client: Option<&'a http::Client>,
     pub now: f64,
 }
 
@@ -140,8 +178,18 @@ fn is_redirect(status: u16) -> bool {
 
 fn build_headers(url: &str, opts: &FetchOptions) -> BTreeMap<String, String> {
     let mut h = BTreeMap::new();
-    h.insert("user-agent".into(), DEFAULT_UA.into());
-    h.insert("accept".into(), "text/html,application/xhtml+xml".into());
+    // Default (rustls) path: forge Chrome's identity by hand — headers are the
+    // only lever, since rustls can't match the TLS fingerprint. Impersonate path:
+    // wreq's emulation already installs a coherent Chrome UA + nav-header set that
+    // matches its TLS/HTTP-2 fingerprint, so we add nothing here and let it own
+    // them (caller overrides + cookies/cache below still apply on both paths).
+    #[cfg(not(feature = "impersonate"))]
+    {
+        h.insert("user-agent".into(), DEFAULT_UA.into());
+        for (k, v) in CHROME_HEADERS {
+            h.insert((*k).into(), (*v).into());
+        }
+    }
     for (k, v) in &opts.headers {
         h.insert(k.to_ascii_lowercase(), v.clone());
     }
@@ -159,23 +207,34 @@ fn build_headers(url: &str, opts: &FetchOptions) -> BTreeMap<String, String> {
     h
 }
 
-fn client(policy: reqwest::redirect::Policy) -> reqwest::Result<reqwest::Client> {
-    reqwest::Client::builder().redirect(policy).build()
+// Apply the Chrome TLS/JA3/JA4 + HTTP-2 emulation profile to a builder under the
+// `impersonate` feature; a pass-through on the default (rustls) backend, which
+// can't forge a fingerprint. One seam so both client constructors stay in sync.
+fn emulate(builder: http::ClientBuilder) -> http::ClientBuilder {
+    #[cfg(feature = "impersonate")]
+    let builder = builder.emulation(wreq_util::Emulation::Chrome137);
+    builder
+}
+
+fn client(policy: http::redirect::Policy) -> http::Result<http::Client> {
+    emulate(http::Client::builder().redirect(policy)).build()
 }
 
 /// A tuned, reusable client (HTTP/2 via ALPN, kept-warm pool, auto-redirect ≤20).
 /// Build one per crawl and pass it through `FetchOptions::client` so connections
 /// (and TLS sessions) are reused across hosts — the dispatcher (port of
 /// `src/dispatcher.mjs`). `Client` is cheap to clone (Arc-shared pool).
-pub fn build_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(20))
-        .pool_idle_timeout(std::time::Duration::from_secs(90))
-        .build()
-        .unwrap_or_default()
+pub fn build_client() -> http::Client {
+    emulate(
+        http::Client::builder()
+            .redirect(http::redirect::Policy::limited(20))
+            .pool_idle_timeout(std::time::Duration::from_secs(90)),
+    )
+    .build()
+    .expect("HTTP client build (TLS backend init)")
 }
 
-fn redirect_location(res: &reqwest::Response) -> Option<String> {
+fn redirect_location(res: &http::Response) -> Option<String> {
     if !is_redirect(res.status().as_u16()) {
         return None;
     }
@@ -192,14 +251,13 @@ fn err(e: impl std::fmt::Display, code: ErrorCode) -> HttpError {
 }
 
 async fn send(
-    cl: &reqwest::Client,
+    cl: &http::Client,
     method: &str,
     url: &str,
     headers: &BTreeMap<String, String>,
     body: &Option<String>,
-) -> Result<reqwest::Response, HttpError> {
-    let m =
-        reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| err(e, ErrorCode::Network))?;
+) -> Result<http::Response, HttpError> {
+    let m = http::Method::from_bytes(method.as_bytes()).map_err(|e| err(e, ErrorCode::Network))?;
     let mut req = apply_headers(cl.request(m, url), headers);
     if let Some(b) = body {
         req = req.body(b.clone());
@@ -212,16 +270,16 @@ async fn send(
 }
 
 fn apply_headers(
-    mut req: reqwest::RequestBuilder,
+    mut req: http::RequestBuilder,
     headers: &BTreeMap<String, String>,
-) -> reqwest::RequestBuilder {
+) -> http::RequestBuilder {
     for (k, v) in headers {
         req = req.header(k.as_str(), v.as_str());
     }
     req
 }
 
-fn check_content_length(res: &reqwest::Response, max_bytes: usize) -> Result<(), HttpError> {
+fn check_content_length(res: &http::Response, max_bytes: usize) -> Result<(), HttpError> {
     if let Some(len) = res.content_length() {
         if len as usize > max_bytes {
             return Err(HttpError::new(
@@ -233,7 +291,7 @@ fn check_content_length(res: &reqwest::Response, max_bytes: usize) -> Result<(),
     Ok(())
 }
 
-async fn read_capped(res: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>, HttpError> {
+async fn read_capped(res: http::Response, max_bytes: usize) -> Result<Vec<u8>, HttpError> {
     check_content_length(&res, max_bytes)?;
     let mut buf = BytesMut::new();
     let mut stream = res.bytes_stream();
@@ -250,7 +308,7 @@ async fn read_capped(res: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>
     Ok(buf.to_vec())
 }
 
-fn header_value(res: &reqwest::Response, name: &str) -> String {
+fn header_value(res: &http::Response, name: &str) -> String {
     res.headers()
         .get(name)
         .and_then(|v| v.to_str().ok())
@@ -258,7 +316,7 @@ fn header_value(res: &reqwest::Response, name: &str) -> String {
         .to_string()
 }
 
-fn ingest_set_cookie(opts: &mut FetchOptions, res: &reqwest::Response, final_url: &str) {
+fn ingest_set_cookie(opts: &mut FetchOptions, res: &http::Response, final_url: &str) {
     let now = opts.now;
     let Some(jar) = opts.jar.as_mut() else { return };
     let lines: Vec<String> = res
@@ -272,7 +330,7 @@ fn ingest_set_cookie(opts: &mut FetchOptions, res: &reqwest::Response, final_url
     }
 }
 
-fn gate_html_type(opts: &FetchOptions, res: &reqwest::Response) -> Result<(), HttpError> {
+fn gate_html_type(opts: &FetchOptions, res: &http::Response) -> Result<(), HttpError> {
     let ct = header_value(res, "content-type");
     if !opts.allow_non_html && !is_html_type(&ct) {
         return Err(HttpError::new(
@@ -287,7 +345,7 @@ fn gate_html_type(opts: &FetchOptions, res: &reqwest::Response) -> Result<(), Ht
 // charset-decode the body under the byte cap.
 async fn finish(
     opts: &mut FetchOptions<'_>,
-    res: reqwest::Response,
+    res: http::Response,
     final_url: String,
     redirected: bool,
     max_bytes: usize,
@@ -324,7 +382,7 @@ async fn finish(
     })
 }
 
-fn opt_header(res: &reqwest::Response, name: &str) -> Option<String> {
+fn opt_header(res: &http::Response, name: &str) -> Option<String> {
     res.headers()
         .get(name)
         .and_then(|v| v.to_str().ok())
@@ -347,7 +405,7 @@ async fn follow_manually(
     max_redirects: usize,
     max_bytes: usize,
 ) -> Result<FetchResult, HttpError> {
-    let cl = client(reqwest::redirect::Policy::none()).map_err(|e| err(e, ErrorCode::Network))?;
+    let cl = client(http::redirect::Policy::none()).map_err(|e| err(e, ErrorCode::Network))?;
     let mut hop = Hop {
         url: start.to_string(),
         method: opts.method.clone().unwrap_or_else(|| "GET".to_string()),
@@ -366,7 +424,7 @@ async fn follow_manually(
     unreachable!("redirect loop always returns at the cap")
 }
 
-fn advance(hop: &Hop, res: &reqwest::Response, loc: &str) -> Result<Hop, HttpError> {
+fn advance(hop: &Hop, res: &http::Response, loc: &str) -> Result<Hop, HttpError> {
     let status = res.status().as_u16();
     let method = next_method(status, &hop.method);
     let next = url::Url::parse(&hop.url)
@@ -392,8 +450,9 @@ async fn follow_auto(
     // Reuse the caller's shared client (pooled connections) when provided.
     let cl = match opts.client {
         Some(c) => c.clone(),
-        None => client(reqwest::redirect::Policy::limited(20))
-            .map_err(|e| err(e, ErrorCode::Network))?,
+        None => {
+            client(http::redirect::Policy::limited(20)).map_err(|e| err(e, ErrorCode::Network))?
+        }
     };
     let method = opts.method.clone().unwrap_or_else(|| "GET".to_string());
     let headers = build_headers(url, opts);
@@ -471,6 +530,32 @@ mod tests {
     fn meta_charset_empty_label_falls_back() {
         // "charset=" followed by a non-token char → empty label → utf-8.
         assert_eq!(detect_charset("text/html", b"<meta charset= >"), "utf-8");
+    }
+
+    // Default-path only: under `impersonate`, wreq's emulation supplies these
+    // headers at the client layer, not `build_headers`.
+    #[cfg(not(feature = "impersonate"))]
+    #[test]
+    fn default_headers_look_like_chrome() {
+        let opts = FetchOptions::default();
+        let h = build_headers("http://example.com/", &opts);
+        assert!(h["user-agent"].contains("Chrome/"));
+        assert!(h["accept"].contains("text/html"));
+        assert_eq!(h["sec-fetch-mode"], "navigate");
+        assert_eq!(h["sec-ch-ua-mobile"], "?0");
+        // reqwest owns accept-encoding so it can auto-decompress; we must not set it.
+        assert!(!h.contains_key("accept-encoding"));
+    }
+
+    #[test]
+    fn caller_headers_override_chrome_defaults() {
+        let mut opts = FetchOptions::default();
+        opts.headers
+            .insert("User-Agent".into(), "custom-bot/9".into());
+        let h = build_headers("http://example.com/", &opts);
+        // case-folded to the canonical lowercase key, caller value wins.
+        assert_eq!(h["user-agent"], "custom-bot/9");
+        assert_eq!(h.get("User-Agent"), None);
     }
 }
 
@@ -570,6 +655,51 @@ mod io_tests {
         assert_eq!(r.status, 200);
         assert!(r.html.contains("ok"));
         assert!(!r.redirected);
+    }
+
+    // Header e2e: prove the Chrome identity headers actually reach the wire
+    // (through the real client + a live TCP connection), not merely
+    // `build_headers`'s map. Captures the raw inbound request and asserts the
+    // fingerprint markers are present and the old `turbo-surf/` tell is gone.
+    // Default (rustls) path only — under `impersonate` wreq's emulation owns the
+    // header set (asserted by the network-layer harness in tests/impersonate.rs).
+    #[cfg(not(feature = "impersonate"))]
+    #[tokio::test]
+    async fn chrome_headers_reach_the_wire() {
+        use tokio::sync::oneshot;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let n = sock.read(&mut buf).await.unwrap_or(0);
+            let raw = String::from_utf8_lossy(&buf[..n]).to_string();
+            let _ = sock
+                .write_all(&http(
+                    "200 OK",
+                    &[("Content-Type", "text/html")],
+                    b"<html>ok</html>",
+                ))
+                .await;
+            let _ = sock.flush().await;
+            let _ = tx.send(raw);
+        });
+        fetch_html(&url(port, "/"), FetchOptions::default())
+            .await
+            .unwrap();
+        let raw = rx.await.unwrap().to_ascii_lowercase();
+        assert!(
+            raw.contains("user-agent: mozilla/5.0") && raw.contains("chrome/"),
+            "missing chrome UA on the wire: {raw}"
+        );
+        assert!(raw.contains("sec-ch-ua:") && raw.contains("\"google chrome\""));
+        assert!(raw.contains("sec-fetch-mode: navigate"));
+        assert!(raw.contains("sec-fetch-dest: document"));
+        assert!(raw.contains("accept-language: en-us"));
+        assert!(raw.contains("upgrade-insecure-requests: 1"));
+        // The dead-giveaway bot token must be gone.
+        assert!(!raw.contains("turbo-surf/"), "leaked bot UA token: {raw}");
     }
 
     #[tokio::test]

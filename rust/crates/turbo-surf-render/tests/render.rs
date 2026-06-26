@@ -1681,7 +1681,10 @@ async fn spawn_paths_js_server(routes: &[(&'static str, &'static str)]) -> u16 {
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
         while let Ok((mut s, _)) = listener.accept().await {
-            let mut b = [0u8; 1024];
+            // Buffer must hold the whole request: the in-V8 fetch now sends a
+            // full Chrome header set (~700 B), and reading less leaves bytes
+            // unread so the close-after-write RST-truncates the client's read.
+            let mut b = [0u8; 4096];
             let n = s.read(&mut b).await.unwrap_or(0);
             let req = String::from_utf8_lossy(&b[..n]).to_string();
             let path = req
@@ -1715,7 +1718,7 @@ async fn spawn_js_server(body: &'static str) -> u16 {
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
         while let Ok((mut s, _)) = listener.accept().await {
-            let mut b = [0u8; 1024];
+            let mut b = [0u8; 4096];
             let _ = s.read(&mut b).await;
             let resp = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\nConnection: close\r\n\r\n{body}"
@@ -1734,7 +1737,7 @@ async fn spawn_json_server(body: &'static str) -> u16 {
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
         while let Ok((mut s, _)) = listener.accept().await {
-            let mut b = [0u8; 512];
+            let mut b = [0u8; 4096];
             let _ = s.read(&mut b).await;
             let resp = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}"

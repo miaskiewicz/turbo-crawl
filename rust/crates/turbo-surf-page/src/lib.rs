@@ -75,7 +75,7 @@ pub struct TurboNavigator {
     /// Optional extraction target counted per page (for the crawl benchmark's
     /// item-parity metric); `None` skips counting.
     pub item_selector: Option<String>,
-    client: reqwest::Client,
+    client: turbo_surf_core::http_backend::Client,
 }
 
 impl Default for TurboNavigator {

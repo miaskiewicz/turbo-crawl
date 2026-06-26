@@ -1080,7 +1080,10 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
             while let Ok((mut sock, _)) = listener.accept().await {
-                let mut b = [0u8; 512];
+                // Drain the whole request before replying: a real Chrome header
+                // set is ~600 B, so a 512-B buffer left bytes unread and the
+                // close-after-write RST-truncated the response on the client.
+                let mut b = [0u8; 2048];
                 let _ = sock.read(&mut b).await;
                 let body = "<html><head><title>Live</title></head><body><p>hello</p></body></html>";
                 let resp = format!(
@@ -1186,7 +1189,10 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
             while let Ok((mut sock, _)) = listener.accept().await {
-                let mut b = [0u8; 512];
+                // Drain the whole request before replying: a real Chrome header
+                // set is ~600 B, so a 512-B buffer left bytes unread and the
+                // close-after-write RST-truncated the response on the client.
+                let mut b = [0u8; 2048];
                 let _ = sock.read(&mut b).await;
                 let resp = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<title>Dest</title>";
                 let _ = sock.write_all(resp.as_bytes()).await;

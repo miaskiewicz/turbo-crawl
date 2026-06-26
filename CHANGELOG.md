@@ -3,6 +3,27 @@
 All notable changes to turbo-surf are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer.
 
+## [Unreleased]
+**Look like a real Chrome on the wire.** The stock client sent a bare
+`turbo-surf/0.1` UA + a thin `Accept` and a generic rustls TLS/HTTP-2
+fingerprint — an instant tell for WAFs.
+
+### Added
+- **Chrome default headers** (default, rustls path, no new build deps) — every
+  fetch now sends a current Chrome 149 (macOS) UA plus the full navigation header
+  set (`accept`, `accept-language`, `sec-ch-ua`/`-mobile`/`-platform`,
+  `sec-fetch-*`, `upgrade-insecure-requests`), values matched against a live
+  real-Chrome capture. `accept-encoding` stays client-managed so auto-decompress
+  still works; caller/crawl headers still override.
+- **`impersonate` feature** (opt-in, BoringSSL) — swaps the reqwest+rustls client
+  for `wreq`/`wreq-util`, presenting a real Chrome TLS/JA3/JA4 + HTTP-2 (Akamai)
+  fingerprint. Off by default (needs a C toolchain — cmake/nasm — to build);
+  forwarded by `turbo-surf-{page,napi,mcp}`. A single `http_backend` alias in
+  `turbo-surf-core` swaps the backend in one place. New live e2e
+  (`tests/impersonate.rs`) asserts a Chrome JA4 + HTTP-2 fingerprint against a
+  public echo (auto-skips offline); a localhost e2e asserts the Chrome headers
+  reach the wire on the default path.
+
 ## [0.2.4]
 A **Linux SIGBUS** fix in the Playwright-shim test harness, plus a new **Python
 (PyPI) binding**.
