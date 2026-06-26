@@ -13,6 +13,7 @@
 //! tier-2 `Page` (on the turbo-dom Rust crate) will implement.
 
 pub mod cache;
+pub mod challenge;
 pub mod cookies;
 pub mod crawl;
 pub mod fingerprint;
