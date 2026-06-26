@@ -22,6 +22,9 @@ or a workflow ships a mismatched version. Bump to the SAME `X.Y.Z`:
   `version = "X.Y.Z"` (core/view/page/render/mcp/napi Cargo.toml)
 - `rust/crates/turbo-surf-core/src/lib.rs` + `turbo-surf-mcp/src/lib.rs` → `VERSION`
 - `rust/crates/turbo-surf-napi/src/lib.rs` → `version()` and its `package.json`
+- `rust/crates/turbo-surf-py/pyproject.toml` → `version` (**maturin builds the PyPI
+  wheel from THIS, not the workspace version** — if it lags, the publish job
+  `--skip-existing`s the old wheel and goes green without publishing anything)
 - `README.md` status line
 
 Sanity check (should print nothing): `grep -rn "<old-version>" package.json rust/
