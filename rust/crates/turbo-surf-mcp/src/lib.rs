@@ -56,6 +56,15 @@ impl Session {
         }
     }
 
+    /// Construct with an explicit solver (used by the e2e harness to inject a
+    /// fake/sidecar solver without touching process env).
+    pub fn with_solver(solver: Box<dyn ChallengeSolver>) -> Self {
+        Self {
+            solver: Some(solver),
+            ..Self::default()
+        }
+    }
+
     // Stable per-host Chrome identity from the seed pool: same host → same
     // profile (so any solver token stays consistent with the fingerprint),
     // distinct hosts spread across the pool.
@@ -340,6 +349,27 @@ impl Session {
         serde_json::to_value(report).map_err(|e| e.to_string())
     }
 
+    // Report the active stealth posture: the per-host fingerprint profile this
+    // session would send, whether a challenge solver is wired, and the pool size.
+    fn stealth_status(&self) -> Value {
+        let key = if self.url.is_empty() {
+            "about:blank"
+        } else {
+            &self.url
+        };
+        let p = self.profile_for(key);
+        json!({
+            "profile": {
+                "userAgent": p.user_agent,
+                "platform": p.nav_platform,
+                "chromeMajor": p.chrome_major,
+                "acceptLanguage": p.accept_language,
+            },
+            "solver": self.solver.as_ref().map(|s| s.name()),
+            "poolSize": fingerprint::pool_size(),
+        })
+    }
+
     async fn fetch_body(&mut self, url: &str) -> Result<String, String> {
         self.requests.push(url.to_string());
         let profile = self.profile_for(url);
@@ -579,6 +609,11 @@ pub fn tools() -> Value {
             "Debug: run page JS with navigator/canvas instrumented; report what \
              fingerprinting code touched + what to shim",
         ),
+        (
+            "stealth_status",
+            "Report the active fingerprint profile + whether a challenge solver is \
+             wired + pool size",
+        ),
         ("set_mode", "Set JS render mode (no-js | fast | secure)"),
         (
             "render",
@@ -689,6 +724,7 @@ pub async fn call_tool(session: &mut Session, name: &str, args: &Value) -> Resul
                 .map(|()| json!({ "ok": true })),
         },
         "probe" => session.probe().await,
+        "stealth_status" => Ok(session.stealth_status()),
         "latest_dom" => Ok(json!(session.dom_history.last())),
         "dom_history" => Ok(json!(session.dom_history)),
         "run_playwright" => tool_run_playwright(session, args).await,
@@ -1213,6 +1249,50 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("hello"));
+    }
+
+    // E2E of the whole challenge pipeline (detect → solve → inject cookie →
+    // replay) over localhost, no real browser/network: a server that walls the
+    // first hit and serves the page once a "cleared" cookie is present, plus a
+    // fake sidecar (BrowserSolver shelling to `printf`) that returns that cookie.
+    #[tokio::test]
+    async fn e2e_solver_clears_wall_and_replays() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut b = [0u8; 4096];
+                    let n = sock.read(&mut b).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&b[..n]);
+                    let cleared = req.lines().any(|l| {
+                        l.to_ascii_lowercase().starts_with("cookie:") && l.contains("cleared=1")
+                    });
+                    let resp = if cleared {
+                        let body = "<html><head><title>Real</title></head><body>ok</body></html>";
+                        format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                    } else {
+                        // Challenge wall: a body marker the detector keys on.
+                        let body =
+                            "<html><body>/cdn-cgi/challenge-platform/ checking…</body></html>";
+                        format!("HTTP/1.1 403 Forbidden\r\nContent-Type: text/html\r\nSet-Cookie: datadome=chal; Path=/\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                    };
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.flush().await;
+                });
+            }
+        });
+        // Fake hardened-headless sidecar: "solves" by returning the gating cookie.
+        let solver = Box::new(turbo_surf_core::challenge::BrowserSolver::new(
+            "cat >/dev/null; printf '{\"cookies\":{\"cleared\":\"1\"}}'".into(),
+        ));
+        let mut s = Session::with_solver(solver);
+        let out = s.goto(&format!("http://127.0.0.1:{port}/")).await.unwrap();
+        // Walled 403 → detected → solved → re-fetched → real page.
+        assert_eq!(out["status"], 200, "expected solved page, got {out}");
+        assert_eq!(out["title"], "Real");
     }
 
     #[tokio::test]

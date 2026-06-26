@@ -176,6 +176,38 @@ pub async fn solve_if_challenged(
     }
 }
 
+// Parse a `{ "cookies": {k:v}, "headers": {k:v} }` token envelope into a
+// SolvedToken. Shared by the Hyper and browser-sidecar adapters — vendors return
+// either ready-to-set cookies (Akamai `_abck`) or a header token (Kasada
+// `x-kpsdk-ct`), so both shapes are accepted; an empty envelope is an error.
+fn token_from_json(json: &serde_json::Value) -> Result<SolvedToken, SolveError> {
+    let mut cookies = Vec::new();
+    let mut headers = Vec::new();
+    if let Some(obj) = json["cookies"].as_object() {
+        for (k, v) in obj {
+            if let Some(v) = v.as_str() {
+                cookies.push((k.clone(), v.to_string()));
+            }
+        }
+    }
+    if let Some(obj) = json["headers"].as_object() {
+        for (k, v) in obj {
+            if let Some(v) = v.as_str() {
+                headers.push((k.clone(), v.to_string()));
+            }
+        }
+    }
+    if cookies.is_empty() && headers.is_empty() {
+        return Err(SolveError::Parse(format!("no token in response: {json}")));
+    }
+    Ok(SolvedToken {
+        cookies,
+        headers,
+        // Akamai _abck / Kasada ct / cf_clearance are reusable for tens of minutes.
+        ttl: Duration::from_secs(30 * 60),
+    })
+}
+
 fn enc(s: &str) -> String {
     // Minimal percent-encoding for query values (RFC 3986 unreserved kept raw).
     s.bytes()
@@ -332,33 +364,78 @@ impl ChallengeSolver for HyperSolver {
             .map_err(|e| SolveError::Http(e.to_string()))?;
         let json: serde_json::Value =
             serde_json::from_str(&text).map_err(|e| SolveError::Parse(e.to_string()))?;
-        // Vendors return either ready-to-set cookies (e.g. Akamai _abck) or a
-        // header token (e.g. Kasada x-kpsdk-ct). Accept both shapes defensively.
-        let mut cookies = Vec::new();
-        let mut headers = Vec::new();
-        if let Some(obj) = json["cookies"].as_object() {
-            for (k, v) in obj {
-                if let Some(v) = v.as_str() {
-                    cookies.push((k.clone(), v.to_string()));
-                }
-            }
-        }
-        if let Some(obj) = json["headers"].as_object() {
-            for (k, v) in obj {
-                if let Some(v) = v.as_str() {
-                    headers.push((k.clone(), v.to_string()));
-                }
-            }
-        }
-        if cookies.is_empty() && headers.is_empty() {
-            return Err(SolveError::Parse(format!("no token in response: {text}")));
-        }
-        Ok(SolvedToken {
-            cookies,
-            headers,
-            // Akamai _abck / Kasada ct are reusable for tens of minutes.
-            ttl: Duration::from_secs(30 * 60),
+        token_from_json(&json)
+    }
+}
+
+// ---- headless-browser sidecar adapter -------------------------------------
+
+/// Solve via a **user-supplied hardened-headless browser sidecar** — Chromium
+/// stays entirely out of this tree. `BrowserSolver` shells to a command (e.g. a
+/// nodriver / patchright / Camoufox script) over a JSON contract: it writes a
+/// request on the child's stdin and reads a token envelope on stdout.
+///
+/// Request (stdin):  `{ "url", "vendor", "userAgent", "proxy" }`
+/// Response (stdout): `{ "cookies": {name: value}, "headers": {name: value} }`
+///
+/// The browser does the real PoW + canvas/WebGL raster a real GPU/V8 can satisfy
+/// (Kasada, active-canvas DataDome); turbo-surf replays the cleared cookies on
+/// the fast path. Opt-in only (`TURBO_SURF_SOLVER=browser` + `TURBO_SURF_BROWSER_CMD`)
+/// — never auto-selected. Run the browser through the SAME proxy you replay
+/// through, and let its Chrome version match the `impersonate` profile so the
+/// token's IP/JA3 binding holds on replay.
+pub struct BrowserSolver {
+    cmd: String,
+}
+
+impl BrowserSolver {
+    pub fn new(cmd: String) -> Self {
+        Self { cmd }
+    }
+}
+
+#[async_trait::async_trait]
+impl ChallengeSolver for BrowserSolver {
+    fn name(&self) -> &'static str {
+        "browser"
+    }
+
+    async fn solve(&self, ch: &Challenge, ctx: &SolveContext) -> Result<SolvedToken, SolveError> {
+        use tokio::io::AsyncWriteExt;
+        let req = serde_json::json!({
+            "url": ch.page_url,
+            "vendor": ch.vendor.as_str(),
+            "userAgent": ctx.user_agent,
+            "proxy": ctx.proxy,
         })
+        .to_string();
+        // `sh -c` so the configured value can be a full command line with args.
+        let mut child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(&self.cmd)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| SolveError::Http(format!("spawn sidecar: {e}")))?;
+        // Best-effort: a sidecar that ignores stdin is fine (the write may EPIPE).
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(req.as_bytes()).await;
+        } // stdin dropped here → EOF, so the child can finish
+        let out = child
+            .wait_with_output()
+            .await
+            .map_err(|e| SolveError::Http(e.to_string()))?;
+        if !out.status.success() {
+            return Err(SolveError::Http(format!(
+                "sidecar exit {:?}: {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            )));
+        }
+        let json: serde_json::Value =
+            serde_json::from_slice(&out.stdout).map_err(|e| SolveError::Parse(e.to_string()))?;
+        token_from_json(&json)
     }
 }
 
@@ -412,6 +489,13 @@ pub fn solver_from_env() -> Option<Box<dyn ChallengeSolver>> {
         "scrapfly" => {
             scrapfly.map(|k| Box::new(ScrapflySolver::new(k)) as Box<dyn ChallengeSolver>)
         }
+        // The headless-browser sidecar is opt-in ONLY: it spawns an external
+        // process (GPU/proxy cost), so it never joins the auto fallback below —
+        // `TURBO_SURF_SOLVER=browser` must select it explicitly.
+        "browser" => std::env::var("TURBO_SURF_BROWSER_CMD")
+            .ok()
+            .filter(|c| !c.trim().is_empty())
+            .map(|cmd| Box::new(BrowserSolver::new(cmd)) as Box<dyn ChallengeSolver>),
         _ => hyper
             .map(|k| Box::new(HyperSolver::new(k)) as Box<dyn ChallengeSolver>)
             .or_else(|| {
@@ -423,6 +507,9 @@ pub fn solver_from_env() -> Option<Box<dyn ChallengeSolver>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The env-mutating tests share process env; serialize them.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn hdr(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs
@@ -469,6 +556,7 @@ mod tests {
 
     #[test]
     fn env_selection_ignores_placeholders() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Fresh keys for this test; placeholders must read as unset.
         std::env::set_var("SCRAPFLY_API_KEY", "your_scrapfly_key_here");
         std::env::remove_var("HYPER_API_KEY");
@@ -482,6 +570,45 @@ mod tests {
         let s = solver_from_env().expect("real key → solver");
         assert_eq!(s.name(), "scrapfly");
         std::env::remove_var("SCRAPFLY_API_KEY");
+        std::env::remove_var("TURBO_SURF_SOLVER");
+    }
+
+    #[tokio::test]
+    async fn browser_sidecar_returns_token() {
+        // Fake hardened-headless sidecar: drain stdin, emit a token envelope.
+        let solver = BrowserSolver::new(
+            "cat >/dev/null; printf '{\"cookies\":{\"datadome\":\"DD\"},\"headers\":{\"x-kpsdk-ct\":\"K\"}}'"
+                .into(),
+        );
+        let ch = Challenge {
+            vendor: Vendor::DataDome,
+            page_url: "https://x.test/".into(),
+        };
+        let token = solver.solve(&ch, &SolveContext::default()).await.unwrap();
+        assert_eq!(
+            token.cookies,
+            vec![("datadome".to_string(), "DD".to_string())]
+        );
+        assert_eq!(
+            token.headers,
+            vec![("x-kpsdk-ct".to_string(), "K".to_string())]
+        );
+    }
+
+    #[test]
+    fn browser_solver_is_opt_in_only() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // A browser command present but TURBO_SURF_SOLVER unset → NOT auto-picked
+        // (the sidecar spawns a process; it must be chosen explicitly).
+        std::env::set_var("TURBO_SURF_BROWSER_CMD", "my-headless-solver");
+        std::env::remove_var("HYPER_API_KEY");
+        std::env::remove_var("SCRAPFLY_API_KEY");
+        std::env::remove_var("TURBO_SURF_SOLVER");
+        assert!(solver_from_env().is_none(), "browser auto-selected");
+
+        std::env::set_var("TURBO_SURF_SOLVER", "browser");
+        assert_eq!(solver_from_env().map(|s| s.name()), Some("browser"));
+        std::env::remove_var("TURBO_SURF_BROWSER_CMD");
         std::env::remove_var("TURBO_SURF_SOLVER");
     }
 

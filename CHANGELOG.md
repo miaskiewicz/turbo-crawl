@@ -42,7 +42,11 @@ fingerprint — an instant tell for WAFs.
   replay. Configured via env / `.env` (`HYPER_API_KEY`, `SCRAPFLY_API_KEY`,
   `TURBO_SURF_SOLVER`, `TURBO_SURF_PROXY`); inert until a real key is set. See
   `.env.example`. Wired into the MCP session (per-host profile + auto solve/replay
-  on a detected wall) and `TurboNavigator` (the crawl seam).
+  on a detected wall) and `TurboNavigator` (the crawl seam). Also a self-owned
+  `BrowserSolver` (opt-in `TURBO_SURF_SOLVER=browser` + `TURBO_SURF_BROWSER_CMD`)
+  that shells to a hardened-headless sidecar over a JSON contract — Chromium stays
+  out of the engine; reference sidecar in `harness/browser-solver/`. MCP
+  `stealth_status` tool reports the active profile + wired solver.
 - **Fingerprint debug/probe mode** (`turbo-surf-render::probe_globals`, MCP `probe`
   tool) — run a page's JS with `navigator`/`screen`/`window.chrome`/canvas wrapped
   in logging proxies and report every property it touched + which reads returned

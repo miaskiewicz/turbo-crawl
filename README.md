@@ -221,11 +221,22 @@ let res = fetch_html("https://example.com/", opts).await?;
 ```
 
 **JS-challenge / PoW walls (Akamai, DataDome, Kasada, Cloudflare).** A fingerprint
-gets you past *consistency* checks, not the active canvas/WebGL/PoW gates. Point a
-server-side solver at those: copy `.env.example` → `.env`, set `HYPER_API_KEY` or
-`SCRAPFLY_API_KEY` (+ `TURBO_SURF_PROXY` so the token's IP/JA3 matches your egress),
-and the MCP session / crawl navigator auto-detect a wall, solve it, and replay the
-cleared cookies on the fast path. Inert until a key is set.
+gets you past *consistency* checks, not the active canvas/WebGL/PoW gates. Plug a
+solver into the `ChallengeSolver` trait — the MCP session / crawl navigator
+auto-detect a wall, solve it, and replay the cleared cookies on the fast path.
+Inert until configured. Copy `.env.example` → `.env` and pick one:
+
+- **Rented** (`TURBO_SURF_SOLVER=hyper|scrapfly` + `HYPER_API_KEY`/`SCRAPFLY_API_KEY`)
+  — server-side token gen, no browser.
+- **Self-owned browser sidecar** (`TURBO_SURF_SOLVER=browser` +
+  `TURBO_SURF_BROWSER_CMD="node harness/browser-solver/solve.mjs"`) — drives a real
+  hardened headless Chromium just for the handshake, harvests the cookie, then
+  turbo-surf does the volume. Opt-in only (spawns a process); the browser stays a
+  dev-side sidecar, never in the engine. See
+  [`harness/browser-solver/`](./harness/browser-solver/README.md).
+
+Set `TURBO_SURF_PROXY` so the token's IP/JA3 matches your egress (and build with
+`--features impersonate` so the replay JA3 matches the Chrome that minted it).
 
 **Debug mode (`probe`).** To see *what* a page's anti-bot JS reads — and what's
 still missing — run the `probe` MCP tool (or `turbo-surf-render::probe_globals`):

@@ -40,7 +40,14 @@ wreq = { version = "6.0.0-rc.29", optional = true, features = [
 wreq-util = { version = "3.0.0-rc.13", optional = true }
 encoding_rs = "0.8"
 bytes = "1"
-tokio = { version = "1", features = ["macros", "rt", "time", "sync"] }
+tokio = { version = "1", features = [
+    "macros",
+    "rt",
+    "time",
+    "sync",
+    "process",
+    "io-util",
+] }
 futures-util = "0.3"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
