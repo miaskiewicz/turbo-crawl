@@ -26,10 +26,22 @@ fingerprint — an instant tell for WAFs.
 - **Real Chrome `navigator` in the JS render tier** — `ENV_BOOTSTRAP` now installs
   a coherent Chrome 149 (macOS) `navigator` (UA, `platform`, `vendor`,
   `webdriver: false`, `hardwareConcurrency`/`deviceMemory`, a Chrome PDF plugin
-  set) plus a `window.chrome`, replacing the old `turbo-surf`/`turbo-test` tell
-  page JS used to see. Kept in sync with the tier-1 HTTP UA. No-Chromium env
-  emulation: satisfies passive/consistency anti-bot probes, not active
+  set) plus a `window.chrome`, and masks the JS polyfills' `Function.prototype.
+  toString` so built-ins (`fetch`, `setTimeout`, …) report `[native code]`.
+  Replaces the old `turbo-surf`/`turbo-test` tell page JS used to see. No-Chromium
+  env emulation: satisfies passive/consistency anti-bot probes, not active
   canvas/WebGL/audio fingerprinting or PoW challenges.
+- **Fingerprint seed pool** (`turbo-surf-core::fingerprint`) — ~4000 internally
+  coherent real-Chrome identities, selected deterministically by a client key
+  (stable per client, spread across the fleet). Opt-in via `FetchOptions.profile`;
+  the default reproduces the prior fixed Chrome-149/macOS wire behaviour. Raises
+  the passive/consistency anti-bot bar; does not defeat active fingerprinting/PoW.
+- **Challenge-solver integration** (`turbo-surf-core::challenge`) — detect a JS-
+  challenge/PoW wall (Akamai/DataDome/Kasada/Cloudflare) and hand it to a server-
+  side solver (`ScrapflySolver`/`HyperSolver`) that returns tokens/cookies to
+  replay. Configured via env / `.env` (`HYPER_API_KEY`, `SCRAPFLY_API_KEY`,
+  `TURBO_SURF_SOLVER`, `TURBO_SURF_PROXY`); inert until a real key is set. See
+  `.env.example`.
 
 ## [0.2.4]
 A **Linux SIGBUS** fix in the Playwright-shim test harness, plus a new **Python
