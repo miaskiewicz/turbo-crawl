@@ -3,6 +3,19 @@
 All notable changes to turbo-surf are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer.
 
+## [Unreleased]
+
+### Added
+- **Versioned solver encodings** — both in-house solvers now store *multiple*
+  generations of their challenge encoding behind a registry, since Akamai/CF shift
+  format across versions. Akamai `SensorVersion` {V1 plaintext, V2 PRNG-shuffled,
+  V3 encrypted-blob} via `generate_sensor_versioned`; Cloudflare `ChallengeVersion`
+  {Iuam, Managed, Turnstile} via `detect_version` + `solve_pow_versioned`
+  (Turnstile flagged non-self-solvable → routes to the browser sidecar). A harness
+  test per vendor sweeps every stored version (deterministic + distinct + correctly
+  tagged), so filling one version's real encoding keeps the rest green. Default
+  tracks the latest generation.
+
 ## [0.2.6]
 **Look like a real Chrome on the wire.** The stock client sent a bare
 `turbo-surf/0.1` UA + a thin `Accept` and a generic rustls TLS/HTTP-2

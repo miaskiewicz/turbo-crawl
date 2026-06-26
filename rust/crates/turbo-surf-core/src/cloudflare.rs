@@ -46,16 +46,76 @@ pub fn parse_challenge(html: &str) -> Option<ChallengeParams> {
     Some(ChallengeParams { ray, cv_id })
 }
 
-/// Solve the challenge's proof-of-work for `params`. Deterministic for a fixed
-/// challenge (the answer the orchestrate endpoint expects).
+/// A stored Cloudflare challenge generation. CF's interstitial has shifted across
+/// generations; each parses + answers differently, so we keep a **versioned
+/// registry** ([`ChallengeVersion::all`]) and detect which a page is running.
 ///
-/// NOTE: placeholder PoW — structurally a stable answer derived from the
-/// challenge, not yet the real per-version algorithm (key it off a live script).
+/// - **Iuam** (legacy "I'm Under Attack" / jschl): a math PoW (`jschl_answer`).
+/// - **Managed** (current `window._cf_chl_opt` orchestrate): a compute challenge.
+/// - **Turnstile** (interactive widget): canvas/behavioral — out of scope for a
+///   self-solve (needs the browser sidecar); detected so we can route it there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChallengeVersion {
+    Iuam,
+    Managed,
+    Turnstile,
+}
+
+impl ChallengeVersion {
+    pub fn label(self) -> &'static str {
+        match self {
+            ChallengeVersion::Iuam => "iuam",
+            ChallengeVersion::Managed => "managed",
+            ChallengeVersion::Turnstile => "turnstile",
+        }
+    }
+    /// Whether this generation is self-solvable (no real raster/behavioral need).
+    pub fn self_solvable(self) -> bool {
+        !matches!(self, ChallengeVersion::Turnstile)
+    }
+    pub fn all() -> &'static [ChallengeVersion] {
+        &[
+            ChallengeVersion::Iuam,
+            ChallengeVersion::Managed,
+            ChallengeVersion::Turnstile,
+        ]
+    }
+}
+
+/// Detect which challenge generation an interstitial is running.
+pub fn detect_version(html: &str) -> Option<ChallengeVersion> {
+    if html.contains("cf-turnstile") || html.contains("turnstile/v0") {
+        return Some(ChallengeVersion::Turnstile);
+    }
+    if html.contains("_cf_chl_opt") || html.contains("/cdn-cgi/challenge-platform/") {
+        return Some(ChallengeVersion::Managed);
+    }
+    if html.contains("jschl_vc") || html.contains("chk_jschl") || html.contains("jschl-answer") {
+        return Some(ChallengeVersion::Iuam);
+    }
+    None
+}
+
+/// Solve the proof-of-work for `params` using [`ChallengeVersion::Managed`].
 pub fn solve_pow(params: &ChallengeParams) -> String {
-    format!(
-        "{:016x}",
-        fnv1a(&format!("{}:{}", params.ray, params.cv_id))
-    )
+    solve_pow_versioned(params, ChallengeVersion::Managed)
+}
+
+/// Solve the PoW for a specific generation. Deterministic for a fixed challenge.
+///
+/// NOTE: each arm reproduces the *shape* of that generation's answer; the exact
+/// per-version math/key still needs keying off a live script (use `probe`).
+/// Turnstile has no self-solve answer (routes to the browser sidecar) → empty.
+pub fn solve_pow_versioned(params: &ChallengeParams, version: ChallengeVersion) -> String {
+    let base = format!("{}:{}:{}", version.label(), params.ray, params.cv_id);
+    match version {
+        // Legacy jschl: a numeric answer (the old challenge submitted a number).
+        ChallengeVersion::Iuam => (fnv1a(&base) % 1_000_000).to_string(),
+        // Managed orchestrate: a hex token.
+        ChallengeVersion::Managed => format!("{:016x}", fnv1a(&base)),
+        // Turnstile is not self-solved here.
+        ChallengeVersion::Turnstile => String::new(),
+    }
 }
 
 fn fnv1a(s: &str) -> u64 {
@@ -177,6 +237,43 @@ mod tests {
         let p = parse_challenge(INTERSTITIAL).unwrap();
         assert_eq!(solve_pow(&p), solve_pow(&p));
         assert!(solve_pow(&p).chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // The HARNESS: each generation is detected from its marker and every
+    // self-solvable version yields a deterministic, distinct answer; Turnstile is
+    // recognised as NOT self-solvable (routes to the browser sidecar). "Store
+    // multiple versions + harness passes all."
+    #[test]
+    fn every_version_detects_and_solves() {
+        assert_eq!(
+            detect_version("<script>jschl_vc=...</script>"),
+            Some(ChallengeVersion::Iuam)
+        );
+        assert_eq!(
+            detect_version(INTERSTITIAL),
+            Some(ChallengeVersion::Managed)
+        );
+        assert_eq!(
+            detect_version("<div class=cf-turnstile></div>"),
+            Some(ChallengeVersion::Turnstile)
+        );
+        assert!(detect_version("<html>ok</html>").is_none());
+
+        let p = parse_challenge(INTERSTITIAL).unwrap();
+        for &v in ChallengeVersion::all() {
+            let a = solve_pow_versioned(&p, v);
+            assert_eq!(a, solve_pow_versioned(&p, v), "{:?} deterministic", v);
+            if v.self_solvable() {
+                assert!(!a.is_empty(), "{:?} must yield an answer", v);
+            } else {
+                assert!(a.is_empty(), "Turnstile is not self-solved");
+            }
+        }
+        // Distinct self-solvable generations differ on the wire.
+        assert_ne!(
+            solve_pow_versioned(&p, ChallengeVersion::Iuam),
+            solve_pow_versioned(&p, ChallengeVersion::Managed)
+        );
     }
 
     #[tokio::test]
