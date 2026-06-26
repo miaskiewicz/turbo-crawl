@@ -26,6 +26,8 @@ pub enum Vendor {
     DataDome,
     Kasada,
     Cloudflare,
+    /// AWS WAF Bot Control (the bot layer behind CloudFront / ALB).
+    AwsWaf,
 }
 
 impl Vendor {
@@ -35,6 +37,7 @@ impl Vendor {
             Vendor::DataDome => "datadome",
             Vendor::Kasada => "kasada",
             Vendor::Cloudflare => "cloudflare",
+            Vendor::AwsWaf => "awswaf",
         }
     }
 }
@@ -193,6 +196,16 @@ pub fn detect(
     {
         return here(Vendor::Akamai);
     }
+    // AWS WAF Bot Control (CloudFront/ALB): the challenge/captcha action header, the
+    // aws-waf-token cookie, or the awswaf challenge/captcha assets.
+    if header(headers, "x-amzn-waf-action").is_some()
+        || has_set_cookie(headers, "aws-waf-token")
+        || body.contains("token.awswaf.com")
+        || body.contains("captcha.awswaf.com")
+        || body.contains("challenge.js")
+    {
+        return here(Vendor::AwsWaf);
+    }
     None
 }
 
@@ -336,10 +349,15 @@ impl ChallengeSolver for ScrapflySolver {
 
 // ---- Hyper Solutions adapter ----------------------------------------------
 
-/// Hyper Solutions: per-vendor token-generation endpoints (no browser). The exact
-/// request/response fields differ per vendor and are finalised against a live key
-/// — this is the structural best-effort (defensive parsing of the token/cookie
-/// field). Base URL overridable for tests.
+/// Hyper Solutions (matched to `hyper-sdk-go`): a server-side **sensor generator**,
+/// not a cookie service. We POST the challenge inputs to their Akamai endpoint
+/// (`https://akm.hypersolutions.co/v2/sensor`, auth header `x-api-key`), get back
+/// `{payload}` — the `sensor_data` string — and then POST *that* to the target's
+/// own (dynamic) sensor endpoint, where the edge sets the real `_abck`.
+///
+/// Akamai is the verified lane. Other vendors use different Hyper hosts/shapes not
+/// reproduced here yet → `Unsupported` so the caller can fall back. Base URL
+/// overridable for tests.
 pub struct HyperSolver {
     api_key: String,
     base_url: String,
@@ -350,7 +368,8 @@ impl HyperSolver {
     pub fn new(api_key: String) -> Self {
         Self {
             api_key,
-            base_url: "https://api.hypersolutions.co".to_string(),
+            // The Akamai sensor host (per hyper-sdk-go); overridable for tests.
+            base_url: "https://akm.hypersolutions.co".to_string(),
             client: crate::net::build_client(),
         }
     }
@@ -359,38 +378,28 @@ impl HyperSolver {
         self
     }
 
-    fn path(vendor: Vendor) -> &'static str {
-        match vendor {
-            Vendor::Akamai => "/akamai/v1/sensor",
-            Vendor::DataDome => "/datadome/v1/interstitial",
-            Vendor::Kasada => "/kasada/v1/payload",
-            // Cloudflare is Scrapfly's lane in our setup; Hyper focuses on the
-            // other three. Surfaced as Unsupported so the caller can fall back.
-            Vendor::Cloudflare => "",
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl ChallengeSolver for HyperSolver {
-    fn name(&self) -> &'static str {
-        "hyper"
-    }
-
-    async fn solve(&self, ch: &Challenge, ctx: &SolveContext) -> Result<SolvedToken, SolveError> {
-        let path = Self::path(ch.vendor);
-        if path.is_empty() {
-            return Err(SolveError::Unsupported(ch.vendor));
-        }
+    // Ask Hyper for a sensor_data payload. Body + auth + response field per
+    // hyper-sdk-go: x-api-key header, {abck,bmsz,version,pageUrl,userAgent,script,
+    // acceptLanguage,ip}, response `{payload}`.
+    async fn generate_sensor(
+        &self,
+        ch: &Challenge,
+        ctx: &SolveContext,
+    ) -> Result<String, SolveError> {
         let body = serde_json::json!({
-            "site": ch.page_url,
+            "abck": "",
+            "bmsz": "",
+            "version": "2",
+            "pageUrl": ch.page_url,
             "userAgent": ctx.user_agent,
-            "proxy": ctx.proxy,
+            "script": "",
+            "acceptLanguage": "en-US,en;q=0.9",
+            "ip": "",
         });
         let resp = self
             .client
-            .post(format!("{}{}", self.base_url, path))
-            .header("authorization", format!("Bearer {}", self.api_key))
+            .post(format!("{}/v2/sensor", self.base_url))
+            .header("x-api-key", &self.api_key)
             .header("content-type", "application/json")
             .body(body.to_string())
             .send()
@@ -402,7 +411,65 @@ impl ChallengeSolver for HyperSolver {
             .map_err(|e| SolveError::Http(e.to_string()))?;
         let json: serde_json::Value =
             serde_json::from_str(&text).map_err(|e| SolveError::Parse(e.to_string()))?;
-        token_from_json(&json)
+        if let Some(err) = json["error"].as_str().filter(|e| !e.is_empty()) {
+            return Err(SolveError::Http(format!("hyper: {err}")));
+        }
+        json["payload"]
+            .as_str()
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| SolveError::Parse(format!("hyper: no payload in {text}")))
+    }
+}
+
+#[async_trait::async_trait]
+impl ChallengeSolver for HyperSolver {
+    fn name(&self) -> &'static str {
+        "hyper"
+    }
+
+    async fn solve(&self, ch: &Challenge, ctx: &SolveContext) -> Result<SolvedToken, SolveError> {
+        if ch.vendor != Vendor::Akamai {
+            // Only the Akamai sensor lane is wired to the real API; let the caller
+            // fall back for DataDome/Kasada/CF/AWS.
+            return Err(SolveError::Unsupported(ch.vendor));
+        }
+        // 1. Hyper generates the sensor_data string.
+        let sensor = self.generate_sensor(ch, ctx).await?;
+        // 2. POST it to the target's sensor endpoint (the page URL); the edge sets
+        //    the real _abck via Set-Cookie, which we surface as the solved token.
+        let resp = self
+            .client
+            .post(&ch.page_url)
+            .header("content-type", "application/json")
+            .body(serde_json::json!({ "sensor_data": sensor }).to_string())
+            .send()
+            .await
+            .map_err(|e| SolveError::Http(e.to_string()))?;
+        let cookies: Vec<(String, String)> = resp
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .filter_map(|line| {
+                line.strip_prefix("_abck=").map(|rest| {
+                    (
+                        "_abck".to_string(),
+                        rest.split(';').next().unwrap_or("").to_string(),
+                    )
+                })
+            })
+            .collect();
+        if cookies.is_empty() {
+            return Err(SolveError::Parse(
+                "hyper: no _abck after sensor POST".into(),
+            ));
+        }
+        Ok(SolvedToken {
+            cookies,
+            headers: Vec::new(),
+            ttl: Duration::from_secs(30 * 60),
+        })
     }
 }
 
@@ -515,6 +582,21 @@ pub fn solver_from_env() -> Option<Box<dyn ChallengeSolver>> {
     solver_from_env_pow(None)
 }
 
+// Wrap an in-house solver so a failed solve falls back to the browser sidecar when
+// `TURBO_SURF_BROWSER_CMD` is set; otherwise return it unwrapped.
+fn maybe_browser_fallback(primary: Box<dyn ChallengeSolver>) -> Box<dyn ChallengeSolver> {
+    match std::env::var("TURBO_SURF_BROWSER_CMD")
+        .ok()
+        .filter(|c| !c.trim().is_empty())
+    {
+        Some(cmd) => Box::new(FallbackSolver::new(
+            primary,
+            Box::new(BrowserSolver::new(cmd)),
+        )),
+        None => primary,
+    }
+}
+
 /// Like [`solver_from_env`] but with an optional [`PowEngine`] — when the selected
 /// solver is Cloudflare and an engine is supplied, the solver runs the challenge's
 /// own JS to compute the answer (the proper path). The render tier passes a V8
@@ -542,29 +624,26 @@ pub fn solver_from_env_pow(pow: Option<Box<dyn PowEngine>>) -> Option<Box<dyn Ch
             .ok()
             .filter(|c| !c.trim().is_empty())
             .map(|cmd| Box::new(BrowserSolver::new(cmd)) as Box<dyn ChallengeSolver>),
-        // In-house Akamai is EXPERIMENTAL (the live sensor encoding isn't reversed
-        // per-version yet). Route to the browser sidecar by default when one is
-        // configured — try in-house first, fall back to the real browser — so a
-        // failed in-house solve still clears the wall. Browserless → in-house only.
-        "akamai" => {
-            let akamai = Box::new(crate::akamai::AkamaiSolver::new()) as Box<dyn ChallengeSolver>;
-            match std::env::var("TURBO_SURF_BROWSER_CMD")
-                .ok()
-                .filter(|c| !c.trim().is_empty())
-            {
-                Some(cmd) => Some(Box::new(FallbackSolver::new(
-                    akamai,
-                    Box::new(BrowserSolver::new(cmd)),
-                ))),
-                None => Some(akamai),
-            }
-        }
+        // In-house solvers try themselves first; when a browser sidecar is
+        // configured (TURBO_SURF_BROWSER_CMD), a failed in-house solve falls back to
+        // the real Chromium so the wall still clears. Browserless → in-house only.
+        // Akamai is EXPERIMENTAL (live sensor encoding not reversed per-version).
+        "akamai" => Some(maybe_browser_fallback(Box::new(
+            crate::akamai::AkamaiSolver::new(),
+        ))),
         "cloudflare" => {
             let mut cf = crate::cloudflare::CloudflareSolver::new();
             if let Some(engine) = pow {
                 cf = cf.with_pow_engine(engine);
             }
-            Some(Box::new(cf) as Box<dyn ChallengeSolver>)
+            Some(maybe_browser_fallback(Box::new(cf)))
+        }
+        "awswaf" | "aws" => {
+            let mut waf = crate::aws_waf::AwsWafSolver::new();
+            if let Some(engine) = pow {
+                waf = waf.with_pow_engine(engine);
+            }
+            Some(maybe_browser_fallback(Box::new(waf)))
         }
         _ => hyper
             .map(|k| Box::new(HyperSolver::new(k)) as Box<dyn ChallengeSolver>)
@@ -606,6 +685,10 @@ mod tests {
         assert_eq!(
             detect(u, 403, &hdr(&[("cf-mitigated", "challenge")]), "").map(|c| c.vendor),
             Some(Vendor::Cloudflare)
+        );
+        assert_eq!(
+            detect(u, 202, &hdr(&[("x-amzn-waf-action", "challenge")]), "").map(|c| c.vendor),
+            Some(Vendor::AwsWaf)
         );
         // A plain page is not a challenge.
         assert!(detect(u, 200, &hdr(&[("server", "cloudflare")]), "<html>ok</html>").is_none());
@@ -713,5 +796,57 @@ mod tests {
             token.cookies,
             vec![("cf_clearance".to_string(), "TOKEN123".to_string())]
         );
+    }
+
+    // Hyper's real two-step Akamai flow (per hyper-sdk-go): POST inputs to
+    // /v2/sensor (x-api-key auth) → `{payload}` → POST that as sensor_data to the
+    // target → edge sets `_abck`. One mock server plays both roles by path.
+    #[tokio::test]
+    async fn hyper_generates_sensor_then_harvests_abck() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let resp = if req.contains("/v2/sensor") {
+                        // The sensor generator: require the real auth header, return payload.
+                        assert!(req.contains("x-api-key:"), "missing x-api-key: {req}");
+                        let b = r#"{"payload":"SENSOR_DATA_STR","context":"ctx"}"#;
+                        format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", b.len(), b)
+                    } else {
+                        // The target sensor endpoint: must receive the generated sensor_data.
+                        assert!(req.contains("SENSOR_DATA_STR"), "sensor not posted: {req}");
+                        let b = "{}";
+                        format!("HTTP/1.1 200 OK\r\nSet-Cookie: _abck=REAL~0~ok; Path=/\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", b.len(), b)
+                    };
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.flush().await;
+                });
+            }
+        });
+        let base = format!("http://127.0.0.1:{port}");
+        // Target page URL = same mock (non-/v2/sensor path).
+        let solver = HyperSolver::new("KEY".into()).with_base_url(base.clone());
+        let ch = Challenge {
+            vendor: Vendor::Akamai,
+            page_url: format!("{base}/target"),
+        };
+        let token = solver.solve(&ch, &SolveContext::default()).await.unwrap();
+        let abck = token.cookies.iter().find(|(k, _)| k == "_abck").unwrap();
+        assert!(abck.1.starts_with("REAL"), "expected harvested _abck");
+        // Non-Akamai vendors fall through as Unsupported.
+        let cf = Challenge {
+            vendor: Vendor::Cloudflare,
+            page_url: base,
+        };
+        assert!(matches!(
+            solver.solve(&cf, &SolveContext::default()).await,
+            Err(SolveError::Unsupported(Vendor::Cloudflare))
+        ));
     }
 }

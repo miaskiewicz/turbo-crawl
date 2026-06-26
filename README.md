@@ -223,19 +223,21 @@ All optional. Set in `.env` (auto-loaded) or the process env.
 
 | Variable | Values | What it does |
 |---|---|---|
-| `TURBO_SURF_SOLVER` | `akamai` · `cloudflare` · `hyper` · `scrapfly` · `browser` | Pick the challenge solver. Unset = no solving (fingerprint only). `akamai`/`cloudflare` are in-house (no key). |
+| `TURBO_SURF_SOLVER` | `cloudflare` · `awswaf` · `akamai` · `hyper` · `scrapfly` · `browser` | Pick the challenge solver. Unset = no solving (fingerprint only). `cloudflare`/`awswaf`/`akamai` are in-house (no key). |
 | `HYPER_API_KEY` | key | Hyper Solutions token API (Akamai/DataDome/Kasada). Used when solver=`hyper`. |
 | `SCRAPFLY_API_KEY` | key | Scrapfly ASP API (Cloudflare + fallback). Used when solver=`scrapfly`. |
 | `TURBO_SURF_BROWSER_CMD` | shell command | The hardened-headless sidecar to run for solver=`browser` (e.g. `node harness/browser-solver/solve.mjs`). When solver=`akamai`, also enables the browser fallback (see below). |
 | `TURBO_SURF_PROXY` | `http://user:pass@host:port` | Egress proxy. **Required for real solves** — tokens bind to the IP/JA3 that minted them; replay must use the same egress. |
 | `TURBO_SURF_SENSOR_DIR` | path (default `akamai-sensors`) | Where `analyze_akamai`'s `retry` saves a working sensor (keyed by script hash + version). |
 
-**Solver maturity** — `cloudflare` (managed/Iuam) runs the challenge's own JS in
-the V8 tier (no browser) and is the most viable in-house solve. `akamai` is
-**experimental** (the live sensor crypto isn't reversed per-version yet) — it tries
-in-house, then falls back to the browser sidecar if `TURBO_SURF_BROWSER_CMD` is set.
-`hyper`/`scrapfly`/`browser` are the robust paths. Turnstile-interactive always
-routes to the browser sidecar.
+**Solver maturity** — `cloudflare` (managed/Iuam) and `awswaf` (common + targeted
+`challenge.js`) both run the challenge's **own JS in the V8 tier** (no browser) and
+are the most viable in-house solves. `akamai` is **experimental** (the live sensor
+crypto isn't reversed per-version yet). **All in-house solvers try themselves first,
+then fall back to the browser sidecar** when `TURBO_SURF_BROWSER_CMD` is set — so a
+failed self-solve still clears the wall. `hyper`/`scrapfly`/`browser` are the robust
+paths. CAPTCHA tiers (AWS `captcha`, CF Turnstile-interactive) aren't self-solvable
+and route straight to the sidecar.
 
 Build feature (not env): **`--features impersonate`** swaps rustls → BoringSSL
 (`wreq`) for a real Chrome TLS/JA3/JA4 + HTTP-2 fingerprint. Needs `cmake`+`nasm`.
@@ -279,12 +281,19 @@ solver into the `ChallengeSolver` trait — the MCP session / crawl navigator
 auto-detect a wall, solve it, and replay the cleared cookies on the fast path.
 Inert until configured. Copy `.env.example` → `.env` and pick one:
 
-- **Rented** (`TURBO_SURF_SOLVER=hyper|scrapfly` + `HYPER_API_KEY`/`SCRAPFLY_API_KEY`)
-  — server-side token gen, no browser.
-- **In-house, no key** (`TURBO_SURF_SOLVER=cloudflare` or `akamai`) — solve it
-  yourself, no third party. **Cloudflare** runs the challenge's *own* JS in the V8
-  render tier to compute the answer (the proper path — no reversing the math), then
-  POSTs it and harvests `cf_clearance`. **Akamai** is experimental (see below).
+- **Rented** (`TURBO_SURF_SOLVER=hyper|scrapfly` + `HYPER_API_KEY`/`SCRAPFLY_API_KEY`).
+  **Hyper** (`akm.hypersolutions.co/v2/sensor`, `x-api-key`) generates an Akamai
+  `sensor_data` payload; turbo-surf POSTs it to the target and harvests `_abck`
+  (Akamai lane wired; other vendors fall back). **Scrapfly** (`/scrape?asp=true&
+  render_js=true`) renders + returns cleared cookies (`result.cookies`). Both
+  matched to their real API docs.
+- **In-house, no key** (`TURBO_SURF_SOLVER=cloudflare`, `awswaf`, or `akamai`) —
+  solve it yourself, no third party. **Cloudflare** runs the challenge's *own* JS in
+  the V8 render tier to compute the answer (no reversing the math), then POSTs it and
+  harvests `cf_clearance`. **AWS WAF Bot Control** (the bot layer behind CloudFront /
+  ALB) does the same — runs `challenge.js` in V8 to mint the `aws-waf-token`; its
+  common tier clears on the minted token + fingerprint, the `captcha` tier routes to
+  the sidecar. **Akamai** is experimental (see below).
 - **Self-owned browser sidecar** (`TURBO_SURF_SOLVER=browser` +
   `TURBO_SURF_BROWSER_CMD="node harness/browser-solver/solve.mjs"`) — drives a real
   hardened headless Chromium just for the handshake, harvests the cookie, then

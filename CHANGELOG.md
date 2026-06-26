@@ -7,7 +7,27 @@ All notable changes to turbo-surf are documented here. Format follows
 In-house solver maturity: a proper Cloudflare solve (run the challenge's own JS),
 Akamai experimental recon/rebuild tooling, and versioned encoding registries.
 
+### Fixed
+- **Hyper Solutions adapter matched to the real API** (`hyper-sdk-go`) — was built
+  on wrong assumptions. Correct now: `POST akm.hypersolutions.co/v2/sensor` with the
+  `x-api-key` header and `{abck,bmsz,version,pageUrl,userAgent,script,acceptLanguage,
+  ip}` body; the response `{payload}` is the `sensor_data` string, which turbo-surf
+  POSTs to the target to harvest `_abck`. Akamai lane verified end-to-end (mock);
+  other vendors return `Unsupported` to fall back. Scrapfly adapter validated
+  against its docs (`/scrape?asp&render_js`, `result.cookies[].name/value`) — already
+  correct.
+
 ### Added
+- **AWS WAF Bot Control solver** (`turbo-surf-core::aws_waf`,
+  `TURBO_SURF_SOLVER=awswaf`) — the bot layer behind CloudFront / ALB. Classifies
+  the tier (common / targeted `challenge.js` / captcha), runs `challenge.js` in the
+  V8 tier (same `PowEngine` as Cloudflare) to mint the `aws-waf-token`, and replays
+  it; the `captcha` tier routes to the browser sidecar. New `Vendor::AwsWaf` +
+  detection (`x-amzn-waf-action`, `aws-waf-token`, `*.awswaf.com`).
+- **Universal browser fallback for in-house solvers** — `cloudflare`, `awswaf`, and
+  `akamai` now all try their self-solve first and fall back to the browser sidecar
+  when `TURBO_SURF_BROWSER_CMD` is set (via `FallbackSolver`), so a failed in-house
+  solve still clears the wall.
 - **Proper Cloudflare solver (run the challenge's own JS)** — a `PowEngine` trait
   (core) implemented by the render tier (`turbo_surf_render::V8PowEngine`) lets
   `CloudflareSolver` execute the interstitial's challenge script in the V8 isolate
