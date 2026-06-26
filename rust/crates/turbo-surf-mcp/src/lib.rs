@@ -1295,6 +1295,82 @@ mod tests {
         assert_eq!(out["title"], "Real");
     }
 
+    // E2E with the REAL in-house AkamaiSolver (not a stub): an Akamai-walled
+    // localhost site — 403 + `_abck` seed until a sensor POST clears it — driven
+    // through the whole MCP session pipeline (detect → AkamaiSolver.solve → inject
+    // `_abck` → replay → real page).
+    #[tokio::test]
+    async fn e2e_akamai_solver_clears_wall() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut b = vec![0u8; 8192];
+                    let n = sock.read(&mut b).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&b[..n]);
+                    let resp = if req.starts_with("POST") {
+                        // Sensor accepted → issue a cleared _abck.
+                        let body = "{}";
+                        format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nSet-Cookie: _abck=CLEARED~0~ok; Path=/\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                    } else if req.contains("_abck=CLEARED") {
+                        let body = "<html><head><title>Real</title></head><body>ok</body></html>";
+                        format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                    } else {
+                        // Wall: seed _abck so the detector fires Akamai.
+                        let body = "<html><body>bot wall</body></html>";
+                        format!("HTTP/1.1 403 Forbidden\r\nContent-Type: text/html\r\nSet-Cookie: _abck=0~seed~-1~-1; Path=/\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                    };
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.flush().await;
+                });
+            }
+        });
+        let mut s = Session::with_solver(Box::new(turbo_surf_core::akamai::AkamaiSolver::new()));
+        let out = s.goto(&format!("http://127.0.0.1:{port}/")).await.unwrap();
+        assert_eq!(out["status"], 200, "akamai not cleared: {out}");
+        assert_eq!(out["title"], "Real");
+    }
+
+    // E2E with the REAL in-house CloudflareSolver: a managed-challenge localhost
+    // site — interstitial until the challenge POST issues `cf_clearance`.
+    #[tokio::test]
+    async fn e2e_cloudflare_solver_clears_wall() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        const INTERSTITIAL: &str = "<html><head><script>window._cf_chl_opt={cvId:'3',cRay:'8af0deadbeef'};</script></head><body>/cdn-cgi/challenge-platform/ checking…</body></html>";
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut b = vec![0u8; 8192];
+                    let n = sock.read(&mut b).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&b[..n]);
+                    let resp = if req.starts_with("POST") {
+                        let body = "{}";
+                        format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nSet-Cookie: cf_clearance=CF~cleared~1; Path=/\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                    } else if req.contains("cf_clearance=CF") {
+                        let body = "<html><head><title>Real</title></head><body>ok</body></html>";
+                        format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                    } else {
+                        format!("HTTP/1.1 403 Forbidden\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{INTERSTITIAL}", INTERSTITIAL.len())
+                    };
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.flush().await;
+                });
+            }
+        });
+        let mut s = Session::with_solver(Box::new(
+            turbo_surf_core::cloudflare::CloudflareSolver::new(),
+        ));
+        let out = s.goto(&format!("http://127.0.0.1:{port}/")).await.unwrap();
+        assert_eq!(out["status"], 200, "cloudflare not cleared: {out}");
+        assert_eq!(out["title"], "Real");
+    }
+
     #[tokio::test]
     async fn aria_query_getby_branches() {
         let mut s = loaded();
