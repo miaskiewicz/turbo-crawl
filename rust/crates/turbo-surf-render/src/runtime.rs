@@ -1783,6 +1783,40 @@ globalThis.__domSig = () => {
   if (document.body) addShadow(document.body);
   if (document.documentElement) addShadow(document.documentElement);
 })();
+// Native-function fidelity: a fingerprinter calls `fn.toString()` on built-ins
+// and flags JS source where real Chrome returns "function x() { [native code] }".
+// Make our JS polyfills report native. Plain reassignment, not a Proxy — a Proxy
+// on toString is itself detectable (its own toString/`length` leak).
+(() => {
+  const orig = Function.prototype.toString;
+  const native = new WeakSet();
+  const ts = function toString() {
+    if (native.has(this)) return "function " + (this.name || "") + "() { [native code] }";
+    return orig.call(this);
+  };
+  Object.defineProperty(ts, "name", { value: "toString", configurable: true });
+  Function.prototype.toString = ts;
+  native.add(ts); // the trap must report itself native too
+  const mark = (fn, name) => {
+    if (typeof fn !== "function") return;
+    // Don't rename an already-marked function: setInterval/clearInterval/
+    // cancelAnimationFrame alias setTimeout/clearTimeout (same object), so the
+    // canonical name set first must win.
+    if (name && !native.has(fn)) {
+      try { Object.defineProperty(fn, "name", { value: name, configurable: true }); } catch (e) {}
+    }
+    native.add(fn);
+  };
+  mark(setTimeout, "setTimeout");
+  mark(clearTimeout, "clearTimeout");
+  mark(requestAnimationFrame, "requestAnimationFrame");
+  mark(queueMicrotask, "queueMicrotask");
+  mark(fetch, "fetch");
+  mark(setInterval); mark(clearInterval); mark(cancelAnimationFrame);
+  if (globalThis.Headers) mark(globalThis.Headers, "Headers");
+  const nav = globalThis.navigator;
+  if (nav && nav.clipboard) { mark(nav.clipboard.writeText, "writeText"); mark(nav.clipboard.readText, "readText"); }
+})();
 })();"##;
 
 /// Initialize the V8 platform ONCE, on a dedicated thread that lives for the whole

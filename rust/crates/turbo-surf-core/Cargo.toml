@@ -25,14 +25,19 @@ reqwest = { version = "0.12", default-features = false, features = [
 # `stream` for incremental body reads (byte-cap enforcement); the codec features
 # because wreq's Chrome emulation advertises `accept-encoding: gzip, deflate, br,
 # zstd` — without them it can't decode the responses it asks for.
-wreq = { version = "5.3", optional = true, features = [
+#
+# Pinned to the 6.0.0-rc / 3.0.0-rc line because Chrome 149 only lands there
+# (stable wreq-util 2.x tops out at Chrome 137); keeps the emulated version in
+# lockstep with the tier-1 HTTP UA + the render-tier navigator. Pre-release, but
+# only pulled by this opt-in feature — the default build never sees it.
+wreq = { version = "6.0.0-rc.29", optional = true, features = [
     "stream",
     "gzip",
     "brotli",
     "deflate",
     "zstd",
 ] }
-wreq-util = { version = "2.2", optional = true }
+wreq-util = { version = "3.0.0-rc.13", optional = true }
 encoding_rs = "0.8"
 bytes = "1"
 tokio = { version = "1", features = ["macros", "rt", "time", "sync"] }

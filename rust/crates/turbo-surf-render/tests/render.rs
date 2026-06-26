@@ -164,6 +164,30 @@ fn navigator_looks_like_chrome() {
     );
 }
 
+// Native-function fidelity: page JS that does `fetch.toString()` (a common
+// anti-bot probe) must see "[native code]", not our polyfill's JS source — and
+// the toString trap must report itself native too.
+#[test]
+fn shimmed_builtins_report_native() {
+    assert_eq!(
+        run_with_dom("<body></body>", "fetch.toString()").unwrap(),
+        "function fetch() { [native code] }"
+    );
+    assert_eq!(
+        run_with_dom("<body></body>", "setTimeout.toString()").unwrap(),
+        "function setTimeout() { [native code] }"
+    );
+    assert_eq!(
+        run_with_dom("<body></body>", "Function.prototype.toString.toString()").unwrap(),
+        "function toString() { [native code] }"
+    );
+    // A genuine page function must still reveal its JS source (we only mask shims).
+    assert_eq!(
+        run_with_dom("<body></body>", "(function foo(){return 1}).toString()").unwrap(),
+        "function foo(){return 1}"
+    );
+}
+
 // Setting `location.href` must DECOMPOSE the URL into pathname/search/hash/host/etc.
 // Next's app-router reads usePathname()/useSearchParams() off these; a static location
 // (browser_env's plain object) left pathname at "/" so the payroll login route guard saw

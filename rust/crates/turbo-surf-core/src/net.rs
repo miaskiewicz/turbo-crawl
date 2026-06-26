@@ -212,7 +212,16 @@ fn build_headers(url: &str, opts: &FetchOptions) -> BTreeMap<String, String> {
 // can't forge a fingerprint. One seam so both client constructors stay in sync.
 fn emulate(builder: http::ClientBuilder) -> http::ClientBuilder {
     #[cfg(feature = "impersonate")]
-    let builder = builder.emulation(wreq_util::Emulation::Chrome137);
+    let builder = builder.emulation(
+        // Chrome 149 on macOS — matched to the tier-1 HTTP UA (DEFAULT_UA) and the
+        // render-tier navigator so the TLS/HTTP-2 fingerprint, the request headers,
+        // and `navigator.*` all report the same browser+OS (a cross-layer mismatch
+        // is itself a bot signal).
+        wreq_util::Emulation::builder()
+            .profile(wreq_util::Profile::Chrome149)
+            .platform(wreq_util::Platform::MacOS)
+            .build(),
+    );
     builder
 }
 
@@ -232,6 +241,19 @@ pub fn build_client() -> http::Client {
     )
     .build()
     .expect("HTTP client build (TLS backend init)")
+}
+
+// Final URL of a settled response, across backends: reqwest exposes `url() -> &Url`,
+// wreq `uri() -> &Uri`. Both reflect the post-redirect URL on the auto-follow path.
+fn final_url(res: &http::Response) -> String {
+    #[cfg(not(feature = "impersonate"))]
+    {
+        res.url().to_string()
+    }
+    #[cfg(feature = "impersonate")]
+    {
+        res.uri().to_string()
+    }
 }
 
 fn redirect_location(res: &http::Response) -> Option<String> {
@@ -414,7 +436,7 @@ async fn follow_manually(
     for redirects in 0.. {
         let headers = build_headers(&hop.url, opts);
         let res = send(&cl, &hop.method, &hop.url, &headers, &hop.body).await?;
-        let final_url = res.url().to_string();
+        let final_url = final_url(&res);
         ingest_set_cookie(opts, &res, &final_url);
         match redirect_location(&res) {
             Some(loc) if redirects < max_redirects => hop = advance(&hop, &res, &loc)?,
@@ -457,7 +479,7 @@ async fn follow_auto(
     let method = opts.method.clone().unwrap_or_else(|| "GET".to_string());
     let headers = build_headers(url, opts);
     let res = send(&cl, &method, url, &headers, &opts.body.clone()).await?;
-    let final_url = res.url().to_string();
+    let final_url = final_url(&res);
     let redirected = final_url != *url;
     ingest_set_cookie(opts, &res, &final_url);
     finish(opts, res, final_url, redirected, max_bytes).await
