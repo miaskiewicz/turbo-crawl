@@ -57,7 +57,8 @@ it differs from a real browser.
 | `waitForLoadState`, `waitForTimeout`, `waitForURL`, `waitForSelector`, `waitForFunction`, `waitForResponse`, `waitForRequest`, `waitForNavigation`, `waitForEvent` | ⚠️ | Resolve against current state (static DOM) — see "truly-async" above. `waitForSelector`/`waitForURL` assert presence/match rather than poll. |
 | `on`, `once`, `off`, `addListener`, `removeListener` | ⚠️ | Registry; `load`/`domcontentloaded`/`close` fire. Live `console`/`request`/`response`/`dialog` events don't (no browser event bus). |
 | `mainFrame`, `frame`, `frames`, `frameLocator` | ⚠️ | Collapse to the page itself — no real cross-origin frames. |
-| `viewportSize`, `setViewportSize`, `setDefaultTimeout`, `setDefaultNavigationTimeout`, `emulateMedia`, `bringToFront` | ⚠️ | Stored / no-op (no layout to affect). |
+| `viewportSize`, `setViewportSize` | ✅ | Stored, and the viewport now drives `page.screenshot()` layout width/height. |
+| `setDefaultTimeout`, `setDefaultNavigationTimeout`, `emulateMedia`, `bringToFront` | ⚠️ | Stored / no-op (no live layout to affect). |
 | `isClosed`, `close`, `video` (→ null), `workers` (→ []) | ✅ | |
 | `screenshot` | ⚠️ | Synthetic native render (PNG, or SVG via `{type:"svg"}`) — representative, not browser-faithful. `path` is written; `fullPage`/`clip` ignored (image is the viewport). |
 | `pdf` | ❌ | Throws — no rendering surface. |

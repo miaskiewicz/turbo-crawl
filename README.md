@@ -4,15 +4,18 @@
 > on [turbo-dom](https://github.com/miaskiewicz/turbo-dom). Fetch + parse + extract
 > + run page JS with no headless browser; 100×+ faster on server-rendered pages.
 
-turbo-surf is a single native (Rust) engine — no Chromium, no pixels, no layout:
+turbo-surf is a single native (Rust) engine — no Chromium, no headless browser
+(it can still render a reasonably-representative **synthetic screenshot** on
+demand — see below):
 
 - **A crawler** — point it at a domain and stream page records: indexed interactive
   elements, a link/form graph, an accessibility tree, markdown and plain-text views,
   rendered-HTML capture, CSS/XPath node queries, and schema-driven structured
   extraction.
-- **An agent tool** — a 60-tool **MCP** server agents drive directly over stdio
+- **An agent tool** — a 62-tool **MCP** server agents drive directly over stdio
   (`crawl`, `batch`, navigate, click/fill/submit, query, extract, accessibility
-  tree, markdown, `render`/`eval_js`/`inject_js`, cookies/headers, `snapshot`).
+  tree, markdown, `render`/`eval_js`/`inject_js`, `screenshot`, cookies/headers,
+  `snapshot`).
 
 For pages that need JavaScript it runs their scripts — either by mining
 server-embedded hydration state or by executing page JS inside a **true V8 isolate**
@@ -26,10 +29,11 @@ library, and they get their DOM from a real browser (Playwright/Puppeteer/
 Selenium) or an in-process fake DOM with no security isolation (jsdom,
 happy-dom). turbo-surf is unusual on four axes at once:
 
-1. **AI-agent-ready out of the box.** It ships a full **MCP server** (60 tools:
+1. **AI-agent-ready out of the box.** It ships a full **MCP server** (62 tools:
    navigate, click/fill/submit, query, extract, accessibility tree, markdown,
    `crawl` a whole site, `batch` a URL list, `render`/`set_mode` to run page JS,
    `eval_js`/`inject_js` against the live render heap with a DOM-history trail,
+   `screenshot` (PNG/SVG of the page or any DOM-history snapshot) + `set_viewport`,
    cookies/headers, `snapshot`, …) so an agent drives real pages over stdio with
    **no browser and no glue code** — `npx turbo-surf-mcp`. Most crawlers are
    libraries you wrap yourself; this one is an agent tool on day one.
@@ -38,7 +42,8 @@ happy-dom). turbo-surf is unusual on four axes at once:
    is Playwright-shaped (the benchmark harness runs unmodified Playwright routines
    on it).
 3. **Its own DOM, not a browser's.** turbo-dom is a native + WASM HTML parser
-   with a lazy copy-on-write DOM — native-speed parse, no pixels/layout/IPC.
+   with a lazy copy-on-write DOM — native-speed parse, no browser pixels/layout/IPC
+   on the hot path (a separate on-demand raster tier synthesizes screenshots).
 4. **A V8 isolate to run page JS + re-render.** Page (or your own) JavaScript runs
    inside a real V8 isolate (a `deno_core` runtime — host heap unreachable from the
    guest, with a runaway-execution budget) against the native rtdom DOM, then
@@ -61,7 +66,7 @@ canonical dedupe, depth/page caps), structured extraction, CSS+XPath query, a
 no-Chromium JS render tier (a true V8 isolate over the native DOM) with re-enterable
 live-heap `eval_js`/`inject_js` + a DOM-history trail, **synthetic screenshots**
 (PNG/SVG from a native layout+paint of any HTML snapshot — still no browser), and a
-60-tool MCP server (native binary). Benchmarked against real browsers + other
+62-tool MCP server (native binary). Benchmarked against real browsers + other
 crawlers (below).
 
 ## Install
@@ -95,11 +100,13 @@ shim (`rust/playwright-shim/`) is a dev/in-repo tool, not an npm artifact.
 ## MCP server (agents)
 
 ```sh
-npx turbo-surf-mcp          # stdio MCP server (60 tools), e.g.:
+npx turbo-surf-mcp          # stdio MCP server (62 tools), e.g.:
 # navigation:  goto, go_back, go_forward, reload, set_user_agent
 # content:     interactive_elements, accessibility_tree, aria_snapshot, markdown,
 #              text, html, links, requests, snapshot, query, get_by,
 #              hydration_state, extract
+# screenshot:  screenshot (PNG/SVG of the page or a dom_history snapshot),
+#              set_viewport
 # interaction: click, fill, submit, click_selector, fill_selector, select_option,
 #              check, uncheck, fill_many, find_text, forms, extract_links
 # accessors:   get_attribute, text_content, inner_html, input_value, count,
@@ -159,7 +166,7 @@ claude mcp list
 ```
 
 Now start (or restart) Claude Code and ask it to, e.g., *"use turbo-surf to fetch
-the markdown of example.com"* — the 60 tools above are available. Remove it later
+the markdown of example.com"* — the 62 tools above are available. Remove it later
 with `claude mcp remove turbo-surf`.
 
 **Scope (where the server is registered).** By default it's registered for your
