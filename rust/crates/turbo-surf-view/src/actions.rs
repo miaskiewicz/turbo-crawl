@@ -7,6 +7,7 @@
 use crate::dom_ops::text_of;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use turbo_dom_parser::rtdom::{DocumentExt, Tree};
+use turbo_dom_parser::rtdom::tree::Handle;
 use turbo_surf_core::url::resolve;
 use url::form_urlencoded;
 
@@ -33,7 +34,7 @@ pub struct Submission {
 }
 
 /// Set a control's value (and checked state for checkbox/radio) via attributes.
-pub fn fill_value(tree: &mut Tree, h: u32, value: &str) {
+pub fn fill_value(tree: &mut Tree, h: Handle, value: &str) {
     let tag = tree.tag_name(h).unwrap_or_default();
     let ty = tree
         .get_attribute(h, "type")
@@ -45,7 +46,7 @@ pub fn fill_value(tree: &mut Tree, h: u32, value: &str) {
     tree.set_attribute(h, "value", value);
 }
 
-fn set_bool_attr(tree: &mut Tree, h: u32, attr: &str, on: bool) {
+fn set_bool_attr(tree: &mut Tree, h: Handle, attr: &str, on: bool) {
     if on {
         tree.set_attribute(h, attr, "");
     } else {
@@ -53,16 +54,16 @@ fn set_bool_attr(tree: &mut Tree, h: u32, attr: &str, on: bool) {
     }
 }
 
-fn lower_tag(tree: &Tree, h: u32) -> String {
+fn lower_tag(tree: &Tree, h: Handle) -> String {
     tree.tag_name(h).unwrap_or_default().to_ascii_lowercase()
 }
 
-fn lower_type(tree: &Tree, h: u32) -> Option<String> {
+fn lower_type(tree: &Tree, h: Handle) -> Option<String> {
     tree.get_attribute(h, "type")
         .map(|t| t.to_ascii_lowercase())
 }
 
-fn control_value(tree: &Tree, h: u32) -> String {
+fn control_value(tree: &Tree, h: Handle) -> String {
     tree.get_attribute(h, "value").unwrap_or("").to_string()
 }
 
@@ -74,7 +75,7 @@ fn is_checkable(tag: &str, ty: Option<&str>) -> bool {
     tag == "input" && matches!(ty, Some("checkbox") | Some("radio"))
 }
 
-fn select_pairs(tree: &Tree, select: u32, name: &str) -> Vec<(String, String)> {
+fn select_pairs(tree: &Tree, select: Handle, name: &str) -> Vec<(String, String)> {
     tree.node(select)
         .query_selector_all("option")
         .iter()
@@ -90,7 +91,7 @@ fn select_pairs(tree: &Tree, select: u32, name: &str) -> Vec<(String, String)> {
 
 fn typed_pairs(
     tree: &Tree,
-    h: u32,
+    h: Handle,
     name: &str,
     tag: &str,
     ty: Option<&str>,
@@ -111,7 +112,7 @@ fn typed_pairs(
 }
 
 // One control → its successful [name,value] pairs (HTML successful-controls).
-fn control_pairs(tree: &Tree, h: u32, submitter: Option<u32>) -> Vec<(String, String)> {
+fn control_pairs(tree: &Tree, h: Handle, submitter: Option<Handle>) -> Vec<(String, String)> {
     let Some(name) = tree.get_attribute(h, "name") else {
         return Vec::new();
     };
@@ -133,8 +134,8 @@ fn control_pairs(tree: &Tree, h: u32, submitter: Option<u32>) -> Vec<(String, St
 
 /// A form's successful controls as `[name, value]` pairs. `submitter` (the
 /// activated submit button), if named, contributes its name/value.
-pub fn serialize_form(tree: &Tree, form: u32, submitter: Option<u32>) -> Vec<(String, String)> {
-    let controls: Vec<u32> = tree
+pub fn serialize_form(tree: &Tree, form: Handle, submitter: Option<Handle>) -> Vec<(String, String)> {
+    let controls: Vec<Handle> = tree
         .node(form)
         .query_selector_all("input,select,textarea,button")
         .iter()
@@ -199,7 +200,7 @@ fn build_multipart(action: &str, pairs: &[(String, String)]) -> Submission {
     }
 }
 
-fn form_method(tree: &Tree, form: u32) -> &'static str {
+fn form_method(tree: &Tree, form: Handle) -> &'static str {
     let m = tree
         .get_attribute(form, "method")
         .unwrap_or("GET")
@@ -211,19 +212,19 @@ fn form_method(tree: &Tree, form: u32) -> &'static str {
     }
 }
 
-fn is_multipart(tree: &Tree, form: u32) -> bool {
+fn is_multipart(tree: &Tree, form: Handle) -> bool {
     tree.get_attribute(form, "enctype")
         .unwrap_or("")
         .to_ascii_lowercase()
         .contains("multipart")
 }
 
-fn form_action_url(tree: &Tree, form: u32, base: &str) -> String {
+fn form_action_url(tree: &Tree, form: Handle, base: &str) -> String {
     let action = tree.get_attribute(form, "action").unwrap_or("");
     resolve(base, action).unwrap_or_else(|| base.to_string())
 }
 
-fn ancestor_anchor_href(tree: &Tree, h: u32) -> Option<String> {
+fn ancestor_anchor_href(tree: &Tree, h: Handle) -> Option<String> {
     let mut cur = Some(h);
     while let Some(n) = cur {
         if tree.tag_name(n).as_deref() == Some("A") {
@@ -236,7 +237,7 @@ fn ancestor_anchor_href(tree: &Tree, h: u32) -> Option<String> {
     None
 }
 
-fn ancestor_form(tree: &Tree, h: u32) -> Option<u32> {
+fn ancestor_form(tree: &Tree, h: Handle) -> Option<Handle> {
     let mut cur = Some(h);
     while let Some(n) = cur {
         if tree.tag_name(n).as_deref() == Some("FORM") {
@@ -247,7 +248,7 @@ fn ancestor_form(tree: &Tree, h: u32) -> Option<u32> {
     None
 }
 
-fn is_submitter(tree: &Tree, h: u32) -> bool {
+fn is_submitter(tree: &Tree, h: Handle) -> bool {
     let tag = tree.tag_name(h).unwrap_or_default();
     let ty = tree
         .get_attribute(h, "type")
@@ -257,7 +258,7 @@ fn is_submitter(tree: &Tree, h: u32) -> bool {
 
 /// Resolve what clicking element `h` does (no JS): follow an `<a href>`, submit
 /// the owning `<form>`, or inert.
-pub fn click_intent(tree: &Tree, h: u32, base: &str) -> ClickIntent {
+pub fn click_intent(tree: &Tree, h: Handle, base: &str) -> ClickIntent {
     if let Some(href) = ancestor_anchor_href(tree, h) {
         return ClickIntent::Navigate(resolve(base, &href).unwrap_or(href));
     }
@@ -269,7 +270,7 @@ pub fn click_intent(tree: &Tree, h: u32, base: &str) -> ClickIntent {
 }
 
 /// Build the navigation a form submit produces.
-pub fn build_submission(tree: &Tree, form: u32, base: &str, submitter: Option<u32>) -> Submission {
+pub fn build_submission(tree: &Tree, form: Handle, base: &str, submitter: Option<Handle>) -> Submission {
     let action = form_action_url(tree, form, base);
     let pairs = serialize_form(tree, form, submitter);
     if form_method(tree, form) == "GET" {
@@ -286,7 +287,7 @@ pub fn build_submission(tree: &Tree, form: u32, base: &str, submitter: Option<u3
 mod tests {
     use super::*;
 
-    fn first(tree: &Tree, sel: &str) -> u32 {
+    fn first(tree: &Tree, sel: &str) -> Handle {
         tree.query_selector(sel).unwrap()
     }
 

@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use turbo_dom_parser::rtdom::serialize::serialize_inner;
+use turbo_dom_parser::rtdom::tree::Handle;
 use turbo_dom_parser::rtdom::Tree;
 use turbo_surf_core::crawl::{crawl as run_crawl, CrawlOptions, Record};
 use turbo_surf_core::net::{build_client, fetch_html as net_fetch, FetchOptions};
@@ -162,7 +163,7 @@ pub fn get_by(
     // Scope to a parent locator's subtree: keep only hits that are a descendant (or self) of
     // some element matching `root`. Backs `parentLocator.getByRole/getByText/getByLabel(...)`.
     if let Some(root_sel) = root.as_deref().filter(|s| !s.is_empty()) {
-        let roots: std::collections::HashSet<u32> =
+        let roots: std::collections::HashSet<Handle> =
             tree.query_selector_all(root_sel).iter().copied().collect();
         if !roots.is_empty() {
             hits.retain(|&h| {
@@ -180,11 +181,11 @@ pub fn get_by(
     // `idx` = the element's position in document order (querySelectorAll('*')), so the
     // Playwright shim can drive a getBy* match in the LIVE isolate by index (these
     // locators have no CSS selector to dispatch through).
-    let all: Vec<u32> = tree.query_selector_all("*").iter().copied().collect();
+    let all: Vec<Handle> = tree.query_selector_all("*").iter().copied().collect();
     let out: Vec<Value> = hits
         .iter()
         .map(|&h| {
-            json!({ "node": h, "text": view::text(&tree, h), "idx": all.iter().position(|&x| x == h) })
+            json!({ "node": h.raw(), "text": view::text(&tree, h), "idx": all.iter().position(|&x| x == h) })
         })
         .collect();
     Value::Array(out).to_string()
@@ -401,67 +402,80 @@ pub fn render_ts(
 
 #[napi]
 pub fn attr_of(html: String, node: u32, name: String) -> Option<String> {
+    let node = Handle::from_raw(node);
     parsed(&html).get_attribute(node, &name).map(str::to_string)
 }
 
 #[napi]
 pub fn input_value_of(html: String, node: u32) -> String {
+    let node = Handle::from_raw(node);
     view::input_value_of(&parsed(&html), node)
 }
 
 #[napi]
 pub fn is_visible(html: String, node: u32) -> bool {
+    let node = Handle::from_raw(node);
     view::is_visible(&parsed(&html), node)
 }
 
 #[napi]
 pub fn is_checked(html: String, node: u32) -> bool {
+    let node = Handle::from_raw(node);
     view::is_checked(&parsed(&html), node)
 }
 
 #[napi]
 pub fn is_enabled(html: String, node: u32) -> bool {
+    let node = Handle::from_raw(node);
     view::is_enabled(&parsed(&html), node)
 }
 
 #[napi]
 pub fn is_editable(html: String, node: u32) -> bool {
+    let node = Handle::from_raw(node);
     view::is_editable(&parsed(&html), node)
 }
 
 #[napi]
 pub fn is_empty(html: String, node: u32) -> bool {
+    let node = Handle::from_raw(node);
     view::is_empty(&parsed(&html), node)
 }
 
 #[napi]
 pub fn aria_role_of(html: String, node: u32) -> String {
+    let node = Handle::from_raw(node);
     view::role_of(&parsed(&html), node)
 }
 
 #[napi]
 pub fn accessible_name_of(html: String, node: u32) -> String {
+    let node = Handle::from_raw(node);
     view::accessible_name(&parsed(&html), node)
 }
 
 #[napi]
 pub fn accessible_description_of(html: String, node: u32) -> String {
+    let node = Handle::from_raw(node);
     view::accessible_description(&parsed(&html), node)
 }
 
 #[napi]
 pub fn selected_values_of(html: String, node: u32) -> Vec<String> {
+    let node = Handle::from_raw(node);
     view::selected_values(&parsed(&html), node)
 }
 
 #[napi]
 pub fn css_value_of(html: String, node: u32, name: String) -> String {
+    let node = Handle::from_raw(node);
     view::css_value(&parsed(&html), node, &name)
 }
 
 /// Whether `expected` is an ordered ARIA-snapshot subset of `node`'s subtree.
 #[napi]
 pub fn matches_aria_snapshot(html: String, node: u32, expected: String) -> bool {
+    let node = Handle::from_raw(node);
     view::matches_aria_snapshot(&parsed(&html), node, &expected)
 }
 
@@ -472,6 +486,7 @@ pub fn matches_aria_snapshot(html: String, node: u32, expected: String) -> bool 
 /// Attribute/class/CSS matchers stay per-name (no attr-map iterator on the seam).
 #[napi]
 pub fn node_snapshot(html: String, node: u32) -> String {
+    let node = Handle::from_raw(node);
     let tree = parsed(&html);
     json!({
         "visible": view::is_visible(&tree, node),
@@ -492,7 +507,7 @@ pub fn node_snapshot(html: String, node: u32) -> String {
 // Each mutating action parses the HTML, mutates the tree, and returns the new
 // serialized HTML; the shim swaps its cached HTML for the result.
 
-fn first_match(tree: &Tree, selector: &str) -> Result<u32> {
+fn first_match(tree: &Tree, selector: &str) -> Result<Handle> {
     tree.query_selector(selector)
         .ok_or_else(|| Error::from_reason(format!("no element matches {selector}")))
 }
@@ -549,6 +564,7 @@ pub fn click(html: String, selector: String, base_url: String) -> Result<String>
 
 #[napi]
 pub fn fill_node(html: String, node: u32, value: String) -> String {
+    let node = Handle::from_raw(node);
     let mut tree = Tree::parse(&html);
     view::fill_value(&mut tree, node, &value);
     serialize_inner(&tree, tree.root())
@@ -556,6 +572,7 @@ pub fn fill_node(html: String, node: u32, value: String) -> String {
 
 #[napi]
 pub fn set_checked_node(html: String, node: u32, on: bool) -> String {
+    let node = Handle::from_raw(node);
     let mut tree = Tree::parse(&html);
     view::set_checked(&mut tree, node, on);
     serialize_inner(&tree, tree.root())
@@ -563,6 +580,7 @@ pub fn set_checked_node(html: String, node: u32, on: bool) -> String {
 
 #[napi]
 pub fn select_option_node(html: String, node: u32, value: String) -> String {
+    let node = Handle::from_raw(node);
     let mut tree = Tree::parse(&html);
     view::select_option(&mut tree, node, &value);
     serialize_inner(&tree, tree.root())
@@ -570,6 +588,7 @@ pub fn select_option_node(html: String, node: u32, value: String) -> String {
 
 #[napi]
 pub fn click_node(html: String, node: u32, base_url: String) -> String {
+    let node = Handle::from_raw(node);
     intent_json(view::click_intent(&parsed(&html), node, &base_url))
 }
 

@@ -4,6 +4,7 @@
 //! or an empty known SPA mount + external scripts ⇒ JS required.
 
 use turbo_dom_parser::rtdom::Tree;
+use turbo_dom_parser::rtdom::tree::Handle;
 
 const DEFAULT_MIN_TEXT: usize = 200;
 const DEFAULT_MIN_SCRIPTS: usize = 1;
@@ -18,7 +19,7 @@ pub struct Detect {
     pub reason: String,
 }
 
-fn collapsed_len(tree: &Tree, h: u32) -> usize {
+fn collapsed_len(tree: &Tree, h: Handle) -> usize {
     tree.text_content(h)
         .split_whitespace()
         .collect::<Vec<_>>()

@@ -11,6 +11,7 @@
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use turbo_dom_parser::rtdom::serialize::serialize_inner;
+use turbo_dom_parser::rtdom::tree::Handle;
 use turbo_dom_parser::rtdom::Tree;
 use turbo_surf_core::challenge::{self, ChallengeSolver, SolveContext};
 use turbo_surf_core::cookies::CookieJar;
@@ -276,7 +277,7 @@ impl Session {
     }
 
     // Mutate a control located by selector; returns the new title (or ok).
-    fn mutate<F: FnOnce(&mut Tree, u32)>(&mut self, selector: &str, f: F) -> Result<Value, String> {
+    fn mutate<F: FnOnce(&mut Tree, Handle)>(&mut self, selector: &str, f: F) -> Result<Value, String> {
         let tree = self.tree_mut()?;
         let h = tree
             .query_selector(selector)
@@ -1004,7 +1005,7 @@ fn call_read_tool(session: &mut Session, name: &str, args: &Value) -> Result<Val
 
 // Apply a `(tree, handle) -> bool` view accessor to the first selector match
 // (false when nothing matches).
-fn bool_accessor(tree: &Tree, args: &Value, f: fn(&Tree, u32) -> bool) -> Result<bool, String> {
+fn bool_accessor(tree: &Tree, args: &Value, f: fn(&Tree, Handle) -> bool) -> Result<bool, String> {
     Ok(first(tree, args)?.is_some_and(|h| f(tree, h)))
 }
 
@@ -1017,7 +1018,7 @@ fn tool_find_text(tree: &Tree, args: &Value) -> Result<Value, String> {
     let text = arg_str(args, "text").ok_or("find_text: missing 'text'")?;
     let out: Vec<Value> = view::by_text(tree, text, TextMode::Substring)
         .iter()
-        .map(|&h| json!({ "node": h, "text": view::text(tree, h) }))
+        .map(|&h| json!({ "node": h.raw(), "text": view::text(tree, h) }))
         .collect();
     Ok(json!(out))
 }
@@ -1034,7 +1035,7 @@ fn tool_snapshot(tree: &Tree, base: &str) -> Value {
 }
 
 // First selector match handle (or None), for accessor tools.
-fn first(tree: &Tree, args: &Value) -> Result<Option<u32>, String> {
+fn first(tree: &Tree, args: &Value) -> Result<Option<Handle>, String> {
     let sel = arg_str(args, "selector").ok_or("missing 'selector'")?;
     Ok(tree.query_selector(sel))
 }
@@ -1052,7 +1053,7 @@ fn aria_snapshot_body(tree: &Tree) -> String {
     }
 }
 
-fn tool_query(tree: &Tree, root: u32, args: &Value) -> Result<Value, String> {
+fn tool_query(tree: &Tree, root: Handle, args: &Value) -> Result<Value, String> {
     let selector = arg_str(args, "selector").ok_or("query: missing 'selector'")?;
     let ty = match arg_str(args, "type") {
         Some("css") => QueryType::Css,
@@ -1075,7 +1076,7 @@ fn tool_get_by(tree: &Tree, args: &Value) -> Result<Value, String> {
     };
     let out: Vec<Value> = hits
         .iter()
-        .map(|&h| json!({ "node": h, "text": view::text(tree, h) }))
+        .map(|&h| json!({ "node": h.raw(), "text": view::text(tree, h) }))
         .collect();
     Ok(json!(out))
 }

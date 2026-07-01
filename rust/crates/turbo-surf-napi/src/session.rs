@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use std::sync::mpsc::{sync_channel, Sender, SyncSender};
 use std::thread;
 use turbo_dom_parser::rtdom::serialize::serialize_inner;
+use turbo_dom_parser::rtdom::tree::Handle;
 use turbo_dom_parser::rtdom::Tree;
 use turbo_surf_core::cookies::CookieJar;
 use turbo_surf_core::net::{fetch_html, FetchOptions};
@@ -182,7 +183,7 @@ fn read(st: &State, tool: &str, args: &Value) -> std::result::Result<String, Str
     }
 }
 
-fn read_query(t: &Tree, root: u32, args: &Value) -> std::result::Result<String, String> {
+fn read_query(t: &Tree, root: Handle, args: &Value) -> std::result::Result<String, String> {
     let selector = arg(args, "selector").ok_or("query: missing selector")?;
     let ty = match arg(args, "type") {
         Some("css") => view::QueryType::Css,

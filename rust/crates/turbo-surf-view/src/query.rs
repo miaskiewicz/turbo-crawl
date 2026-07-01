@@ -6,6 +6,7 @@
 use crate::text::text;
 use crate::xpath::{evaluate, XPath};
 use turbo_dom_parser::rtdom::serialize::serialize_outer;
+use turbo_dom_parser::rtdom::tree::Handle;
 use turbo_dom_parser::rtdom::Tree;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -19,10 +20,22 @@ pub enum QueryType {
 /// `value` carries the attribute string and `text` mirrors it.
 #[derive(Debug, PartialEq, serde::Serialize)]
 pub struct Match {
-    pub node: Option<u32>,
+    #[serde(serialize_with = "serialize_handle_opt")]
+    pub node: Option<Handle>,
     pub html: Option<String>,
     pub text: String,
     pub value: Option<String>,
+}
+
+// Opaque handle → raw u32 index on the JSON wire (preserves the pre-0.4 format).
+fn serialize_handle_opt<S: serde::Serializer>(
+    h: &Option<Handle>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    match h {
+        Some(h) => s.serialize_some(&h.raw()),
+        None => s.serialize_none(),
+    }
 }
 
 fn looks_like_xpath(selector: &str) -> bool {
@@ -38,7 +51,7 @@ fn resolve_type(selector: &str, ty: QueryType) -> QueryType {
     }
 }
 
-fn describe(tree: &Tree, h: u32) -> Match {
+fn describe(tree: &Tree, h: Handle) -> Match {
     Match {
         node: Some(h),
         html: Some(serialize_outer(tree, h)),
@@ -47,7 +60,7 @@ fn describe(tree: &Tree, h: u32) -> Match {
     }
 }
 
-fn css_results(tree: &Tree, root: u32, selector: &str) -> Vec<Match> {
+fn css_results(tree: &Tree, root: Handle, selector: &str) -> Vec<Match> {
     let _ = root; // turbo-dom query is document-scoped (matches the JS default)
     tree.query_selector_all(selector)
         .iter()
@@ -55,7 +68,7 @@ fn css_results(tree: &Tree, root: u32, selector: &str) -> Vec<Match> {
         .collect()
 }
 
-fn xpath_results(tree: &Tree, root: u32, selector: &str) -> Vec<Match> {
+fn xpath_results(tree: &Tree, root: Handle, selector: &str) -> Vec<Match> {
     match evaluate(tree, root, selector) {
         XPath::Values(values) => values
             .into_iter()
@@ -71,7 +84,7 @@ fn xpath_results(tree: &Tree, root: u32, selector: &str) -> Vec<Match> {
 }
 
 /// Query `tree` (rooted at `root`) by CSS or XPath.
-pub fn query(tree: &Tree, root: u32, selector: &str, ty: QueryType) -> Vec<Match> {
+pub fn query(tree: &Tree, root: Handle, selector: &str, ty: QueryType) -> Vec<Match> {
     match resolve_type(selector, ty) {
         QueryType::Xpath => xpath_results(tree, root, selector),
         _ => css_results(tree, root, selector),
@@ -79,7 +92,7 @@ pub fn query(tree: &Tree, root: u32, selector: &str, ty: QueryType) -> Vec<Match
 }
 
 /// First match, or `None`.
-pub fn query_first(tree: &Tree, root: u32, selector: &str, ty: QueryType) -> Option<Match> {
+pub fn query_first(tree: &Tree, root: Handle, selector: &str, ty: QueryType) -> Option<Match> {
     query(tree, root, selector, ty).into_iter().next()
 }
 

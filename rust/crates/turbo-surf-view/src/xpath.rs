@@ -8,6 +8,7 @@
 
 use std::collections::HashSet;
 use turbo_dom_parser::rtdom::Tree;
+use turbo_dom_parser::rtdom::tree::Handle;
 
 const ELEMENT_NODE: u8 = 1;
 
@@ -42,7 +43,7 @@ struct Step {
 /// Result of an XPath evaluation: matched nodes, or attribute string values for
 /// a trailing `@attr` step.
 pub enum XPath {
-    Nodes(Vec<u32>),
+    Nodes(Vec<Handle>),
     Values(Vec<String>),
 }
 
@@ -223,14 +224,14 @@ fn compile_pred(body: &str) -> Pred {
 
 // --- evaluation -------------------------------------------------------------
 
-fn read_term(tree: &Tree, h: u32, term: &Term) -> Option<String> {
+fn read_term(tree: &Tree, h: Handle, term: &Term) -> Option<String> {
     match term {
         Term::Text => Some(tree.text_content(h).trim().to_string()),
         Term::Attr(name) => tree.get_attribute(h, name).map(str::to_string),
     }
 }
 
-fn pred_matches(tree: &Tree, h: u32, pred: &Pred) -> bool {
+fn pred_matches(tree: &Tree, h: Handle, pred: &Pred) -> bool {
     match pred {
         Pred::Eq(t, want) => read_term(tree, h, t).as_deref() == Some(want.as_str()),
         Pred::Contains(t, want) => read_term(tree, h, t).is_some_and(|v| v.contains(want)),
@@ -242,23 +243,23 @@ fn pred_matches(tree: &Tree, h: u32, pred: &Pred) -> bool {
     }
 }
 
-fn element_children(tree: &Tree, ctx: u32) -> Vec<u32> {
+fn element_children(tree: &Tree, ctx: Handle) -> Vec<Handle> {
     tree.children(ctx)
         .into_iter()
-        .filter(|&c| tree.node_type(c) == ELEMENT_NODE)
+        .filter(|&c| tree.node_type_id(c) == ELEMENT_NODE)
         .collect()
 }
 
-fn tag_matches(tree: &Tree, h: u32, test: &str) -> bool {
+fn tag_matches(tree: &Tree, h: Handle, test: &str) -> bool {
     test == "*" || tree.tag_name(h).as_deref() == Some(&test.to_ascii_uppercase())
 }
 
-fn candidates(tree: &Tree, ctx: u32, step: &Step) -> Vec<u32> {
+fn candidates(tree: &Tree, ctx: Handle, step: &Step) -> Vec<Handle> {
     match step.axis {
         Axis::Descendant => tree
             .descendants(ctx)
             .into_iter()
-            .filter(|&h| tree.node_type(h) == ELEMENT_NODE && tag_matches(tree, h, &step.test))
+            .filter(|&h| tree.node_type_id(h) == ELEMENT_NODE && tag_matches(tree, h, &step.test))
             .collect(),
         Axis::Child => element_children(tree, ctx)
             .into_iter()
@@ -267,7 +268,7 @@ fn candidates(tree: &Tree, ctx: u32, step: &Step) -> Vec<u32> {
     }
 }
 
-fn apply_predicate(tree: &Tree, nodes: Vec<u32>, pred: &Pred) -> Vec<u32> {
+fn apply_predicate(tree: &Tree, nodes: Vec<Handle>, pred: &Pred) -> Vec<Handle> {
     if let Pred::Pos(n) = pred {
         return nodes.get(n.wrapping_sub(1)).copied().into_iter().collect();
     }
@@ -277,12 +278,12 @@ fn apply_predicate(tree: &Tree, nodes: Vec<u32>, pred: &Pred) -> Vec<u32> {
         .collect()
 }
 
-fn dedupe(nodes: Vec<u32>) -> Vec<u32> {
+fn dedupe(nodes: Vec<Handle>) -> Vec<Handle> {
     let mut seen = HashSet::new();
     nodes.into_iter().filter(|&h| seen.insert(h)).collect()
 }
 
-fn run_step(tree: &Tree, ctx: &[u32], step: &Step) -> Vec<u32> {
+fn run_step(tree: &Tree, ctx: &[Handle], step: &Step) -> Vec<Handle> {
     let mut matched = Vec::new();
     for &c in ctx {
         matched.extend(candidates(tree, c, step));
@@ -295,7 +296,7 @@ fn run_step(tree: &Tree, ctx: &[u32], step: &Step) -> Vec<u32> {
 }
 
 /// Evaluate an XPath subset against `root`.
-pub fn evaluate(tree: &Tree, root: u32, expr: &str) -> XPath {
+pub fn evaluate(tree: &Tree, root: Handle, expr: &str) -> XPath {
     let steps = split_steps(expr.trim());
     let mut ctx = vec![root];
     for step in &steps {
@@ -315,7 +316,7 @@ pub fn evaluate(tree: &Tree, root: u32, expr: &str) -> XPath {
 mod tests {
     use super::*;
 
-    fn nodes(tree: &Tree, expr: &str) -> Vec<u32> {
+    fn nodes(tree: &Tree, expr: &str) -> Vec<Handle> {
         match evaluate(tree, tree.root(), expr) {
             XPath::Nodes(n) => n,
             XPath::Values(_) => panic!("expected nodes"),

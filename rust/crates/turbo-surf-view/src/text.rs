@@ -4,6 +4,7 @@
 //! preserved. Raw reading text for embeddings/summarization (no markdown syntax).
 
 use turbo_dom_parser::rtdom::Tree;
+use turbo_dom_parser::rtdom::tree::Handle;
 
 const ELEMENT_NODE: u8 = 1;
 const TEXT_NODE: u8 = 3;
@@ -88,7 +89,7 @@ impl Acc {
 
 /// Render the subtree at `root` (or the document `<body>` when present) to
 /// structured plain text.
-pub fn text(tree: &Tree, root: u32) -> String {
+pub fn text(tree: &Tree, root: Handle) -> String {
     // Whole-document → prefer <body>; a specific element → render it directly.
     let start = if root == tree.root() {
         tree.query_selector("body").unwrap_or(root)
@@ -104,8 +105,8 @@ pub fn text(tree: &Tree, root: u32) -> String {
     acc.lines.join("\n")
 }
 
-fn walk(tree: &Tree, h: u32, acc: &mut Acc) {
-    match tree.node_type(h) {
+fn walk(tree: &Tree, h: Handle, acc: &mut Acc) {
+    match tree.node_type_id(h) {
         TEXT_NODE => acc
             .cur
             .push_str(&collapse(&tree.node_value(h).unwrap_or_default())),
@@ -114,7 +115,7 @@ fn walk(tree: &Tree, h: u32, acc: &mut Acc) {
     }
 }
 
-fn walk_element(tree: &Tree, h: u32, acc: &mut Acc) {
+fn walk_element(tree: &Tree, h: Handle, acc: &mut Acc) {
     let tag = tree.tag_name(h).unwrap_or_default();
     if SKIP.contains(&tag.as_str()) {
         return;
@@ -138,7 +139,7 @@ fn walk_element(tree: &Tree, h: u32, acc: &mut Acc) {
 }
 
 // Tags that end the current line without child recursion. Returns true if handled.
-fn leaf_element(tree: &Tree, h: u32, tag: &str, acc: &mut Acc) -> bool {
+fn leaf_element(tree: &Tree, h: Handle, tag: &str, acc: &mut Acc) -> bool {
     match tag {
         "BR" | "HR" => acc.flush(),
         "PRE" => {
