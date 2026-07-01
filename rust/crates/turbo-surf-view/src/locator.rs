@@ -7,6 +7,7 @@
 use crate::aria::{accessible_name, role_of, text_of};
 use std::collections::HashSet;
 use turbo_dom_parser::rtdom::Tree;
+use turbo_dom_parser::rtdom::tree::Handle;
 
 const ELEMENT_NODE: u8 = 1;
 
@@ -48,11 +49,11 @@ pub fn text_match(value: &str, want: &str, mode: TextMode) -> bool {
     }
 }
 
-fn all_elements(tree: &Tree) -> Vec<u32> {
+fn all_elements(tree: &Tree) -> Vec<Handle> {
     tree.query_selector_all("*").iter().copied().collect()
 }
 
-fn push_unique(out: &mut Vec<u32>, seen: &mut HashSet<u32>, h: u32) {
+fn push_unique(out: &mut Vec<Handle>, seen: &mut HashSet<Handle>, h: Handle) {
     if seen.insert(h) {
         out.push(h);
     }
@@ -60,7 +61,7 @@ fn push_unique(out: &mut Vec<u32>, seen: &mut HashSet<u32>, h: u32) {
 
 /// `getByRole(role, name?)` — elements whose resolved ARIA role equals `role`,
 /// optionally filtered by accessible-name match.
-pub fn by_role(tree: &Tree, role: &str, name: Option<(&str, TextMode)>) -> Vec<u32> {
+pub fn by_role(tree: &Tree, role: &str, name: Option<(&str, TextMode)>) -> Vec<Handle> {
     all_elements(tree)
         .into_iter()
         .filter(|&h| role_of(tree, h) == role)
@@ -71,16 +72,16 @@ pub fn by_role(tree: &Tree, role: &str, name: Option<(&str, TextMode)>) -> Vec<u
         .collect()
 }
 
-fn has_matching_child(tree: &Tree, h: u32, want: &str, mode: TextMode) -> bool {
+fn has_matching_child(tree: &Tree, h: Handle, want: &str, mode: TextMode) -> bool {
     tree.descendants(h)
         .into_iter()
-        .filter(|&c| tree.node_type(c) == ELEMENT_NODE)
+        .filter(|&c| tree.node_type_id(c) == ELEMENT_NODE)
         .any(|c| text_match(&text_of(tree, c), want, mode))
 }
 
 /// `getByText(want)` — innermost elements whose text matches and which have no
 /// matching descendant (so the deepest holder wins).
-pub fn by_text(tree: &Tree, want: &str, mode: TextMode) -> Vec<u32> {
+pub fn by_text(tree: &Tree, want: &str, mode: TextMode) -> Vec<Handle> {
     all_elements(tree)
         .into_iter()
         .filter(|&h| {
@@ -90,7 +91,7 @@ pub fn by_text(tree: &Tree, want: &str, mode: TextMode) -> Vec<u32> {
 }
 
 /// `getByAttr(attr, want)` — elements with `attr` whose value matches.
-pub fn by_attr_text(tree: &Tree, attr: &str, want: &str, mode: TextMode) -> Vec<u32> {
+pub fn by_attr_text(tree: &Tree, attr: &str, want: &str, mode: TextMode) -> Vec<Handle> {
     tree.query_selector_all(&format!("[{attr}]"))
         .iter()
         .copied()
@@ -102,7 +103,7 @@ pub fn by_attr_text(tree: &Tree, attr: &str, want: &str, mode: TextMode) -> Vec<
 }
 
 // Controls a <label> labels: for=/id, aria-labelledby back-refs, wrapped input.
-fn collect_label_targets(tree: &Tree, label: u32, out: &mut Vec<u32>, seen: &mut HashSet<u32>) {
+fn collect_label_targets(tree: &Tree, label: Handle, out: &mut Vec<Handle>, seen: &mut HashSet<Handle>) {
     if let Some(for_id) = tree.get_attribute(label, "for") {
         if let Some(t) = tree.get_element_by_id(for_id) {
             push_unique(out, seen, t);
@@ -121,7 +122,7 @@ fn collect_label_targets(tree: &Tree, label: u32, out: &mut Vec<u32>, seen: &mut
     }
 }
 
-fn first_descendant_control(tree: &Tree, h: u32) -> Option<u32> {
+fn first_descendant_control(tree: &Tree, h: Handle) -> Option<Handle> {
     tree.descendants(h).into_iter().find(|&c| {
         matches!(
             tree.tag_name(c).as_deref(),
@@ -132,7 +133,7 @@ fn first_descendant_control(tree: &Tree, h: u32) -> Option<u32> {
 
 /// `getByLabel(want)` — controls labelled by a matching `<label>` (for=/wrapped/
 /// aria-labelledby), plus controls whose own `aria-label` matches.
-pub fn by_label(tree: &Tree, want: &str, mode: TextMode) -> Vec<u32> {
+pub fn by_label(tree: &Tree, want: &str, mode: TextMode) -> Vec<Handle> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for label in tree.query_selector_all("label").iter() {

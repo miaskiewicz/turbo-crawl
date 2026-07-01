@@ -2,9 +2,10 @@
 //! no-layout heuristics for getByRole/getByText resolution and the agent view.
 
 use turbo_dom_parser::rtdom::Tree;
+use turbo_dom_parser::rtdom::tree::Handle;
 
 /// Collapsed, trimmed text content (the `dom-ops` `textOf` helper).
-pub fn text_of(tree: &Tree, h: u32) -> String {
+pub fn text_of(tree: &Tree, h: Handle) -> String {
     tree.text_content(h)
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -33,7 +34,7 @@ pub fn implicit_role(tag: &str, type_attr: Option<&str>) -> &'static str {
 }
 
 /// Resolved role: explicit `role` attribute, else the implicit tag/type role.
-pub fn role_of(tree: &Tree, h: u32) -> String {
+pub fn role_of(tree: &Tree, h: Handle) -> String {
     if let Some(explicit) = tree.get_attribute(h, "role") {
         return explicit.to_string();
     }
@@ -49,7 +50,7 @@ fn trimmed(s: Option<&str>) -> String {
 }
 
 /// Accessible name: aria-label > text > placeholder > value > title.
-pub fn accessible_name(tree: &Tree, h: u32) -> String {
+pub fn accessible_name(tree: &Tree, h: Handle) -> String {
     let candidates = [
         trimmed(tree.get_attribute(h, "aria-label")),
         tree.text_content(h).trim().to_string(),
@@ -63,7 +64,7 @@ pub fn accessible_name(tree: &Tree, h: u32) -> String {
         .unwrap_or_default()
 }
 
-fn id_list(tree: &Tree, h: u32, attr: &str) -> Vec<String> {
+fn id_list(tree: &Tree, h: Handle, attr: &str) -> Vec<String> {
     tree.get_attribute(h, attr)
         .unwrap_or("")
         .split_whitespace()
@@ -81,7 +82,7 @@ fn resolve_ids(tree: &Tree, ids: &[String]) -> String {
 }
 
 /// Accessible description: aria-describedby targets, else the `title` attribute.
-pub fn accessible_description(tree: &Tree, h: u32) -> String {
+pub fn accessible_description(tree: &Tree, h: Handle) -> String {
     let ids = id_list(tree, h, "aria-describedby");
     if !ids.is_empty() {
         return resolve_ids(tree, &ids);
@@ -90,7 +91,7 @@ pub fn accessible_description(tree: &Tree, h: u32) -> String {
 }
 
 /// Accessible error message: aria-errormessage targets, only when aria-invalid.
-pub fn accessible_error_message(tree: &Tree, h: u32) -> String {
+pub fn accessible_error_message(tree: &Tree, h: Handle) -> String {
     if tree.get_attribute(h, "aria-invalid") != Some("true") {
         return String::new();
     }
@@ -101,7 +102,7 @@ pub fn accessible_error_message(tree: &Tree, h: u32) -> String {
 mod tests {
     use super::*;
 
-    fn first(tree: &Tree, sel: &str) -> u32 {
+    fn first(tree: &Tree, sel: &str) -> Handle {
         tree.query_selector(sel).unwrap()
     }
 

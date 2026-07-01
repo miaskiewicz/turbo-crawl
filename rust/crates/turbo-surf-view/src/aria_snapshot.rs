@@ -6,6 +6,7 @@
 use crate::ax::{ax_subtree, AxNode};
 use regex::Regex;
 use turbo_dom_parser::rtdom::Tree;
+use turbo_dom_parser::rtdom::tree::Handle;
 
 const GENERIC: &str = "generic";
 
@@ -31,7 +32,7 @@ fn serialize(node: &AxNode, depth: usize, lines: &mut Vec<String>) {
 }
 
 /// Indented YAML-ish ARIA snapshot text for the subtree rooted at `h`.
-pub fn aria_snapshot(tree: &Tree, h: u32) -> String {
+pub fn aria_snapshot(tree: &Tree, h: Handle) -> String {
     let mut lines = Vec::new();
     if let Some(node) = ax_subtree(tree, h) {
         serialize(&node, 0, &mut lines);
@@ -141,7 +142,7 @@ fn is_subsequence(want: &[Expected], have: &[Flat]) -> bool {
 }
 
 /// True if `expected` is an ordered role/name subset of `h`'s ax subtree.
-pub fn matches_aria_snapshot(tree: &Tree, h: u32, expected: &str) -> bool {
+pub fn matches_aria_snapshot(tree: &Tree, h: Handle, expected: &str) -> bool {
     let mut have = Vec::new();
     if let Some(node) = ax_subtree(tree, h) {
         flatten(&node, &mut have);
@@ -153,7 +154,7 @@ pub fn matches_aria_snapshot(tree: &Tree, h: u32, expected: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn first(tree: &Tree, sel: &str) -> u32 {
+    fn first(tree: &Tree, sel: &str) -> Handle {
         tree.query_selector(sel).unwrap()
     }
 

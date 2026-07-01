@@ -8,13 +8,14 @@
 //! modeled in Lane A; `css_value` is available via the cascade.
 
 use turbo_dom_parser::rtdom::cascade::{computed_style, get_property_value};
+use turbo_dom_parser::rtdom::tree::Handle;
 use turbo_dom_parser::rtdom::{DocumentExt, Tree};
 
 const ELEMENT_NODE: u8 = 1;
 const EDITABLE_TAGS: &[&str] = &["INPUT", "TEXTAREA", "SELECT"];
 
 /// Collapsed, trimmed text content.
-pub fn text_of(tree: &Tree, h: u32) -> String {
+pub fn text_of(tree: &Tree, h: Handle) -> String {
     tree.text_content(h)
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -22,21 +23,21 @@ pub fn text_of(tree: &Tree, h: u32) -> String {
 }
 
 /// `value` attribute (the filled value), or "".
-pub fn input_value_of(tree: &Tree, h: u32) -> String {
+pub fn input_value_of(tree: &Tree, h: Handle) -> String {
     tree.get_attribute(h, "value").unwrap_or("").to_string()
 }
 
 /// Not `disabled`.
-pub fn is_enabled(tree: &Tree, h: u32) -> bool {
+pub fn is_enabled(tree: &Tree, h: Handle) -> bool {
     tree.get_attribute(h, "disabled").is_none()
 }
 
 /// Has the `checked` attribute (static model of `.checked`).
-pub fn is_checked(tree: &Tree, h: u32) -> bool {
+pub fn is_checked(tree: &Tree, h: Handle) -> bool {
     tree.get_attribute(h, "checked").is_some()
 }
 
-fn is_content_editable(tree: &Tree, h: u32) -> bool {
+fn is_content_editable(tree: &Tree, h: Handle) -> bool {
     matches!(
         tree.get_attribute(h, "contenteditable"),
         Some("") | Some("true")
@@ -45,7 +46,7 @@ fn is_content_editable(tree: &Tree, h: u32) -> bool {
 
 /// Editable per Playwright: contenteditable, or an enabled, non-readonly
 /// input/textarea/select.
-pub fn is_editable(tree: &Tree, h: u32) -> bool {
+pub fn is_editable(tree: &Tree, h: Handle) -> bool {
     if is_content_editable(tree, h) {
         return true;
     }
@@ -56,22 +57,22 @@ pub fn is_editable(tree: &Tree, h: u32) -> bool {
 }
 
 /// `toBeEmpty`: no text and no element children.
-pub fn is_empty(tree: &Tree, h: u32) -> bool {
+pub fn is_empty(tree: &Tree, h: Handle) -> bool {
     text_of(tree, h).is_empty()
         && !tree
             .children(h)
             .into_iter()
-            .any(|c| tree.node_type(c) == ELEMENT_NODE)
+            .any(|c| tree.node_type_id(c) == ELEMENT_NODE)
 }
 
 // An <option>'s submitted value: `value` attr, else its label text.
-fn option_value(tree: &Tree, opt: u32) -> String {
+fn option_value(tree: &Tree, opt: Handle) -> String {
     tree.get_attribute(opt, "value")
         .map_or_else(|| text_of(tree, opt), str::to_string)
 }
 
 /// Selected option values of a `<select>` (those with the `selected` attr).
-pub fn selected_values(tree: &Tree, select: u32) -> Vec<String> {
+pub fn selected_values(tree: &Tree, select: Handle) -> Vec<String> {
     tree.node(select)
         .query_selector_all("option")
         .iter()
@@ -81,12 +82,12 @@ pub fn selected_values(tree: &Tree, select: u32) -> Vec<String> {
 }
 
 /// Computed CSS value (real cascade), backing `toHaveCSS`.
-pub fn css_value(tree: &Tree, h: u32, name: &str) -> String {
+pub fn css_value(tree: &Tree, h: Handle, name: &str) -> String {
     get_property_value(&computed_style(tree, h), name)
 }
 
 /// Set/clear the `checked` attribute.
-pub fn set_checked(tree: &mut Tree, h: u32, on: bool) {
+pub fn set_checked(tree: &mut Tree, h: Handle, on: bool) {
     if on {
         tree.set_attribute(h, "checked", "");
     } else {
@@ -96,8 +97,8 @@ pub fn set_checked(tree: &mut Tree, h: u32, on: bool) {
 
 /// Select `<option>`(s) of a `<select>` by value or visible label. Returns true
 /// if any matched.
-pub fn select_option(tree: &mut Tree, select: u32, value: &str) -> bool {
-    let opts: Vec<u32> = tree
+pub fn select_option(tree: &mut Tree, select: Handle, value: &str) -> bool {
+    let opts: Vec<Handle> = tree
         .node(select)
         .query_selector_all("option")
         .iter()
@@ -112,7 +113,7 @@ pub fn select_option(tree: &mut Tree, select: u32, value: &str) -> bool {
     matched
 }
 
-fn set_checked_attr(tree: &mut Tree, h: u32, attr: &str, on: bool) {
+fn set_checked_attr(tree: &mut Tree, h: Handle, attr: &str, on: bool) {
     if on {
         tree.set_attribute(h, attr, "");
     } else {
@@ -124,7 +125,7 @@ fn set_checked_attr(tree: &mut Tree, h: u32, attr: &str, on: bool) {
 mod tests {
     use super::*;
 
-    fn first(tree: &Tree, sel: &str) -> u32 {
+    fn first(tree: &Tree, sel: &str) -> Handle {
         tree.query_selector(sel).unwrap()
     }
 

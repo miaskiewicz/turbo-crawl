@@ -10,11 +10,12 @@
 //! handled separately in `ax.rs` for role/name queries.
 
 use turbo_dom_parser::rtdom::cascade::{computed_style, get_property_value};
+use turbo_dom_parser::rtdom::tree::Handle;
 use turbo_dom_parser::rtdom::Tree;
 
 const ELEMENT_NODE: u8 = 1;
 
-fn is_hidden_input(tree: &Tree, h: u32) -> bool {
+fn is_hidden_input(tree: &Tree, h: Handle) -> bool {
     tree.tag_name(h).as_deref() == Some("INPUT")
         && tree
             .get_attribute(h, "type")
@@ -23,15 +24,15 @@ fn is_hidden_input(tree: &Tree, h: u32) -> bool {
             == Some("hidden")
 }
 
-fn computed(tree: &Tree, h: u32, prop: &str) -> String {
+fn computed(tree: &Tree, h: Handle, prop: &str) -> String {
     get_property_value(&computed_style(tree, h), prop)
 }
 
 // display does not inherit → walk the ancestor chain.
-fn has_display_none_ancestor(tree: &Tree, h: u32) -> bool {
+fn has_display_none_ancestor(tree: &Tree, h: Handle) -> bool {
     let mut node = Some(h);
     while let Some(n) = node {
-        if tree.node_type(n) != ELEMENT_NODE {
+        if tree.node_type_id(n) != ELEMENT_NODE {
             break;
         }
         if computed(tree, n, "display") == "none" {
@@ -48,10 +49,10 @@ fn has_display_none_ancestor(tree: &Tree, h: u32) -> bool {
 // forever even though the element is, to a user, gone. Treat effective opacity 0 as
 // hidden, matching the real-browser OUTCOME (the modal unmounts there). A mid-enter modal
 // is opacity:1 once ENTERED, so open modals stay visible.
-fn has_opacity_zero_ancestor(tree: &Tree, h: u32) -> bool {
+fn has_opacity_zero_ancestor(tree: &Tree, h: Handle) -> bool {
     let mut node = Some(h);
     while let Some(n) = node {
-        if tree.node_type(n) != ELEMENT_NODE {
+        if tree.node_type_id(n) != ELEMENT_NODE {
             break;
         }
         let op = computed(tree, n, "opacity");
@@ -70,7 +71,7 @@ fn has_opacity_zero_ancestor(tree: &Tree, h: u32) -> bool {
 
 /// Whether element `h` is (declared-)visible. Cheap attribute signals are tested
 /// before any cascade work.
-pub fn is_visible(tree: &Tree, h: u32) -> bool {
+pub fn is_visible(tree: &Tree, h: Handle) -> bool {
     if tree.get_attribute(h, "hidden").is_some() {
         return false;
     }
@@ -91,7 +92,7 @@ pub fn is_visible(tree: &Tree, h: u32) -> bool {
 mod tests {
     use super::*;
 
-    fn first(tree: &Tree, sel: &str) -> u32 {
+    fn first(tree: &Tree, sel: &str) -> Handle {
         tree.query_selector(sel).unwrap()
     }
 

@@ -15,7 +15,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use turbo_dom_parser::rtdom::node_ref::DocumentExt;
-use turbo_dom_parser::rtdom::tree::{Handle, Tree};
+use turbo_dom_parser::rtdom::tree::{Handle, Namespace, Tree};
 use turbo_dom_parser::rtdom::NodeRef;
 
 /// The all-Rust DOM (rtdom) is now the ONLY DOM environment — the JS turbo-dom bootstrap
@@ -135,7 +135,7 @@ thread_local! {
 fn handle_of(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> Option<Handle> {
     let f = obj.get_internal_field(scope, 0)?;
     let v = v8::Local::<v8::Value>::try_from(f).ok()?;
-    v.uint32_value(scope).map(|x| x as Handle)
+    v.uint32_value(scope).map(Handle::from_raw)
 }
 
 /// Wrap a handle as a JS node object (cached for identity).
@@ -146,7 +146,7 @@ fn wrap<'s>(scope: &mut v8::PinScope<'s, '_>, handle: Handle) -> v8::Local<'s, v
     let tmpl_g = DOM.with(|d| d.borrow().as_ref().unwrap().el_template.clone());
     let tmpl = v8::Local::new(scope, &tmpl_g);
     let obj = tmpl.new_instance(scope).unwrap();
-    let h = v8::Integer::new_from_unsigned(scope, handle);
+    let h = v8::Integer::new_from_unsigned(scope, handle.raw());
     obj.set_internal_field(0, h.into());
     let g = v8::Global::new(scope, obj);
     DOM.with(|d| {
@@ -486,7 +486,7 @@ fn get_outer_html(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8
 fn get_children(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8::PropertyCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
     let Some(h) = handle_of(scope, args.holder()) else { return };
     let kids: Vec<Handle> = with_tree(|t| {
-        t.children(h).into_iter().filter(|&c| t.node_type(c) == 1).collect()
+        t.children(h).into_iter().filter(|&c| t.node_type_id(c) == 1).collect()
     }).unwrap_or_default();
     let arr = v8::Array::new(scope, kids.len() as i32);
     for (i, k) in kids.into_iter().enumerate() {
@@ -499,7 +499,7 @@ fn get_children(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8::
 
 fn get_parent_element(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8::PropertyCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
     let Some(h) = handle_of(scope, args.holder()) else { return };
-    let p = with_tree(|t| NodeRef::new(t, h).parent().map(|x| x.handle()).filter(|&ph| t.node_type(ph) == 1)).flatten();
+    let p = with_tree(|t| NodeRef::new(t, h).parent().map(|x| x.handle()).filter(|&ph| t.node_type_id(ph) == 1)).flatten();
     let v = wrap_opt(scope, p);
     rv.set(v);
 }
@@ -617,7 +617,7 @@ fn doc_create_element_ns(scope: &mut v8::PinScope, args: v8::FunctionCallbackArg
     // Map the namespace URI to rtdom's ns id (svg=1, math=2, html=0) so SVG/MathML elements keep
     // their namespace + case-preserved attributes (e.g. `viewBox`), unlike HTML which lowercases.
     let ns_id: u8 = if ns.contains("svg") { 1 } else if ns.contains("mathml") || ns.contains("math") { 2 } else { 0 };
-    let made = with_tree_mut(|t| if ns_id == 0 { t.create_element(&tag) } else { t.create_element_ns(&tag, ns_id) });
+    let made = with_tree_mut(|t| if ns_id == 0 { t.create_element(&tag) } else { t.create_element_ns(&tag, Namespace::from_id(ns_id)) });
     if let Some(h) = made {
         let node = wrap(scope, h);
         rv.set(node.into());
@@ -639,7 +639,7 @@ fn doc_create_comment(scope: &mut v8::PinScope, args: v8::FunctionCallbackArgume
 
 /// recursively clone a subtree, returning the new root handle.
 fn clone_subtree(t: &mut Tree, h: Handle, deep: bool) -> Handle {
-    let nt = t.node_type(h);
+    let nt = t.node_type_id(h);
     let new_h = match nt {
         3 => t.create_text_node(&t.node_value(h).unwrap_or_default()),
         8 => t.create_comment(&t.node_value(h).unwrap_or_default()),
@@ -779,7 +779,7 @@ fn el_closest(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut
     let found = with_tree(|t| {
         let mut cur = Some(h);
         while let Some(c) = cur {
-            if t.node_type(c) == 1 && t.matches(c, &sel) {
+            if t.node_type_id(c) == 1 && t.matches(c, &sel) {
                 return Some(c);
             }
             cur = NodeRef::new(t, c).parent().map(|p| p.handle());
@@ -910,7 +910,7 @@ fn get_is_content_editable(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>,
             Some("false") => { editable = false; break; }
             _ => {}
         }
-        match with_tree(|t| NodeRef::new(t, h).parent().map(|p| p.handle()).filter(|&ph| t.node_type(ph) == 1)).flatten() {
+        match with_tree(|t| NodeRef::new(t, h).parent().map(|p| p.handle()).filter(|&ph| t.node_type_id(ph) == 1)).flatten() {
             Some(p) => h = p,
             None => break,
         }
@@ -1101,7 +1101,7 @@ enum CheckKind { Checkbox, Radio }
 /// `<input type=checkbox|radio>` → its kind, else None (drives the click toggle default action).
 fn checkable_kind(h: Handle) -> Option<CheckKind> {
     with_tree(|t| {
-        if t.node_type(h) != 1 || t.tag_name(h).unwrap_or_default().to_ascii_uppercase() != "INPUT" {
+        if t.node_type_id(h) != 1 || t.tag_name(h).unwrap_or_default().to_ascii_uppercase() != "INPUT" {
             return None;
         }
         match t.get_attribute(h, "type").map(|s| s.to_ascii_lowercase()).as_deref() {
@@ -1116,7 +1116,7 @@ fn checkable_kind(h: Handle) -> Option<CheckKind> {
 /// A `<button>` (type submit or unset — submit is the default) or `<input type=submit>`.
 fn is_submit_control(h: Handle) -> bool {
     with_tree(|t| {
-        if t.node_type(h) != 1 {
+        if t.node_type_id(h) != 1 {
             return false;
         }
         let tag = t.tag_name(h).unwrap_or_default().to_ascii_uppercase();
@@ -1195,7 +1195,7 @@ fn set_prop(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>, name: &str, va
 /// treat it as a DOM node, not a plain Object they'd recurse into and crash on.
 fn get_constructor(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8::PropertyCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
     let Some(h) = handle_of(scope, args.holder()) else { return };
-    let (nt, tag) = with_tree(|t| (t.node_type(h), t.tag_name(h))).unwrap_or((1, None));
+    let (nt, tag) = with_tree(|t| (t.node_type_id(h), t.tag_name(h))).unwrap_or((1, None));
     let cname = match nt {
         3 => "Text",
         8 => "Comment",
@@ -1264,7 +1264,7 @@ fn get_constructor(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v
 
 fn get_node_type(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8::PropertyCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
     let Some(h) = handle_of(scope, args.holder()) else { return };
-    let nt = with_tree(|t| t.node_type(h)).unwrap_or(1);
+    let nt = with_tree(|t| t.node_type_id(h)).unwrap_or(1);
     rv.set(v8::Integer::new(scope, nt as i32).into());
 }
 
@@ -1272,7 +1272,7 @@ fn get_node_type(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8:
 /// `.replace` on these, so they must be strings (not undefined) for text nodes.
 fn get_node_data(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8::PropertyCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
     let Some(h) = handle_of(scope, args.holder()) else { return };
-    let nt = with_tree(|t| t.node_type(h)).unwrap_or(1);
+    let nt = with_tree(|t| t.node_type_id(h)).unwrap_or(1);
     if nt == 3 || nt == 8 {
         let data = with_tree(|t| t.node_value(h)).flatten().unwrap_or_default();
         rv.set(v8::String::new(scope, &data).unwrap().into());
@@ -1298,7 +1298,7 @@ fn get_local_name(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8
 
 fn get_node_name(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8::PropertyCallbackArguments, mut rv: v8::ReturnValue<v8::Value>) {
     let Some(h) = handle_of(scope, args.holder()) else { return };
-    let (nt, tag) = with_tree(|t| (t.node_type(h), t.tag_name(h))).unwrap_or((1, None));
+    let (nt, tag) = with_tree(|t| (t.node_type_id(h), t.tag_name(h))).unwrap_or((1, None));
     let name = match nt {
         3 => "#text".to_string(),
         8 => "#comment".to_string(),
@@ -1363,7 +1363,7 @@ fn get_style(scope: &mut v8::PinScope, _name: v8::Local<v8::Name>, args: v8::Pro
     bind_method(scope, obj, "removeProperty", style_remove_property);
     // stash the element handle so the proxy set-trap can reflect to the `style` content attribute.
     if let Some(hk) = v8::String::new(scope, "__h") {
-        let hv = v8::Number::new(scope, h as f64);
+        let hv = v8::Number::new(scope, f64::from(h.raw()));
         obj.set(scope, hk.into(), hv.into());
     }
     // Wrap in a Proxy whose set-trap reflects every style mutation (React writes el.style.x = v) to
@@ -1399,7 +1399,7 @@ fn style_proxy_set(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments
     let h = v8::String::new(scope, "__h")
         .and_then(|k| target.get(scope, k.into()))
         .and_then(|v| v.number_value(scope))
-        .map(|n| n as Handle);
+        .map(|n| Handle::from_raw(n as u32));
     if let Some(h) = h {
         let css = serialize_style(scope, target);
         with_tree_mut(|t| { if css.is_empty() { t.remove_attribute(h, "style"); } else { t.set_attribute(h, "style", &css); } });

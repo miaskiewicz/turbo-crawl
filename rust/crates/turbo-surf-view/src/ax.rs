@@ -8,6 +8,7 @@
 
 use serde::Serialize;
 use turbo_dom_parser::rtdom::Tree;
+use turbo_dom_parser::rtdom::tree::Handle;
 
 const ELEMENT_NODE: u8 = 1;
 const SKIP: &[&str] = &[
@@ -63,7 +64,7 @@ fn input_role(ty: Option<&str>) -> Option<&'static str> {
     }
 }
 
-fn role_of(tree: &Tree, h: u32) -> Option<String> {
+fn role_of(tree: &Tree, h: Handle) -> Option<String> {
     if let Some(explicit) = tree.get_attribute(h, "role") {
         return Some(explicit.to_string());
     }
@@ -82,7 +83,7 @@ fn collapse(s: &str) -> String {
 }
 
 // aria-label > img alt > collapsed direct text.
-fn name_of(tree: &Tree, h: u32) -> String {
+fn name_of(tree: &Tree, h: Handle) -> String {
     if let Some(aria) = tree.get_attribute(h, "aria-label") {
         return aria.trim().to_string();
     }
@@ -96,7 +97,7 @@ fn name_of(tree: &Tree, h: u32) -> String {
     collapse(&tree.text_content(h))
 }
 
-fn selected_option_value(tree: &Tree, h: u32) -> Option<String> {
+fn selected_option_value(tree: &Tree, h: Handle) -> Option<String> {
     let opt = tree
         .query_selector_all("option")
         .iter()
@@ -108,7 +109,7 @@ fn selected_option_value(tree: &Tree, h: u32) -> Option<String> {
     )
 }
 
-fn is_descendant(tree: &Tree, ancestor: u32, h: u32) -> bool {
+fn is_descendant(tree: &Tree, ancestor: Handle, h: Handle) -> bool {
     let mut cur = tree.parent(h);
     while let Some(p) = cur {
         if p == ancestor {
@@ -119,7 +120,7 @@ fn is_descendant(tree: &Tree, ancestor: u32, h: u32) -> bool {
     false
 }
 
-fn value_of(tree: &Tree, h: u32) -> Option<String> {
+fn value_of(tree: &Tree, h: Handle) -> Option<String> {
     let tag = tree.tag_name(h).unwrap_or_default();
     if !VALUE_TAGS.contains(&tag.as_str()) {
         return None;
@@ -132,8 +133,8 @@ fn value_of(tree: &Tree, h: u32) -> Option<String> {
     v.filter(|s| !s.is_empty())
 }
 
-fn is_skipped(tree: &Tree, h: u32) -> bool {
-    if tree.node_type(h) != ELEMENT_NODE {
+fn is_skipped(tree: &Tree, h: Handle) -> bool {
+    if tree.node_type_id(h) != ELEMENT_NODE {
         return true;
     }
     if SKIP.contains(&tree.tag_name(h).unwrap_or_default().as_str()) {
@@ -142,10 +143,10 @@ fn is_skipped(tree: &Tree, h: u32) -> bool {
     tree.get_attribute(h, "aria-hidden") == Some("true")
 }
 
-fn build_children(tree: &Tree, h: u32) -> Vec<AxNode> {
+fn build_children(tree: &Tree, h: Handle) -> Vec<AxNode> {
     tree.children(h)
         .into_iter()
-        .filter(|&c| tree.node_type(c) == ELEMENT_NODE)
+        .filter(|&c| tree.node_type_id(c) == ELEMENT_NODE)
         .filter_map(|c| build(tree, c))
         .collect()
 }
@@ -164,7 +165,7 @@ fn prune_roleless(mut children: Vec<AxNode>) -> Option<AxNode> {
     }
 }
 
-fn node_for(tree: &Tree, h: u32, role: String, children: Vec<AxNode>) -> AxNode {
+fn node_for(tree: &Tree, h: Handle, role: String, children: Vec<AxNode>) -> AxNode {
     AxNode {
         role,
         name: name_of(tree, h),
@@ -173,7 +174,7 @@ fn node_for(tree: &Tree, h: u32, role: String, children: Vec<AxNode>) -> AxNode 
     }
 }
 
-fn build(tree: &Tree, h: u32) -> Option<AxNode> {
+fn build(tree: &Tree, h: Handle) -> Option<AxNode> {
     if is_skipped(tree, h) {
         return None;
     }
@@ -200,7 +201,7 @@ pub fn accessibility_tree(tree: &Tree) -> AxNode {
 }
 
 /// Accessibility subtree rooted at `h` (None if it contributes nothing).
-pub fn ax_subtree(tree: &Tree, h: u32) -> Option<AxNode> {
+pub fn ax_subtree(tree: &Tree, h: Handle) -> Option<AxNode> {
     build(tree, h)
 }
 
@@ -208,7 +209,7 @@ pub fn ax_subtree(tree: &Tree, h: u32) -> Option<AxNode> {
 mod tests {
     use super::*;
 
-    fn first(tree: &Tree, sel: &str) -> u32 {
+    fn first(tree: &Tree, sel: &str) -> Handle {
         tree.query_selector(sel).unwrap()
     }
 

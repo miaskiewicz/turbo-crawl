@@ -12,6 +12,7 @@ use crate::aria::{accessible_name, implicit_role};
 use crate::visible::is_visible;
 use std::collections::HashSet;
 use turbo_dom_parser::rtdom::Tree;
+use turbo_dom_parser::rtdom::tree::Handle;
 use turbo_surf_core::url::{is_http_url, resolve};
 
 const INTERACTIVE_SELECTOR: &str = "a[href],button,input,select,textarea,[role=button],[role=link],[role=checkbox],[role=tab],[role=menuitem],[contenteditable],[tabindex],[onclick]";
@@ -29,11 +30,18 @@ pub struct Interactive {
     pub r#type: Option<String>,
     pub visible: bool,
     pub js_handler: bool,
-    pub node: u32,
+    #[serde(serialize_with = "serialize_handle")]
+    pub node: Handle,
+}
+
+// Handles are opaque newtypes; the JSON wire keeps the raw u32 index that
+// JS/Python/MCP consumers address elements by.
+fn serialize_handle<S: serde::Serializer>(h: &Handle, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_u32(h.raw())
 }
 
 // Absolute href for an <a>; None for non-anchors or unresolvable targets.
-fn href_for(tree: &Tree, h: u32, tag: &str, base: &str) -> Option<String> {
+fn href_for(tree: &Tree, h: Handle, tag: &str, base: &str) -> Option<String> {
     if tag != "a" {
         return None;
     }
@@ -43,19 +51,19 @@ fn href_for(tree: &Tree, h: u32, tag: &str, base: &str) -> Option<String> {
 
 // Native nav = <a href> or a submit control; otherwise an onclick is a JS
 // handler we can't fire in Lane A → flag it (don't drop the element).
-fn js_handler_for(tree: &Tree, h: u32, href: &Option<String>, ty: &Option<String>) -> bool {
+fn js_handler_for(tree: &Tree, h: Handle, href: &Option<String>, ty: &Option<String>) -> bool {
     let native_nav = href.is_some() || ty.as_deref() == Some("submit");
     !native_nav && tree.get_attribute(h, "onclick").is_some()
 }
 
-fn role_for(tree: &Tree, h: u32, tag: &str, ty: &Option<String>) -> String {
+fn role_for(tree: &Tree, h: Handle, tag: &str, ty: &Option<String>) -> String {
     match tree.get_attribute(h, "role") {
         Some(r) => r.to_string(),
         None => implicit_role(tag, ty.as_deref()).to_string(),
     }
 }
 
-fn to_record(tree: &Tree, h: u32, i: usize, base: &str, check_visible: bool) -> Interactive {
+fn to_record(tree: &Tree, h: Handle, i: usize, base: &str, check_visible: bool) -> Interactive {
     let tag = tree.tag_name(h).unwrap_or_default().to_ascii_lowercase();
     let ty = tree
         .get_attribute(h, "type")

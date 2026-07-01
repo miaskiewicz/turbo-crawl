@@ -4,6 +4,7 @@
 //! links, code, lists, blockquotes, `<pre>`, `<hr>`, and GFM tables are emitted.
 
 use turbo_dom_parser::rtdom::Tree;
+use turbo_dom_parser::rtdom::tree::Handle;
 use turbo_surf_core::url::resolve;
 
 const ELEMENT_NODE: u8 = 1;
@@ -52,15 +53,15 @@ fn wrap(marker: &str, inner: &str) -> String {
 
 // --- inline serialization ---------------------------------------------------
 
-fn inline(tree: &Tree, h: u32, base: &str) -> String {
-    match tree.node_type(h) {
+fn inline(tree: &Tree, h: Handle, base: &str) -> String {
+    match tree.node_type_id(h) {
         TEXT_NODE => collapse(&tree.node_value(h).unwrap_or_default()),
         ELEMENT_NODE => inline_element(tree, h, base),
         _ => String::new(),
     }
 }
 
-fn children_inline(tree: &Tree, h: u32, base: &str) -> String {
+fn children_inline(tree: &Tree, h: Handle, base: &str) -> String {
     let mut out = String::new();
     for c in tree.children(h) {
         out.push_str(&inline(tree, c, base));
@@ -68,7 +69,7 @@ fn children_inline(tree: &Tree, h: u32, base: &str) -> String {
     out
 }
 
-fn inline_element(tree: &Tree, h: u32, base: &str) -> String {
+fn inline_element(tree: &Tree, h: Handle, base: &str) -> String {
     let tag = tree.tag_name(h).unwrap_or_default();
     if SKIP.contains(&tag.as_str()) {
         return String::new();
@@ -86,7 +87,7 @@ fn inline_element(tree: &Tree, h: u32, base: &str) -> String {
     }
 }
 
-fn link(tree: &Tree, h: u32, base: &str, inner: &str) -> String {
+fn link(tree: &Tree, h: Handle, base: &str, inner: &str) -> String {
     match tree
         .get_attribute(h, "href")
         .and_then(|href| resolve(base, href))
@@ -99,25 +100,25 @@ fn link(tree: &Tree, h: u32, base: &str, inner: &str) -> String {
 // --- block serialization ----------------------------------------------------
 
 // Descendants of `node` whose uppercased tag is in `tags`, in document order.
-fn descendants_by_tag(tree: &Tree, node: u32, tags: &[&str]) -> Vec<u32> {
+fn descendants_by_tag(tree: &Tree, node: Handle, tags: &[&str]) -> Vec<Handle> {
     tree.descendants(node)
         .into_iter()
         .filter(|&h| {
-            tree.node_type(h) == ELEMENT_NODE
+            tree.node_type_id(h) == ELEMENT_NODE
                 && tree.tag_name(h).is_some_and(|t| tags.contains(&t.as_str()))
         })
         .collect()
 }
 
-fn element_children_by_tag(tree: &Tree, node: u32, tag: &str) -> Vec<u32> {
+fn element_children_by_tag(tree: &Tree, node: Handle, tag: &str) -> Vec<Handle> {
     tree.children(node)
         .into_iter()
         .filter(|&c| tree.tag_name(c).as_deref() == Some(tag))
         .collect()
 }
 
-fn block(tree: &Tree, h: u32, base: &str, out: &mut Vec<String>) {
-    match tree.node_type(h) {
+fn block(tree: &Tree, h: Handle, base: &str, out: &mut Vec<String>) {
+    match tree.node_type_id(h) {
         TEXT_NODE => {
             let t = collapse(&tree.node_value(h).unwrap_or_default())
                 .trim()
@@ -131,7 +132,7 @@ fn block(tree: &Tree, h: u32, base: &str, out: &mut Vec<String>) {
     }
 }
 
-fn block_element(tree: &Tree, h: u32, base: &str, out: &mut Vec<String>) {
+fn block_element(tree: &Tree, h: Handle, base: &str, out: &mut Vec<String>) {
     let tag = tree.tag_name(h).unwrap_or_default();
     if SKIP.contains(&tag.as_str()) {
         return;
@@ -146,7 +147,7 @@ fn block_element(tree: &Tree, h: u32, base: &str, out: &mut Vec<String>) {
     block_tag(tree, h, base, out, &tag);
 }
 
-fn block_tag(tree: &Tree, h: u32, base: &str, out: &mut Vec<String>, tag: &str) {
+fn block_tag(tree: &Tree, h: Handle, base: &str, out: &mut Vec<String>, tag: &str) {
     match tag {
         "P" => push_inline(tree, h, base, out, ""),
         "BLOCKQUOTE" => push_inline(tree, h, base, out, "> "),
@@ -164,21 +165,21 @@ fn block_tag(tree: &Tree, h: u32, base: &str, out: &mut Vec<String>, tag: &str) 
     }
 }
 
-fn push_inline(tree: &Tree, h: u32, base: &str, out: &mut Vec<String>, prefix: &str) {
+fn push_inline(tree: &Tree, h: Handle, base: &str, out: &mut Vec<String>, prefix: &str) {
     let text = children_inline(tree, h, base).trim().to_string();
     if !text.is_empty() {
         out.push(format!("{prefix}{text}"));
     }
 }
 
-fn emit_pre(tree: &Tree, h: u32, out: &mut Vec<String>) {
+fn emit_pre(tree: &Tree, h: Handle, out: &mut Vec<String>) {
     let code = tree.text_content(h).trim_end_matches('\n').to_string();
     if !code.trim().is_empty() {
         out.push(format!("```\n{code}\n```"));
     }
 }
 
-fn emit_list(tree: &Tree, list: u32, base: &str, out: &mut Vec<String>, ordered: bool) {
+fn emit_list(tree: &Tree, list: Handle, base: &str, out: &mut Vec<String>, ordered: bool) {
     let mut lines = Vec::new();
     for item in element_children_by_tag(tree, list, "LI") {
         let text = children_inline(tree, item, base).trim().to_string();
@@ -196,14 +197,14 @@ fn emit_list(tree: &Tree, list: u32, base: &str, out: &mut Vec<String>, ordered:
     }
 }
 
-fn row_cells(tree: &Tree, tr: u32, base: &str) -> Vec<String> {
+fn row_cells(tree: &Tree, tr: Handle, base: &str) -> Vec<String> {
     descendants_by_tag(tree, tr, &["TH", "TD"])
         .into_iter()
         .map(|c| children_inline(tree, c, base).trim().replace('|', "\\|"))
         .collect()
 }
 
-fn emit_table(tree: &Tree, table: u32, base: &str, out: &mut Vec<String>) {
+fn emit_table(tree: &Tree, table: Handle, base: &str, out: &mut Vec<String>) {
     let mut lines: Vec<String> = Vec::new();
     for tr in descendants_by_tag(tree, table, &["TR"]) {
         let cells = row_cells(tree, tr, base);
@@ -222,7 +223,7 @@ fn emit_table(tree: &Tree, table: u32, base: &str, out: &mut Vec<String>) {
 }
 
 /// Render the document's main content (`<main>` → `<body>` → root) to Markdown.
-pub fn markdown(tree: &Tree, root: u32, base: &str) -> String {
+pub fn markdown(tree: &Tree, root: Handle, base: &str) -> String {
     let start = tree
         .query_selector("main")
         .or_else(|| tree.query_selector("body"))
