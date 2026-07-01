@@ -3,7 +3,7 @@
 //! documented approximation). Content past the pixmap edge is clipped by
 //! tiny-skia, giving a viewport-clipped screenshot.
 
-use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Rect, Transform};
+use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Rect, Transform};
 use turbo_html2pdf_core::layout::value::{BorderEdges, BorderSide};
 use turbo_html2pdf_core::{Fragment, FragmentContent, PositionedGlyph, Rgba};
 
@@ -17,12 +17,13 @@ const IMAGE_PLACEHOLDER: Rgba = Rgba {
     a: 255,
 };
 
-/// Paint `galley` into a `width × height` PNG. `Err` only on a zero/oversized
-/// canvas or a PNG-encode failure.
-pub fn paint(galley: &Fragment, width: u32, height: u32) -> Result<Vec<u8>, String> {
+/// Paint `galley` into a `width × height` PNG over a `bg` canvas fill (the
+/// propagated root/body background). `Err` only on a zero/oversized canvas or a
+/// PNG-encode failure.
+pub fn paint(galley: &Fragment, width: u32, height: u32, bg: Rgba) -> Result<Vec<u8>, String> {
     let mut pm =
         Pixmap::new(width, height).ok_or_else(|| format!("bad canvas {width}x{height}"))?;
-    pm.fill(Color::WHITE);
+    pm.fill(tiny_skia::Color::from_rgba8(bg.r, bg.g, bg.b, bg.a));
     paint_fragment(&mut pm, galley);
     pm.encode_png().map_err(|e| format!("png encode: {e}"))
 }

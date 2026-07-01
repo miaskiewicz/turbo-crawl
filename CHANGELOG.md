@@ -3,6 +3,28 @@
 All notable changes to turbo-surf are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer.
 
+## [0.3.1]
+Screenshot fidelity: external stylesheets + root-background propagation.
+
+### Added
+- **External `<link>` stylesheet fetching** — the `screenshot` MCP tool and the
+  Playwright shim now fetch the page's external stylesheets (via the session /
+  engine client, so impersonation + cookies apply) and cascade them, so a page
+  that keeps its CSS in `<link>` sheets renders styled instead of unstyled.
+  `{ external_css: false }` opts out. New `stylesheet_hrefs` +
+  `screenshot_with_css` / `screenshot_svg_with_css` across napi + Python for
+  callers that fetch the CSS themselves.
+
+### Fixed
+- **Root/body background propagation** — a page whose `<body>`/root carries a
+  background colour now fills the whole image with it (matching how browsers
+  paint the viewport canvas), instead of a white backdrop under short content.
+
+### Notes
+- Still no `position: absolute/fixed` or `z-index` / stacking-context model:
+  out-of-flow and layered elements paint in document order, so overlapping
+  menus / modals on complex pages can stack incorrectly.
+
 ## [0.3.0]
 Synthetic screenshots — turn any HTML snapshot into an image with no browser.
 

@@ -39,7 +39,7 @@ fn to_json_string<T: serde::Serialize>(v: &T) -> String {
 /// The package version (matches the crate / wheel version).
 #[pyfunction]
 fn version() -> &'static str {
-    "0.3.0"
+    "0.3.1"
 }
 
 // --- view passes (parse + read; one parse per call) -------------------------
@@ -89,6 +89,43 @@ fn screenshot<'py>(
 #[pyo3(signature = (html, width=None, height=None))]
 fn screenshot_svg(html: &str, width: Option<u32>, height: Option<u32>) -> PyResult<String> {
     raster::screenshot_svg(html, viewport(width, height)).map_err(TurboSurfError::new_err)
+}
+
+/// The `href`s of `html`'s `<link rel="stylesheet">` elements (verbatim). Fetch
+/// them yourself (resolving against the page URL) and pass the concatenated CSS
+/// to `screenshot_with_css` for a styled render of an external-CSS page.
+#[pyfunction]
+fn stylesheet_hrefs(html: &str) -> Vec<String> {
+    raster::stylesheet_hrefs(html)
+}
+
+/// PNG screenshot of `html` with caller-fetched `external_css` cascaded on top
+/// of the page's inline styles. Returns PNG `bytes`.
+#[pyfunction]
+#[pyo3(signature = (html, external_css, width=None, height=None))]
+fn screenshot_with_css<'py>(
+    py: Python<'py>,
+    html: &str,
+    external_css: &str,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let bytes = raster::screenshot_png_with_css(html, external_css, viewport(width, height))
+        .map_err(TurboSurfError::new_err)?;
+    Ok(PyBytes::new(py, &bytes))
+}
+
+/// SVG screenshot of `html` with caller-fetched `external_css` → document `str`.
+#[pyfunction]
+#[pyo3(signature = (html, external_css, width=None, height=None))]
+fn screenshot_svg_with_css(
+    html: &str,
+    external_css: &str,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> PyResult<String> {
+    raster::screenshot_svg_with_css(html, external_css, viewport(width, height))
+        .map_err(TurboSurfError::new_err)
 }
 
 /// The document `<title>` (trimmed; empty if none).
@@ -245,6 +282,9 @@ fn register_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(text, m)?)?;
     m.add_function(wrap_pyfunction!(screenshot, m)?)?;
     m.add_function(wrap_pyfunction!(screenshot_svg, m)?)?;
+    m.add_function(wrap_pyfunction!(stylesheet_hrefs, m)?)?;
+    m.add_function(wrap_pyfunction!(screenshot_with_css, m)?)?;
+    m.add_function(wrap_pyfunction!(screenshot_svg_with_css, m)?)?;
     m.add_function(wrap_pyfunction!(title, m)?)?;
     m.add_function(wrap_pyfunction!(html, m)?)?;
     m.add_function(wrap_pyfunction!(links, m)?)?;

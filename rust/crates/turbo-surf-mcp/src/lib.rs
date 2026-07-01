@@ -25,7 +25,7 @@ use turbo_surf_raster as raster;
 use turbo_surf_view as view;
 use view::{Field, FieldType, QueryType, TextMode};
 
-pub const VERSION: &str = "0.3.0";
+pub const VERSION: &str = "0.3.1";
 
 /// One agent session: the current page URL + parsed tree + nav history, plus the
 /// browser-ish state agents expect (UA / extra headers / cookie jar / JS mode) and
@@ -527,9 +527,12 @@ impl Session {
     // Render an HTML snapshot into an image (no browser). `snapshot` selects a
     // hydration-trail entry (index into the rendered-DOM history); omitted =
     // the current page. `format` is "png" (default) or "svg". `width`/`height`
-    // override the session viewport for this call only. PNG comes back base64
-    // (MCP transports JSON text), SVG as the document string.
-    fn screenshot(&self, args: &Value) -> Result<Value, String> {
+    // override the session viewport for this call only. The page's external
+    // `<link rel="stylesheet">` sheets are fetched (via the same client — so an
+    // impersonated session pulls them with the real fingerprint + cookies) and
+    // cascaded, unless `{ external_css: false }`. PNG comes back base64 (MCP
+    // transports JSON text), SVG as the document string.
+    async fn screenshot(&mut self, args: &Value) -> Result<Value, String> {
         let html = match args.get("snapshot").and_then(Value::as_u64) {
             Some(i) => self.dom_history.get(i as usize).cloned().ok_or_else(|| {
                 format!(
@@ -543,16 +546,25 @@ impl Session {
             width: arg_u32(args, "width").unwrap_or(self.viewport.width),
             height: arg_u32(args, "height").unwrap_or(self.viewport.height),
         };
+        let want_css = args
+            .get("external_css")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let css = if want_css {
+            self.fetch_linked_css(&html).await
+        } else {
+            String::new()
+        };
         match arg_str(args, "format").unwrap_or("png") {
             "svg" => {
-                let svg = raster::screenshot_svg(&html, vp)?;
+                let svg = raster::screenshot_svg_with_css(&html, &css, vp)?;
                 Ok(json!({
                     "format": "svg", "mimeType": "image/svg+xml",
                     "width": vp.width, "height": vp.height, "svg": svg,
                 }))
             }
             "png" => {
-                let png = raster::screenshot_png(&html, vp)?;
+                let png = raster::screenshot_png_with_css(&html, &css, vp)?;
                 Ok(json!({
                     "format": "png", "mimeType": "image/png",
                     "width": vp.width, "height": vp.height, "base64": BASE64.encode(&png),
@@ -560,6 +572,26 @@ impl Session {
             }
             other => Err(format!("screenshot: unknown format '{other}' (png|svg)")),
         }
+    }
+
+    // Fetch the page's `<link rel="stylesheet">` sheets and concatenate their
+    // bodies in source order, resolving each href against the current page URL
+    // via the session client (impersonation + cookies apply). Failures + non-URL
+    // hrefs are skipped; the count is capped so a hostile page can't fan out.
+    async fn fetch_linked_css(&mut self, html: &str) -> String {
+        const MAX_SHEETS: usize = 40;
+        let base = self.url.clone();
+        let mut css = String::new();
+        for href in raster::stylesheet_hrefs(html).into_iter().take(MAX_SHEETS) {
+            let Some(url) = turbo_surf_core::url::resolve(&base, &href) else {
+                continue;
+            };
+            if let Ok(body) = self.fetch_body(&url).await {
+                css.push_str(&body);
+                css.push('\n');
+            }
+        }
+        css
     }
 
     // Report the active stealth posture: the per-host fingerprint profile this
@@ -890,8 +922,11 @@ pub fn tools() -> Value {
         (
             "screenshot",
             "Synthetic screenshot of the current page or a hydration-trail \
-             snapshot — native layout+paint, no browser. Args: format (png|svg), \
-             snapshot? (dom_history index), width?/height? (override viewport). \
+             snapshot — native layout+paint, no browser. Fetches the page's \
+             external <link> stylesheets (via the session client, so \
+             impersonation + cookies apply) and cascades them unless \
+             external_css:false. Args: format (png|svg), snapshot? (dom_history \
+             index), width?/height? (override viewport), external_css?. \
              PNG returns base64; SVG returns the document string.",
         ),
         (
@@ -1009,7 +1044,7 @@ pub async fn call_tool(session: &mut Session, name: &str, args: &Value) -> Resul
         "set_fingerprint" => session.set_fingerprint(args.get("overrides").unwrap_or(args)),
         "latest_dom" => Ok(json!(session.dom_history.last())),
         "dom_history" => Ok(json!(session.dom_history)),
-        "screenshot" => session.screenshot(args),
+        "screenshot" => session.screenshot(args).await,
         "set_viewport" => session.set_viewport(args),
         "run_playwright" => tool_run_playwright(session, args).await,
         "requests" => Ok(json!(session.requests)),

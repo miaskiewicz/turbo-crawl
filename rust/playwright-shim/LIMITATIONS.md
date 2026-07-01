@@ -24,8 +24,13 @@ rendering surface and no input hardware**. So three buckets are out of reach:
   `toHaveScreenshot`/`toMatchSnapshot`, viewport-pixel scrolling. There is no
   browser raster output to capture or compare. **Exception:** `page.screenshot()`
   is supported via a *synthetic* native layout+paint (see below) — a
-  representative render, not a browser-faithful capture; element-level
-  `locator.screenshot()` still throws (no per-element geometry to crop to).
+  representative render, not a browser-faithful capture. It fetches the page's
+  external `<link>` stylesheets and cascades them (`{externalCss:false}` opts
+  out), and propagates the root/body background to the canvas. It does **not**
+  model `position:absolute/fixed` or `z-index` (out-of-flow / layered elements
+  paint in document order, so complex overlapping menus/modals can stack wrong),
+  run JS-driven visuals (a `<canvas>` gradient background is absent), or crop to
+  an element — `locator.screenshot()` still throws.
 - **Synthetic input devices** — `mouse`, `keyboard`, `touchscreen`, `hover`,
   `dragTo`. There is no pointer/keyboard hardware to drive; the engine acts on the
   DOM directly (`click` resolves a link/submit intent; `fill` sets the value).

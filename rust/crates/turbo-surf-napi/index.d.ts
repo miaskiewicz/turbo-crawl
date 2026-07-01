@@ -105,6 +105,13 @@ export function markdown(html: string, baseUrl: string): string;
  * `screenshotSvg` → an SVG document string. */
 export function screenshot(html: string, width?: number, height?: number): Buffer;
 export function screenshotSvg(html: string, width?: number, height?: number): string;
+/** `href`s of the page's `<link rel="stylesheet">` elements (verbatim). Resolve
+ * against the page URL + fetch, then pass the concatenated CSS to `*WithCss`. */
+export function stylesheetHrefs(html: string): string[];
+/** Like `screenshot`/`screenshotSvg` but with caller-fetched external `<link>`
+ * stylesheet CSS cascaded on top of the page's inline styles. */
+export function screenshotWithCss(html: string, externalCss: string, width?: number, height?: number): Buffer;
+export function screenshotSvgWithCss(html: string, externalCss: string, width?: number, height?: number): string;
 export function text(html: string): string;
 export function title(html: string): string;
 export function html(html: string): string;

@@ -60,6 +60,64 @@ fn strip_tag_blocks(html: &str, tag: &str) -> String {
     out
 }
 
+/// The `href`s of every `<link rel="stylesheet">` in `html`, in source order.
+/// Values are returned verbatim (possibly relative) — the caller resolves them
+/// against the page URL and fetches them (the raster itself does no I/O). `rel`
+/// is matched case-insensitively and may carry other tokens (`stylesheet
+/// preload`). Alternate stylesheets (`rel="alternate stylesheet"`) are skipped.
+pub fn stylesheet_hrefs(html: &str) -> Vec<String> {
+    let lower = html.to_ascii_lowercase();
+    let mut hrefs = Vec::new();
+    let mut cursor = 0;
+    while let Some(rel) = lower[cursor..].find("<link") {
+        let tag_start = cursor + rel;
+        let end = lower[tag_start..]
+            .find('>')
+            .map(|g| tag_start + g)
+            .unwrap_or(html.len());
+        let tag = &html[tag_start..end];
+        let tag_lower = &lower[tag_start..end];
+        let rel_val = attr_value(tag, tag_lower, "rel")
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let is_sheet = rel_val.split_whitespace().any(|t| t == "stylesheet")
+            && !rel_val.split_whitespace().any(|t| t == "alternate");
+        if is_sheet {
+            if let Some(href) = attr_value(tag, tag_lower, "href") {
+                if !href.trim().is_empty() {
+                    hrefs.push(href.trim().to_string());
+                }
+            }
+        }
+        cursor = end + 1;
+    }
+    hrefs
+}
+
+/// Read `name="value"` (or `name='value'`) out of an opening-tag slice. `tag` is
+/// the original-case text; `tag_lower` its lowercase twin (for case-insensitive
+/// attribute-name matching while returning the original-case value).
+fn attr_value(tag: &str, tag_lower: &str, name: &str) -> Option<String> {
+    let mut from = 0;
+    loop {
+        let rel = tag_lower[from..].find(name)?;
+        let at = from + rel;
+        // Must be a whole attribute name: preceded by whitespace/`<`, followed by `=`.
+        let before_ok = at == 0 || tag.as_bytes()[at - 1].is_ascii_whitespace();
+        let after = tag_lower[at + name.len()..].trim_start();
+        if before_ok && after.starts_with('=') {
+            let rest = tag[at + name.len()..].trim_start();
+            let rest = rest.strip_prefix('=')?.trim_start();
+            let (quote, body) = match rest.chars().next()? {
+                q @ ('"' | '\'') => (q, &rest[1..]),
+                _ => return rest.split_whitespace().next().map(str::to_string),
+            };
+            return body.find(quote).map(|e| body[..e].to_string());
+        }
+        from = at + name.len();
+    }
+}
+
 /// Concatenate the text of every `<style>` element in `html`, in source order.
 /// Attributes on the opening tag (e.g. `type`, `media`) are skipped; only the
 /// element body is returned.
@@ -140,6 +198,23 @@ mod tests {
         assert!(!out.contains("Granim"), "script source must be gone");
         assert!(!out.contains("color:red"), "style source must be gone");
         assert!(!out.contains("enable js"), "noscript must be gone");
+    }
+
+    #[test]
+    fn stylesheet_hrefs_extracts_rel_stylesheet() {
+        use super::stylesheet_hrefs;
+        let html = r#"<head>
+            <link rel="stylesheet" href="/a.css">
+            <link href='https://cdn.example/b.css' rel="stylesheet preload">
+            <link rel="icon" href="/favicon.ico">
+            <link rel="alternate stylesheet" href="/dark.css">
+            <link rel=stylesheet href=bare.css>
+          </head>"#;
+        let hrefs = stylesheet_hrefs(html);
+        assert_eq!(
+            hrefs,
+            vec!["/a.css", "https://cdn.example/b.css", "bare.css"]
+        );
     }
 
     #[test]

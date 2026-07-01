@@ -27,7 +27,7 @@ use view::{Field, FieldType, QueryType, TextMode};
 
 #[napi]
 pub fn version() -> String {
-    "0.3.0".to_string()
+    "0.3.1".to_string()
 }
 
 fn to_json_string<T: serde::Serialize>(v: &T) -> String {
@@ -90,6 +90,39 @@ pub fn screenshot(html: String, width: Option<u32>, height: Option<u32>) -> Resu
 #[napi]
 pub fn screenshot_svg(html: String, width: Option<u32>, height: Option<u32>) -> Result<String> {
     raster::screenshot_svg(&html, viewport(width, height)).map_err(Error::from_reason)
+}
+
+/// The `href`s of `html`'s `<link rel="stylesheet">` elements (verbatim). The
+/// caller resolves them against the page URL + fetches them for `*WithCss`.
+#[napi]
+pub fn stylesheet_hrefs(html: String) -> Vec<String> {
+    raster::stylesheet_hrefs(&html)
+}
+
+/// PNG screenshot of `html` with caller-fetched `external_css` (the concatenated
+/// bodies of the page's `<link>` stylesheets) cascaded on top of its inline CSS.
+#[napi]
+pub fn screenshot_with_css(
+    html: String,
+    external_css: String,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> Result<Buffer> {
+    raster::screenshot_png_with_css(&html, &external_css, viewport(width, height))
+        .map(Buffer::from)
+        .map_err(Error::from_reason)
+}
+
+/// SVG screenshot of `html` with caller-fetched `external_css` → document string.
+#[napi]
+pub fn screenshot_svg_with_css(
+    html: String,
+    external_css: String,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> Result<String> {
+    raster::screenshot_svg_with_css(&html, &external_css, viewport(width, height))
+        .map_err(Error::from_reason)
 }
 
 #[napi]

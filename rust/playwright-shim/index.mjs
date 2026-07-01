@@ -1501,11 +1501,32 @@ class Page {
     const height = opts.height ?? vp.height;
     const asSvg =
       opts.type === "svg" || (typeof opts.path === "string" && opts.path.endsWith(".svg"));
+    // Fetch the page's external <link> stylesheets so the render is styled, not
+    // just inline-CSS. `{ externalCss: false }` skips it (offline/inline-only).
+    const css = opts.externalCss === false ? "" : await this._fetchLinkedCss();
     const out = asSvg
-      ? Buffer.from(native.screenshotSvg(this._html, width, height), "utf8")
-      : native.screenshot(this._html, width, height);
+      ? Buffer.from(native.screenshotSvgWithCss(this._html, css, width, height), "utf8")
+      : native.screenshotWithCss(this._html, css, width, height);
     if (opts.path) await writeFile(opts.path, out);
     return out;
+  }
+
+  // Concatenate the page's `<link rel="stylesheet">` bodies, resolved against the
+  // page URL and fetched over the engine's client (cookies apply). Best-effort:
+  // non-http pages and failed/relative-unresolvable sheets are skipped.
+  async _fetchLinkedCss() {
+    if (!/^https?:/.test(this._url ?? "")) return "";
+    let css = "";
+    for (const href of native.stylesheetHrefs(this._html).slice(0, 40)) {
+      try {
+        const abs = new URL(href, this._url).href;
+        const r = JSON.parse(await native.fetchHtml(abs));
+        if (r.status >= 200 && r.status < 300 && r.html) css += `${r.html}\n`;
+      } catch {
+        /* skip a sheet that won't resolve/fetch */
+      }
+    }
+    return css;
   }
 
   // --- unsupported → honest throws ---

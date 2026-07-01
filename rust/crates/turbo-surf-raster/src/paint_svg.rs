@@ -17,13 +17,15 @@ const IMAGE_PLACEHOLDER: Rgba = Rgba {
     a: 255,
 };
 
-/// Paint `galley` into a `width × height` SVG document string.
-pub fn paint(galley: &Fragment, width: u32, height: u32) -> String {
+/// Paint `galley` into a `width × height` SVG document string over a `bg` canvas
+/// fill (the propagated root/body background).
+pub fn paint(galley: &Fragment, width: u32, height: u32, bg: Rgba) -> String {
     let mut svg = String::with_capacity(4096);
     let _ = writeln!(
         svg,
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" \
-         viewBox=\"0 0 {width} {height}\">\n<rect width=\"{width}\" height=\"{height}\" fill=\"#ffffff\"/>"
+         viewBox=\"0 0 {width} {height}\">\n<rect width=\"{width}\" height=\"{height}\" {}/>",
+        fill_attrs(bg)
     );
     paint_fragment(&mut svg, galley);
     svg.push_str("</svg>\n");
