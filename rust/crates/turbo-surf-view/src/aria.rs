@@ -1,8 +1,8 @@
 //! ARIA role + accessible-name helpers (port of `src/aria.mjs`) — pragmatic,
 //! no-layout heuristics for getByRole/getByText resolution and the agent view.
 
-use turbo_dom_parser::rtdom::Tree;
 use turbo_dom_parser::rtdom::tree::Handle;
+use turbo_dom_parser::rtdom::Tree;
 
 /// Collapsed, trimmed text content (the `dom-ops` `textOf` helper).
 pub fn text_of(tree: &Tree, h: Handle) -> String {

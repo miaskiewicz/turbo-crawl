@@ -25,7 +25,7 @@ use turbo_surf_raster as raster;
 use turbo_surf_view as view;
 use view::{Field, FieldType, QueryType, TextMode};
 
-pub const VERSION: &str = "0.2.7";
+pub const VERSION: &str = "0.3.0";
 
 /// One agent session: the current page URL + parsed tree + nav history, plus the
 /// browser-ish state agents expect (UA / extra headers / cookie jar / JS mode) and
@@ -282,7 +282,11 @@ impl Session {
     }
 
     // Mutate a control located by selector; returns the new title (or ok).
-    fn mutate<F: FnOnce(&mut Tree, Handle)>(&mut self, selector: &str, f: F) -> Result<Value, String> {
+    fn mutate<F: FnOnce(&mut Tree, Handle)>(
+        &mut self,
+        selector: &str,
+        f: F,
+    ) -> Result<Value, String> {
         let tree = self.tree_mut()?;
         let h = tree
             .query_selector(selector)

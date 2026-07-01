@@ -3,8 +3,8 @@
 //! escalated to the JS render tier. Near-empty rendered text + external scripts,
 //! or an empty known SPA mount + external scripts ⇒ JS required.
 
-use turbo_dom_parser::rtdom::Tree;
 use turbo_dom_parser::rtdom::tree::Handle;
+use turbo_dom_parser::rtdom::Tree;
 
 const DEFAULT_MIN_TEXT: usize = 200;
 const DEFAULT_MIN_SCRIPTS: usize = 1;

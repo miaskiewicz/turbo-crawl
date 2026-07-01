@@ -28,10 +28,7 @@ pub struct Match {
 }
 
 // Opaque handle → raw u32 index on the JSON wire (preserves the pre-0.4 format).
-fn serialize_handle_opt<S: serde::Serializer>(
-    h: &Option<Handle>,
-    s: S,
-) -> Result<S::Ok, S::Error> {
+fn serialize_handle_opt<S: serde::Serializer>(h: &Option<Handle>, s: S) -> Result<S::Ok, S::Error> {
     match h {
         Some(h) => s.serialize_some(&h.raw()),
         None => s.serialize_none(),

@@ -3,7 +3,7 @@
 All notable changes to turbo-surf are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer.
 
-## [0.2.9]
+## [0.3.0]
 Synthetic screenshots — turn any HTML snapshot into an image with no browser.
 
 ### Added
