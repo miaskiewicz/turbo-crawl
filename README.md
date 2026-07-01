@@ -52,7 +52,7 @@ happy-dom). turbo-surf is unusual on four axes at once:
 See [CHANGELOG.md](./CHANGELOG.md) for what shipped and
 [rust/README.md](./rust/README.md) for the engine internals.
 
-Status: **v0.2.7 — working** ([npm](https://www.npmjs.com/package/turbo-surf)).
+Status: **v0.2.9 — working** ([npm](https://www.npmjs.com/package/turbo-surf)).
 A native Rust engine (7-crate workspace on the `turbo-dom` crate): hardened
 networking (cookies / `document.cookie` bridge / robots + crawl-delay / charset /
 size + redirect caps, HTTP/2 + a pooled client, 304 conditional cache), crawl
@@ -370,12 +370,19 @@ cookies + real `setExtraHTTPHeaders`, and the full matcher set. Most of the surf
 is pure JS and never crosses into Rust; only genuine DOM/render semantics do (and
 an `expect(locator)` chain is batched into one crossing).
 
+`page.screenshot()` renders a **synthetic** image (PNG or SVG) from a native
+layout+paint of the current HTML — no browser, no Chromium. It's *reasonably
+representative*, not pixel-faithful (fragments paint in DOM order with no
+z-index/stacking model; `<img>` draws as a placeholder). Runs only when asked,
+over any HTML snapshot; the viewport is configurable. See the `screenshot` MCP
+tool + `screenshot`/`screenshotSvg` napi functions.
+
 What a no-browser engine **physically can't do fails honestly** (it throws or
 no-ops — never a silent pass):
 
 | Bucket | Examples | Behavior |
 |---|---|---|
-| Pixels / layout | `screenshot`, `pdf`, `boundingBox`, `toHaveScreenshot`, `toMatchSnapshot` | **throws** |
+| Pixels / layout | `pdf`, `boundingBox`, element-level `locator.screenshot`, `toHaveScreenshot`, `toMatchSnapshot` | **throws** |
 | Input hardware | `hover`, `dragTo`, `mouse`/`keyboard`/`touchscreen` | **throws** |
 | Network interception | `route`, `routeFromHAR`, `unroute` | **throws** |
 | JS↔host bindings | `exposeFunction`, `exposeBinding` | **throws** |

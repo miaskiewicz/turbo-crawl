@@ -100,6 +100,11 @@ export function matchesAriaSnapshot(html: string, node: number, expected: string
 export function nodeSnapshot(html: string, node: number): string;
 
 export function markdown(html: string, baseUrl: string): string;
+/** Synthetic screenshot (no browser): native layout + paint of `html` at the
+ * given (or default 1280×800) viewport. `screenshot` → PNG bytes (Buffer);
+ * `screenshotSvg` → an SVG document string. */
+export function screenshot(html: string, width?: number, height?: number): Buffer;
+export function screenshotSvg(html: string, width?: number, height?: number): string;
 export function text(html: string): string;
 export function title(html: string): string;
 export function html(html: string): string;

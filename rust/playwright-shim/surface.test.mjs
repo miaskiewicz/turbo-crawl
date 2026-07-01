@@ -634,14 +634,21 @@ pw.skip("skipped test does not run", async () => {
 });
 
 // --- honest "can't do that" throws ----------------------------------------
+test("page.screenshot renders synthetic pixels (no browser)", async () => {
+  const p = await fresh();
+  const png = await p.screenshot();
+  assert.ok(Buffer.isBuffer(png) && png.length > 0);
+  assert.deepEqual([...png.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47]);
+});
+
 test("honest throws: pixel / input / network-interception", async () => {
   const p = await fresh();
-  await assert.rejects(() => p.screenshot(), /unavailable/);
   await assert.rejects(() => p.pdf(), /unavailable/);
   await assert.rejects(() => p.locator("#go").screenshot(), /unavailable/);
   // boundingBox returns null (no layout engine → unmeasurable), matching Playwright's null for
-  // a non-laid-out element — not a throw. hover()/keyboard.press are now real features. The rest
-  // (screenshot/pdf/dragTo/selectText/mouse/touchscreen/route/exposeFunction) stay honest throws.
+  // a non-laid-out element — not a throw. hover()/keyboard.press are now real features. page-level
+  // screenshot is now a real synthetic render; the rest (pdf/element-screenshot/dragTo/selectText/
+  // mouse/touchscreen/route/exposeFunction) stay honest throws.
   assert.equal(await p.locator("#go").boundingBox(), null);
   await assert.rejects(() => p.locator("#go").dragTo(p.locator("h1")), /input/);
   await assert.rejects(() => p.locator("#name").selectText(), /input/);

@@ -20,9 +20,12 @@ faithfully emulated **fails honestly** rather than silently passing.
 The engine has a real DOM (rtdom) and a real V8 (the render tier), but **no
 rendering surface and no input hardware**. So three buckets are out of reach:
 
-- **Pixels / layout / rendering** — screenshots, PDF, video, bounding boxes,
+- **Pixels / layout / rendering** — PDF, video, bounding boxes,
   `toHaveScreenshot`/`toMatchSnapshot`, viewport-pixel scrolling. There is no
-  raster output to capture or compare.
+  browser raster output to capture or compare. **Exception:** `page.screenshot()`
+  is supported via a *synthetic* native layout+paint (see below) — a
+  representative render, not a browser-faithful capture; element-level
+  `locator.screenshot()` still throws (no per-element geometry to crop to).
 - **Synthetic input devices** — `mouse`, `keyboard`, `touchscreen`, `hover`,
   `dragTo`. There is no pointer/keyboard hardware to drive; the engine acts on the
   DOM directly (`click` resolves a link/submit intent; `fill` sets the value).
@@ -56,7 +59,8 @@ it differs from a real browser.
 | `mainFrame`, `frame`, `frames`, `frameLocator` | ⚠️ | Collapse to the page itself — no real cross-origin frames. |
 | `viewportSize`, `setViewportSize`, `setDefaultTimeout`, `setDefaultNavigationTimeout`, `emulateMedia`, `bringToFront` | ⚠️ | Stored / no-op (no layout to affect). |
 | `isClosed`, `close`, `video` (→ null), `workers` (→ []) | ✅ | |
-| `screenshot`, `pdf` | ❌ | Throws — no rendering surface. |
+| `screenshot` | ⚠️ | Synthetic native render (PNG, or SVG via `{type:"svg"}`) — representative, not browser-faithful. `path` is written; `fullPage`/`clip` ignored (image is the viewport). |
+| `pdf` | ❌ | Throws — no rendering surface. |
 | `hover`, `dragAndDrop`, `mouse.*`, `keyboard.*`, `touchscreen.*` | ❌ | Throws — no input hardware. |
 | `route`, `routeFromHAR`, `unroute` | ❌ | Throws — no in-process interception. |
 | `exposeBinding`, `exposeFunction` | ❌ | Throws — no persistent JS↔host binding across renders. |

@@ -13,6 +13,7 @@
 // cannot do (pixels, real input devices, network interception) throws honestly
 // or no-ops — see LIMITATIONS.md.
 
+import { writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
@@ -1488,8 +1489,26 @@ class Page {
     return [];
   }
 
+  // A synthetic screenshot: native layout + paint over the current HTML, no
+  // browser. Real pixels, but a *representative* render (no z-index/stacking
+  // model, `<img>` drawn as placeholders). `type: "svg"` (or a `.svg` path)
+  // returns a vector document; otherwise PNG. `fullPage`/`clip` are ignored —
+  // the image is the viewport (override via `width`/`height` or the context
+  // viewport). Returns a Buffer; writes `path` if given.
+  async screenshot(opts = {}) {
+    const vp = this._context._viewport ?? { width: 1280, height: 800 };
+    const width = opts.width ?? vp.width;
+    const height = opts.height ?? vp.height;
+    const asSvg =
+      opts.type === "svg" || (typeof opts.path === "string" && opts.path.endsWith(".svg"));
+    const out = asSvg
+      ? Buffer.from(native.screenshotSvg(this._html, width, height), "utf8")
+      : native.screenshot(this._html, width, height);
+    if (opts.path) await writeFile(opts.path, out);
+    return out;
+  }
+
   // --- unsupported → honest throws ---
-  screenshot = UNSUPPORTED("page.screenshot", PIXEL);
   pdf = UNSUPPORTED("page.pdf", PIXEL);
   dragAndDrop = UNSUPPORTED("page.dragAndDrop", INPUT);
   route = UNSUPPORTED("page.route", NETIO);

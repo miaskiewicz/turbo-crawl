@@ -3,6 +3,27 @@
 All notable changes to turbo-surf are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer.
 
+## [0.2.9]
+Synthetic screenshots — turn any HTML snapshot into an image with no browser.
+
+### Added
+- **`turbo-surf-raster` crate** — a screenshot tier that drives
+  [turbo-html2pdf](https://crates.io/crates/turbo-html2pdf-core)'s native
+  HTML/CSS layout + font engine and paints the resulting `Fragment` display list
+  two ways: a **PNG** raster (tiny-skia; boxes, borders, glyph outlines) and an
+  **SVG** vector (self-contained glyph `<path>`s). A *reasonably representative*
+  render, not pixel-faithful: fragments paint in DOM order (no z-index/stacking
+  model) and `<img>` draws as a placeholder. Runs only when asked.
+- **`screenshot` MCP tool** — `{ format: png|svg, snapshot?, width?, height? }`;
+  renders the current page or any **hydration-trail snapshot** (`dom_history`
+  index). PNG returns base64, SVG the document string.
+- **napi `screenshot` / `screenshotSvg`** and **`page.screenshot()`** in the
+  Playwright shim (returns a real Buffer; `{type:"svg"}` for vector). Element-
+  level `locator.screenshot()` still throws (no per-element geometry to crop to).
+- **Configurable viewport** — a default `1280×800` layout viewport, overridable
+  per call (napi/shim/MCP args) or per session (`set_viewport` MCP tool). Ships
+  in every build, including the `impersonate` mega crawl build.
+
 ## [0.2.7]
 In-house solver maturity: a proper Cloudflare solve (run the challenge's own JS),
 Akamai experimental recon/rebuild tooling, and versioned encoding registries.
