@@ -75,13 +75,17 @@ pub fn screenshot(html: &str, viewport: Viewport, format: Format) -> Result<Vec<
 }
 
 /// Drive the borrowed layout engine: recover the page's own `<style>` sheets
-/// (html5ever drops `<head>`, so we scrape them from the raw source) and lay the
+/// (html5ever drops `<head>`, so we scrape them from the raw source), strip the
+/// elements whose source must not paint (`<script>`/`<style>`/…), and lay the
 /// body out at content width `width` over the bundled font set.
 fn lay_out(html: &str, width: u32) -> Result<Fragment, String> {
+    // Collect CSS from the raw source first (so `<style>` still cascades), then
+    // strip script/style/etc. so their text isn't flowed as visible content.
     let author_css = style_extract::collect_style_blocks(html);
+    let visible_html = style_extract::strip_non_visual(html);
     let mut diags = Diagnostics::default();
     layout_html(
-        html,
+        &visible_html,
         &author_css,
         width as f32,
         &FontRegistry::new(),

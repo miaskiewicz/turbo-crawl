@@ -23,6 +23,15 @@ Synthetic screenshots — turn any HTML snapshot into an image with no browser.
 - **Configurable viewport** — a default `1280×800` layout viewport, overridable
   per call (napi/shim/MCP args) or per session (`set_viewport` MCP tool). Ships
   in every build, including the `impersonate` mega crawl build.
+- Python parity: `turbo_surf.screenshot()` / `screenshot_svg()` on the PyPI
+  wheel, matching the napi + MCP surfaces.
+
+### Notes
+- `<script>`/`<style>`/`<noscript>`/`<template>` source is stripped before
+  layout so it never paints as visible text (page `<style>` CSS still cascades).
+- No-JS render: visuals painted only by JavaScript (e.g. a `<canvas>` gradient
+  background) are absent, so a page whose text is styled for such a background
+  can look low-contrast. External `<link>` stylesheets are not fetched.
 
 ## [0.2.7]
 In-house solver maturity: a proper Cloudflare solve (run the challenge's own JS),
