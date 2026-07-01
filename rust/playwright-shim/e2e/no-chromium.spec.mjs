@@ -15,6 +15,14 @@ test("the engine is turbo-surf — no Chromium is launched", async () => {
 
 test("pixel/real-browser APIs reject honestly instead of silently passing", async ({ page }) => {
   await page.setContent("<button>x</button>");
-  await expect(page.screenshot()).rejects.toThrow(/unavailable/);
+  // page.screenshot is a real synthetic render now; pdf + element screenshot stay honest throws.
   await expect(page.pdf()).rejects.toThrow(/unavailable/);
+  await expect(page.locator("button").screenshot()).rejects.toThrow(/unavailable/);
+});
+
+test("page.screenshot produces a synthetic PNG without a browser", async ({ page }) => {
+  await page.setContent("<button>x</button>");
+  const png = await page.screenshot();
+  expect(Buffer.isBuffer(png) && png.length > 0).toBe(true);
+  expect([...png.subarray(0, 4)]).toEqual([0x89, 0x50, 0x4e, 0x47]);
 });

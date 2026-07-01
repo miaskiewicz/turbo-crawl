@@ -3,8 +3,8 @@
 //! (script/style/nav/footer/aside) is dropped heuristically. Headings, emphasis,
 //! links, code, lists, blockquotes, `<pre>`, `<hr>`, and GFM tables are emitted.
 
-use turbo_dom_parser::rtdom::Tree;
 use turbo_dom_parser::rtdom::tree::Handle;
+use turbo_dom_parser::rtdom::Tree;
 use turbo_surf_core::url::resolve;
 
 const ELEMENT_NODE: u8 = 1;

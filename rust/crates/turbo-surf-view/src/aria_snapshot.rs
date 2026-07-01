@@ -5,8 +5,8 @@
 
 use crate::ax::{ax_subtree, AxNode};
 use regex::Regex;
-use turbo_dom_parser::rtdom::Tree;
 use turbo_dom_parser::rtdom::tree::Handle;
+use turbo_dom_parser::rtdom::Tree;
 
 const GENERIC: &str = "generic";
 

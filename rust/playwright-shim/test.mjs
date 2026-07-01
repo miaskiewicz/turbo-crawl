@@ -161,10 +161,20 @@ test("locator-scoped actions (G3)", async () => {
   assert.equal(await page.locator("#c").isChecked(), false);
 });
 
+test("page.screenshot renders a synthetic PNG (no browser)", async () => {
+  const page = newPage();
+  await page.setContent("<button>x</button>");
+  const png = await page.screenshot();
+  assert.ok(Buffer.isBuffer(png) && png.length > 0);
+  // PNG magic.
+  assert.deepEqual([...png.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47]);
+  const svg = await page.screenshot({ type: "svg" });
+  assert.match(svg.toString("utf8"), /^<svg/);
+});
+
 test("honest-throws for pixel APIs (G5)", async () => {
   const page = newPage();
   await page.setContent("<button>x</button>");
-  await assert.rejects(() => page.screenshot(), /unavailable/);
   await assert.rejects(() => page.pdf(), /unavailable/);
   await assert.rejects(() => page.locator("button").screenshot(), /unavailable/);
   // boundingBox returns null (no layout engine → unmeasurable), matching Playwright's

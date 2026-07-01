@@ -22,9 +22,11 @@
 mod errors;
 
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 use serde_json::Value;
 use turbo_dom_parser::rtdom::serialize::serialize_inner;
 use turbo_dom_parser::rtdom::Tree;
+use turbo_surf_raster as raster;
 use turbo_surf_view as view;
 use view::{Field, FieldType, QueryType};
 
@@ -37,7 +39,7 @@ fn to_json_string<T: serde::Serialize>(v: &T) -> String {
 /// The package version (matches the crate / wheel version).
 #[pyfunction]
 fn version() -> &'static str {
-    "0.2.7"
+    "0.3.0"
 }
 
 // --- view passes (parse + read; one parse per call) -------------------------
@@ -55,6 +57,38 @@ fn markdown(html: &str, base_url: String) -> String {
 fn text(html: &str) -> String {
     let tree = Tree::parse(html);
     view::text(&tree, tree.root())
+}
+
+// --- synthetic screenshots (no browser) --------------------------------------
+
+fn viewport(width: Option<u32>, height: Option<u32>) -> raster::Viewport {
+    let d = raster::Viewport::DEFAULT;
+    raster::Viewport {
+        width: width.unwrap_or(d.width),
+        height: height.unwrap_or(d.height),
+    }
+}
+
+/// A synthetic PNG screenshot of `html` — native layout + paint, no browser.
+/// `width`/`height` default to a 1280×800 viewport. Returns PNG `bytes`.
+#[pyfunction]
+#[pyo3(signature = (html, width=None, height=None))]
+fn screenshot<'py>(
+    py: Python<'py>,
+    html: &str,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let bytes =
+        raster::screenshot_png(html, viewport(width, height)).map_err(TurboSurfError::new_err)?;
+    Ok(PyBytes::new(py, &bytes))
+}
+
+/// A synthetic SVG screenshot of `html` (no browser) → the SVG document `str`.
+#[pyfunction]
+#[pyo3(signature = (html, width=None, height=None))]
+fn screenshot_svg(html: &str, width: Option<u32>, height: Option<u32>) -> PyResult<String> {
+    raster::screenshot_svg(html, viewport(width, height)).map_err(TurboSurfError::new_err)
 }
 
 /// The document `<title>` (trimmed; empty if none).
@@ -209,6 +243,8 @@ fn register_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(markdown, m)?)?;
     m.add_function(wrap_pyfunction!(text, m)?)?;
+    m.add_function(wrap_pyfunction!(screenshot, m)?)?;
+    m.add_function(wrap_pyfunction!(screenshot_svg, m)?)?;
     m.add_function(wrap_pyfunction!(title, m)?)?;
     m.add_function(wrap_pyfunction!(html, m)?)?;
     m.add_function(wrap_pyfunction!(links, m)?)?;

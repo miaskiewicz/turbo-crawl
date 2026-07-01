@@ -8,6 +8,7 @@
 //! Action tools (click/fill/submit) need the navigation state machine and land
 //! with the tier-2 `Page` wiring.
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use turbo_dom_parser::rtdom::serialize::serialize_inner;
@@ -20,10 +21,11 @@ use turbo_surf_core::fingerprint;
 use turbo_surf_core::net::{fetch_html, FetchOptions};
 use turbo_surf_core::robots::{RobotsCache, RobotsFetcher};
 use turbo_surf_page::{batch as batch_urls, TurboNavigator};
+use turbo_surf_raster as raster;
 use turbo_surf_view as view;
 use view::{Field, FieldType, QueryType, TextMode};
 
-pub const VERSION: &str = "0.2.7";
+pub const VERSION: &str = "0.3.0";
 
 /// One agent session: the current page URL + parsed tree + nav history, plus the
 /// browser-ish state agents expect (UA / extra headers / cookie jar / JS mode) and
@@ -49,6 +51,9 @@ pub struct Session {
     /// Render-tier navigator fingerprint overrides (JSON object), applied via
     /// `set_fingerprint`. Empty = Chrome 149 defaults.
     fingerprint: String,
+    /// Layout viewport for `screenshot` (and any future geometry). Defaults to a
+    /// common desktop size; overridable via `set_viewport` or per-call args.
+    viewport: raster::Viewport,
 }
 
 impl Session {
@@ -277,7 +282,11 @@ impl Session {
     }
 
     // Mutate a control located by selector; returns the new title (or ok).
-    fn mutate<F: FnOnce(&mut Tree, Handle)>(&mut self, selector: &str, f: F) -> Result<Value, String> {
+    fn mutate<F: FnOnce(&mut Tree, Handle)>(
+        &mut self,
+        selector: &str,
+        f: F,
+    ) -> Result<Value, String> {
         let tree = self.tree_mut()?;
         let h = tree
             .query_selector(selector)
@@ -501,6 +510,56 @@ impl Session {
         turbo_surf_render::set_fingerprint(&json);
         self.fingerprint = json.clone();
         Ok(json!({ "ok": true, "fingerprint": overrides.clone() }))
+    }
+
+    // Set the session's default layout viewport (px). Zero/absent dimensions are
+    // left unchanged. Drives `screenshot` layout when a call omits its own size.
+    fn set_viewport(&mut self, args: &Value) -> Result<Value, String> {
+        if let Some(w) = arg_u32(args, "width") {
+            self.viewport.width = w;
+        }
+        if let Some(h) = arg_u32(args, "height") {
+            self.viewport.height = h;
+        }
+        Ok(json!({ "viewport": { "width": self.viewport.width, "height": self.viewport.height } }))
+    }
+
+    // Render an HTML snapshot into an image (no browser). `snapshot` selects a
+    // hydration-trail entry (index into the rendered-DOM history); omitted =
+    // the current page. `format` is "png" (default) or "svg". `width`/`height`
+    // override the session viewport for this call only. PNG comes back base64
+    // (MCP transports JSON text), SVG as the document string.
+    fn screenshot(&self, args: &Value) -> Result<Value, String> {
+        let html = match args.get("snapshot").and_then(Value::as_u64) {
+            Some(i) => self.dom_history.get(i as usize).cloned().ok_or_else(|| {
+                format!(
+                    "screenshot: snapshot {i} out of range (have {})",
+                    self.dom_history.len()
+                )
+            })?,
+            None => serialize_doc(self.tree()?),
+        };
+        let vp = raster::Viewport {
+            width: arg_u32(args, "width").unwrap_or(self.viewport.width),
+            height: arg_u32(args, "height").unwrap_or(self.viewport.height),
+        };
+        match arg_str(args, "format").unwrap_or("png") {
+            "svg" => {
+                let svg = raster::screenshot_svg(&html, vp)?;
+                Ok(json!({
+                    "format": "svg", "mimeType": "image/svg+xml",
+                    "width": vp.width, "height": vp.height, "svg": svg,
+                }))
+            }
+            "png" => {
+                let png = raster::screenshot_png(&html, vp)?;
+                Ok(json!({
+                    "format": "png", "mimeType": "image/png",
+                    "width": vp.width, "height": vp.height, "base64": BASE64.encode(&png),
+                }))
+            }
+            other => Err(format!("screenshot: unknown format '{other}' (png|svg)")),
+        }
     }
 
     // Report the active stealth posture: the per-host fingerprint profile this
@@ -829,6 +888,17 @@ pub fn tools() -> Value {
         ("latest_dom", "Most recent rendered HTML"),
         ("dom_history", "Rendered-HTML history trail"),
         (
+            "screenshot",
+            "Synthetic screenshot of the current page or a hydration-trail \
+             snapshot — native layout+paint, no browser. Args: format (png|svg), \
+             snapshot? (dom_history index), width?/height? (override viewport). \
+             PNG returns base64; SVG returns the document string.",
+        ),
+        (
+            "set_viewport",
+            "Set the default layout viewport (width/height px) used by screenshot",
+        ),
+        (
             "run_playwright",
             "Execute a Playwright-style script (page/locator/getBy*/expect, test() blocks) with config (script, url?, testIdAttribute?) over the engine — no browser",
         ),
@@ -863,6 +933,14 @@ pub fn tools() -> Value {
 
 fn arg_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key).and_then(Value::as_str)
+}
+
+/// A positive integer argument as `u32` (`0` and non-numbers yield `None`).
+fn arg_u32(args: &Value, key: &str) -> Option<u32> {
+    args.get(key)
+        .and_then(Value::as_u64)
+        .filter(|&n| n > 0)
+        .map(|n| n.min(u32::MAX as u64) as u32)
 }
 
 /// Run a tool by name, returning its result value (the caller wraps it in the
@@ -931,6 +1009,8 @@ pub async fn call_tool(session: &mut Session, name: &str, args: &Value) -> Resul
         "set_fingerprint" => session.set_fingerprint(args.get("overrides").unwrap_or(args)),
         "latest_dom" => Ok(json!(session.dom_history.last())),
         "dom_history" => Ok(json!(session.dom_history)),
+        "screenshot" => session.screenshot(args),
+        "set_viewport" => session.set_viewport(args),
         "run_playwright" => tool_run_playwright(session, args).await,
         "requests" => Ok(json!(session.requests)),
         // --- session / network ---

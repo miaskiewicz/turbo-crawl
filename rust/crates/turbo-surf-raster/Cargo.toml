@@ -1,0 +1,18 @@
+[package]
+name = "turbo-surf-raster"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "turbo-surf synthetic screenshot tier: HTML snapshot → layout → PNG/SVG, no browser"
+
+[dependencies]
+# The layout + style + font engine (from turbo-html2pdf, on crates.io). We
+# consume only its public HTML→Fragment drive (`layout_html`) + the `Fragment`
+# display list and paint it ourselves; no PDF code is pulled onto the hot path.
+turbo-html2pdf-core = "0.2.4"
+# Raster canvas + PNG encode (Pixmap::encode_png, default `png-format` feature).
+tiny-skia = "0.11"
+# Glyph outlines: we parse `FontFace::data()` bytes independently to trace each
+# glyph into a fill path (both the PNG and SVG painters share the trace).
+ttf-parser = "0.25"

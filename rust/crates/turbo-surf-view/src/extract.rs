@@ -11,8 +11,8 @@
 use crate::aria::{accessible_name, implicit_role};
 use crate::visible::is_visible;
 use std::collections::HashSet;
-use turbo_dom_parser::rtdom::Tree;
 use turbo_dom_parser::rtdom::tree::Handle;
+use turbo_dom_parser::rtdom::Tree;
 use turbo_surf_core::url::{is_http_url, resolve};
 
 const INTERACTIVE_SELECTOR: &str = "a[href],button,input,select,textarea,[role=button],[role=link],[role=checkbox],[role=tab],[role=menuitem],[contenteditable],[tabindex],[onclick]";

@@ -35,6 +35,11 @@ jobs:
       - run: cargo publish -p turbo-surf-render
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      # turbo-surf-raster deps turbo-html2pdf-core (crates.io) + tiny-skia/ttf-parser;
+      # must publish before turbo-surf-mcp, which now depends on it.
+      - run: cargo publish -p turbo-surf-raster
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
       - run: cargo publish -p turbo-surf-mcp
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

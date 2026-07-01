@@ -3,8 +3,8 @@
 //! stay on one line; block elements break; `<br>`/`<hr>` break; `<pre>` is
 //! preserved. Raw reading text for embeddings/summarization (no markdown syntax).
 
-use turbo_dom_parser::rtdom::Tree;
 use turbo_dom_parser::rtdom::tree::Handle;
+use turbo_dom_parser::rtdom::Tree;
 
 const ELEMENT_NODE: u8 = 1;
 const TEXT_NODE: u8 = 3;

@@ -6,8 +6,8 @@
 
 use crate::aria::{accessible_name, role_of, text_of};
 use std::collections::HashSet;
-use turbo_dom_parser::rtdom::Tree;
 use turbo_dom_parser::rtdom::tree::Handle;
+use turbo_dom_parser::rtdom::Tree;
 
 const ELEMENT_NODE: u8 = 1;
 
@@ -103,7 +103,12 @@ pub fn by_attr_text(tree: &Tree, attr: &str, want: &str, mode: TextMode) -> Vec<
 }
 
 // Controls a <label> labels: for=/id, aria-labelledby back-refs, wrapped input.
-fn collect_label_targets(tree: &Tree, label: Handle, out: &mut Vec<Handle>, seen: &mut HashSet<Handle>) {
+fn collect_label_targets(
+    tree: &Tree,
+    label: Handle,
+    out: &mut Vec<Handle>,
+    seen: &mut HashSet<Handle>,
+) {
     if let Some(for_id) = tree.get_attribute(label, "for") {
         if let Some(t) = tree.get_element_by_id(for_id) {
             push_unique(out, seen, t);

@@ -21,12 +21,13 @@ use turbo_dom_parser::rtdom::Tree;
 use turbo_surf_core::crawl::{crawl as run_crawl, CrawlOptions, Record};
 use turbo_surf_core::net::{build_client, fetch_html as net_fetch, FetchOptions};
 use turbo_surf_page::TurboNavigator;
+use turbo_surf_raster as raster;
 use turbo_surf_view as view;
 use view::{Field, FieldType, QueryType, TextMode};
 
 #[napi]
 pub fn version() -> String {
-    "0.2.7".to_string()
+    "0.3.0".to_string()
 }
 
 fn to_json_string<T: serde::Serialize>(v: &T) -> String {
@@ -62,6 +63,33 @@ fn parsed(html: &str) -> std::rc::Rc<Tree> {
 pub fn markdown(html: String, base_url: String) -> String {
     let tree = parsed(&html);
     view::markdown(&tree, tree.root(), &base_url)
+}
+
+// --- synthetic screenshots (no browser) --------------------------------------
+// Render an HTML snapshot into an image via the native layout+paint tier. The
+// viewport width drives CSS layout; `width`/`height` default to the standard
+// desktop viewport when omitted, so a caller can pass nothing for the default.
+
+fn viewport(width: Option<u32>, height: Option<u32>) -> raster::Viewport {
+    let d = raster::Viewport::DEFAULT;
+    raster::Viewport {
+        width: width.unwrap_or(d.width),
+        height: height.unwrap_or(d.height),
+    }
+}
+
+/// PNG screenshot of `html` at the given (or default) viewport → `Buffer`.
+#[napi]
+pub fn screenshot(html: String, width: Option<u32>, height: Option<u32>) -> Result<Buffer> {
+    raster::screenshot_png(&html, viewport(width, height))
+        .map(Buffer::from)
+        .map_err(Error::from_reason)
+}
+
+/// SVG screenshot of `html` at the given (or default) viewport → document string.
+#[napi]
+pub fn screenshot_svg(html: String, width: Option<u32>, height: Option<u32>) -> Result<String> {
+    raster::screenshot_svg(&html, viewport(width, height)).map_err(Error::from_reason)
 }
 
 #[napi]

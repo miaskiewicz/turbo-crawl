@@ -6,8 +6,8 @@
 
 use crate::dom_ops::text_of;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use turbo_dom_parser::rtdom::{DocumentExt, Tree};
 use turbo_dom_parser::rtdom::tree::Handle;
+use turbo_dom_parser::rtdom::{DocumentExt, Tree};
 use turbo_surf_core::url::resolve;
 use url::form_urlencoded;
 
@@ -134,7 +134,11 @@ fn control_pairs(tree: &Tree, h: Handle, submitter: Option<Handle>) -> Vec<(Stri
 
 /// A form's successful controls as `[name, value]` pairs. `submitter` (the
 /// activated submit button), if named, contributes its name/value.
-pub fn serialize_form(tree: &Tree, form: Handle, submitter: Option<Handle>) -> Vec<(String, String)> {
+pub fn serialize_form(
+    tree: &Tree,
+    form: Handle,
+    submitter: Option<Handle>,
+) -> Vec<(String, String)> {
     let controls: Vec<Handle> = tree
         .node(form)
         .query_selector_all("input,select,textarea,button")
@@ -270,7 +274,12 @@ pub fn click_intent(tree: &Tree, h: Handle, base: &str) -> ClickIntent {
 }
 
 /// Build the navigation a form submit produces.
-pub fn build_submission(tree: &Tree, form: Handle, base: &str, submitter: Option<Handle>) -> Submission {
+pub fn build_submission(
+    tree: &Tree,
+    form: Handle,
+    base: &str,
+    submitter: Option<Handle>,
+) -> Submission {
     let action = form_action_url(tree, form, base);
     let pairs = serialize_form(tree, form, submitter);
     if form_method(tree, form) == "GET" {

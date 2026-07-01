@@ -7,8 +7,8 @@
 //! selected `<option>`).
 
 use serde::Serialize;
-use turbo_dom_parser::rtdom::Tree;
 use turbo_dom_parser::rtdom::tree::Handle;
+use turbo_dom_parser::rtdom::Tree;
 
 const ELEMENT_NODE: u8 = 1;
 const SKIP: &[&str] = &[
