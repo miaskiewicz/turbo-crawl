@@ -59,8 +59,10 @@ size + redirect caps, HTTP/2 + a pooled client, 304 conditional cache), crawl
 orchestration (global + per-host concurrency, token-bucket politeness, backoff/retry,
 canonical dedupe, depth/page caps), structured extraction, CSS+XPath query, a
 no-Chromium JS render tier (a true V8 isolate over the native DOM) with re-enterable
-live-heap `eval_js`/`inject_js` + a DOM-history trail, and a 60-tool MCP server
-(native binary). Benchmarked against real browsers + other crawlers (below).
+live-heap `eval_js`/`inject_js` + a DOM-history trail, **synthetic screenshots**
+(PNG/SVG from a native layout+paint of any HTML snapshot — still no browser), and a
+60-tool MCP server (native binary). Benchmarked against real browsers + other
+crawlers (below).
 
 ## Install
 
@@ -84,7 +86,7 @@ turbo-surf publishes from **one `v*` git tag** to two registries (see
 |---|---|---|---|
 | [`turbo-surf`](https://www.npmjs.com/package/turbo-surf) | **npm** | A thin launcher (`cli.js`/`index.js`) **+ prebuilt `turbo-surf-mcp` binaries** for each platform in `bin/` (darwin x64/arm64, linux x64/arm64-gnu, win x64). `npx` resolves the right one and spawns it. | Running the **MCP server** / CLI. No Rust toolchain, no Chromium, no Node hosting Rust. |
 | [`turbo-surf`](https://pypi.org/project/turbo-surf/) | **PyPI** | A PyO3 binding, shipped as prebuilt abi3 wheels (CPython 3.8+) for Linux (x86_64/aarch64), macOS (arm64), Windows (x64). | Calling the engine **from Python** — `markdown`/`text`/`links`/`extract`/`render`/…. No Rust toolchain, no Chromium. |
-| `turbo-surf-core`, `-view`, `-page`, `-render`, `-mcp` | **crates.io** | The Rust crates, in dependency order. | **Embedding** the engine in a Rust program. |
+| `turbo-surf-core`, `-view`, `-page`, `-render`, `-raster`, `-mcp` | **crates.io** | The Rust crates, in dependency order (`-raster` = the synthetic screenshot tier). | **Embedding** the engine in a Rust program. |
 
 The `turbo-surf-napi` cdylib and `turbo-surf-transform` crate are **not**
 published — napi is for the dev harness + the Playwright shim only. The Playwright
